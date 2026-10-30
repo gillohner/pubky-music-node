@@ -13996,4 +13996,287 @@ exec sleep 300
             "an unmatched song takes tags that wait: {tg}"
         );
     }
+
+    /// Identify library as a ladder (owner, 2026-10-30: too slow on the NUC): a folder that is an
+    /// album is identified from one MusicBrainz search and one release lookup, without decoding
+    /// a file; only what doesn't fit (a bonus track, a compilation folder of mixed artists) is
+    /// fingerprinted. A fingerprint an earlier run looked up agrees (higher confidence) or names
+    /// another song (both go to the owner).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn identify_matches_album_folders_and_fingerprints_only_the_rest() {
+        const REL_A: &str = "1a5b6a49-4c4f-4d18-9e3d-1c4d1b0a7a3e";
+        const REL_O: &str = "2b6c7b5a-5d5a-4e29-8f4e-2d5e2c1b8b4f";
+        const ELSE: &str = "3c7d8c6b-6e6b-4f3a-9a5f-3e6f3d2c9c5a";
+        const REL_V: &str = "4d8e9d7c-7f7c-4a4b-8b6a-4f7a4e3d0d6b";
+        let rec = |i: u32| format!("00000000-0000-4000-8000-{i:012}");
+        let counter = || Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (searches, lookups, recordings, acoustid) = (counter(), counter(), counter(), counter());
+        let n = |c: &Arc<std::sync::atomic::AtomicUsize>| c.load(std::sync::atomic::Ordering::SeqCst);
+        // A release of `count` tracks "Song i" (Other: "Take i"), each 200 + i seconds
+        let tracklist = move |id: &str, title: &str, word: &str, count: u32, base: u32| {
+            serde_json::json!({"id": id, "title": title, "media": [{"position": 1, "tracks": (1..=count).map(|i| serde_json::json!({
+                "position": i, "title": format!("{word} {i}"), "length": (200 + i) * 1000,
+                "recording": {"id": rec(base + i)}
+            })).collect::<Vec<_>>()}]})
+        };
+        let (a, o, v) = (
+            tracklist(REL_A, "Album", "Song", 4, 0),
+            tracklist(REL_O, "Other", "Take", 3, 10),
+            tracklist(REL_V, "Summer Mix", "Anthem", 2, 20),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mock = {
+            let (searches, lookups, recordings, acoustid) = (
+                searches.clone(),
+                lookups.clone(),
+                recordings.clone(),
+                acoustid.clone(),
+            );
+            Router::new()
+                .route(
+                    "/ws/2/release",
+                    get(
+                        move |Query(q): Query<std::collections::HashMap<String, String>>| {
+                            searches.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            let query = q.get("query").cloned().unwrap_or_default();
+                            let (id, title, count, credit) =
+                                if query.starts_with("release:\"Album\" AND artist:\"Band\"") {
+                                    (REL_A, "Album", 4, "Band")
+                                } else if query.starts_with("release:\"Other\" AND artist:\"Band\"") {
+                                    (REL_O, "Other", 3, "Band")
+                                } else if query
+                                    .starts_with("release:\"Summer Mix\" AND artist:\"Various Artists\"")
+                                {
+                                    (REL_V, "Summer Mix", 2, "Various Artists")
+                                } else {
+                                    panic!("unexpected release search {query}")
+                                };
+                            async move {
+                                Json(
+                                    serde_json::json!({"releases": [{"id": id, "score": 100, "title": title,
+                                "track-count": count, "artist-credit": [{"name": credit}]}]}),
+                                )
+                            }
+                        },
+                    ),
+                )
+                .route(
+                    "/ws/2/release/{id}",
+                    get(move |Path(id): Path<String>| {
+                        lookups.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        let r = match id.as_str() {
+                            REL_A => a.clone(),
+                            REL_O => o.clone(),
+                            _ => v.clone(),
+                        };
+                        async move { Json(r) }
+                    }),
+                )
+                .route(
+                    "/ws/2/recording",
+                    get(move || {
+                        recordings.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        async { Json(serde_json::json!({"recordings": []})) }
+                    }),
+                )
+                .route(
+                    "/v2/lookup",
+                    post(move || {
+                        acoustid.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        async { Json(serde_json::json!({"status": "ok", "results": []})) }
+                    }),
+                )
+        };
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        s.set_contact("tests@example.org").unwrap();
+        *s.mb_base.write().unwrap() = format!("http://127.0.0.1:{port}/ws/2");
+        *s.acoustid.write().unwrap() = identify::AcoustIdSettings {
+            api_key: "test-key".into(),
+            base_url: format!("http://127.0.0.1:{port}"),
+            configured: String::new(),
+        };
+        // Every file its own audio (the fingerprint cache is by content)
+        let mut secs = 1;
+        let mut add =
+            |folder: &str, title: &str, artist: &str, album: (&str, Option<&str>), no: u32, ms: u64| {
+                let dir = dir.path().join("music").join(folder);
+                std::fs::create_dir_all(&dir).unwrap();
+                let path = dir.join(format!("{no:02} {title}.wav"));
+                tone_wav(&path, secs);
+                secs += 1;
+                let mut t = untagged_track(path.clone(), title, artist);
+                t.track_no = Some(no);
+                t.disc_no = None;
+                t.duration_ms = Some(ms);
+                t.album = Some(pm_model::Album {
+                    id: None,
+                    title: album.0.into(),
+                    album_artist: album.1.map(str::to_string),
+                    release_mbid: None,
+                    release_group_mbid: None,
+                    year: None,
+                    upc: None,
+                    total_discs: None,
+                });
+                let id = s.library.lock().unwrap().upsert_track(&t).unwrap();
+                (id.0, path)
+            };
+        // The album, ripped a second longer than MusicBrainz says
+        let album: Vec<(i64, std::path::PathBuf)> = (1..=4)
+            .map(|i| {
+                add(
+                    "Band/Album",
+                    &format!("Song {i}"),
+                    "Band",
+                    ("Album (Remastered)", Some("Band")),
+                    i,
+                    (201 + i as u64) * 1000,
+                )
+            })
+            .collect();
+        // Another album with a bonus track MusicBrainz's release hasn't
+        let mut other: Vec<(i64, std::path::PathBuf)> = (1..=3)
+            .map(|i| {
+                add(
+                    "Band/Other",
+                    &format!("Take {i}"),
+                    "Band",
+                    ("Other", Some("Band")),
+                    i,
+                    (200 + i as u64) * 1000,
+                )
+            })
+            .collect();
+        other.push(add(
+            "Band/Other",
+            "Demo",
+            "Band",
+            ("Other", Some("Band")),
+            4,
+            150_000,
+        ));
+        // A compilation folder of mixed artists, as the scanner stores it ("Various Artists"); a
+        // compilation of that name on MusicBrainz has other songs
+        let mix: Vec<(i64, std::path::PathBuf)> = (1..=2)
+            .map(|i| {
+                add(
+                    "Mix",
+                    &format!("Hit {i}"),
+                    &format!("Artist {i}"),
+                    ("Summer Mix", Some("Various Artists")),
+                    i,
+                    180_000,
+                )
+            })
+            .collect();
+        // An earlier run's fingerprints: song 1 sounds like another song, song 2 like itself
+        let cached = |path: &std::path::Path, recording: &str, title: &str| {
+            let key = Library::file_key(path).unwrap();
+            let lib = s.library.lock().unwrap();
+            lib.save_fingerprint(&key, 3, "AQfake").unwrap();
+            let answer = serde_json::json!({"status": "ok", "results": [{"id": "9ff43b6a-4f16-427c-93c2-92307ca505e0",
+                "score": 0.95, "recordings": [{"id": recording, "title": title}]}]});
+            lib.save_lookup(&key, &answer.to_string()).unwrap();
+        };
+        cached(&album[0].1, ELSE, "Something Else");
+        cached(&album[1].1, &rec(2), "Song 2");
+        // Started and watched as the page does: the status answers all along
+        let app = router(s.clone());
+        let (st, _) = call(&app, "POST", "/v1/library/identify", Some(serde_json::json!({}))).await;
+        assert_eq!(st, StatusCode::OK);
+        let watch = async {
+            loop {
+                let (_, st) = call(&app, "GET", "/v1/library/identify", None).await;
+                if st["progress"]["running"] == false {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(60), watch)
+            .await
+            .expect("the status keeps answering and the run ends");
+
+        // One search and one lookup per album (the mix too); no fingerprint for a song its
+        // folder settled
+        assert_eq!((n(&searches), n(&lookups)), (3, 3));
+        assert_eq!(n(&acoustid), 3, "the bonus track and the compilation's two songs");
+        // The search by tags for what nothing found (with the length, then without)
+        assert_eq!(n(&recordings), 6);
+        let track = |id: i64| {
+            s.library
+                .lock()
+                .unwrap()
+                .get_track(pm_model::TrackId(id))
+                .unwrap()
+                .unwrap()
+        };
+        for (i, (id, _)) in album.iter().enumerate().skip(1) {
+            let (uri, conf) = track(*id).canonical.expect("identified by its folder");
+            assert_eq!(
+                uri.to_url(),
+                format!("https://musicbrainz.org/recording/{}", rec(i as u32 + 1))
+            );
+            let pm_model::Confidence::AlbumFit { score } = conf else {
+                panic!("{conf:?}")
+            };
+            if i == 1 {
+                assert!(score > 0.98, "the fingerprint agrees: {score}");
+            } else {
+                assert!((score - 0.95).abs() < 1e-6, "{score}");
+            }
+        }
+        for (i, (id, _)) in other.iter().take(3).enumerate() {
+            let (uri, _) = track(*id).canonical.expect("identified by its folder");
+            assert_eq!(
+                uri.to_url(),
+                format!("https://musicbrainz.org/recording/{}", rec(11 + i as u32))
+            );
+        }
+        // The bonus track and the mix: fingerprinted, searched for by their tags, nothing found
+        // (looked at, no suggestion: only a retry looks again)
+        let ids = |retry: bool| -> Vec<i64> {
+            let lib = s.library.lock().unwrap();
+            let todo = lib.tracks_to_identify(retry).unwrap();
+            todo.iter().filter_map(|t| t.id.map(|i| i.0)).collect()
+        };
+        let (again, new) = (ids(true), ids(false));
+        for (id, _) in other.iter().skip(3).chain(&mix) {
+            assert!(track(*id).canonical.is_none());
+            assert!(again.contains(id) && !new.contains(id), "{id} ends unknown");
+        }
+        // The folder and the fingerprint disagree on song 1: the owner decides
+        assert!(track(album[0].0).canonical.is_none());
+        let (_, sug) = call(&app, "GET", "/v1/library/suggestions", None).await;
+        let mut sources: Vec<(String, String)> = sug
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| {
+                (
+                    x["source"].as_str().unwrap().to_string(),
+                    x["recording_mbid"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect();
+        sources.sort();
+        assert_eq!(
+            sources,
+            vec![("album".into(), rec(1)), ("fingerprint".into(), ELSE.into())]
+        );
+        assert!(sug
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|x| x["track_id"] == album[0].0));
+        let (_, st) = call(&app, "GET", "/v1/library/identify", None).await;
+        assert_eq!(st["counts"]["by"]["album"], 6, "{st}");
+        assert_eq!(st["progress"]["identified_by"]["album_fit"], 6, "{st}");
+        assert_eq!(st["progress"]["done"], 10, "{st}");
+        assert_eq!(st["progress"]["unknown"], 3, "{st}");
+        assert_eq!(st["progress"]["suggested"], 1, "{st}");
+    }
 }
