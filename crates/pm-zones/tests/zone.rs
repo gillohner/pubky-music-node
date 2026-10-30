@@ -185,6 +185,12 @@ struct Recorder {
     opens: Mutex<u64>,
     flushes: Mutex<u64>,
     drains: Mutex<u64>,
+    /// The sink pauses its device itself (UPnP, BluOS) instead of discarding its queue.
+    device_pause: std::sync::atomic::AtomicBool,
+    /// The next resume fails (the device dropped the stream during the pause).
+    fail_resume: std::sync::atomic::AtomicBool,
+    pauses: Mutex<u64>,
+    resumes: Mutex<u64>,
 }
 
 struct RecOutput {
@@ -246,6 +252,20 @@ impl AudioSink for RecSink {
     }
     fn drain(&mut self) -> Result<(), SinkError> {
         *self.rec.drains.lock().unwrap() += 1;
+        Ok(())
+    }
+    fn pause(&mut self) -> Result<(), SinkError> {
+        if !self.rec.device_pause.load(Ordering::SeqCst) {
+            return self.flush();
+        }
+        *self.rec.pauses.lock().unwrap() += 1;
+        Ok(())
+    }
+    fn resume(&mut self) -> Result<(), SinkError> {
+        *self.rec.resumes.lock().unwrap() += 1;
+        if self.rec.fail_resume.swap(false, Ordering::SeqCst) {
+            return Err(SinkError::Device("listener went away during the pause".into()));
+        }
         Ok(())
     }
     fn frames_written(&self) -> u64 {
@@ -436,6 +456,62 @@ async fn pause_resume_seek_positions() {
             "pause:40",
             "resume",
             "seek:60",
+            "end:a",
+            "stopped"
+        ]
+    );
+}
+
+/// A sink whose device buffers (UPnP, BluOS) is told to pause, not flushed: the renderer stops
+/// at once instead of playing out seconds of buffer (NUC, 2026-10-30). A resume it cannot carry
+/// on (the device hung up during the pause) opens the output again at the paused position.
+#[tokio::test]
+async fn pause_pauses_the_device_and_a_failed_resume_reopens_the_output() {
+    let mut r = rig(&[("a", RATE, 1000)]);
+    r.rec.device_pause.store(true, Ordering::SeqCst);
+    r.zone.enqueue(vec![QueueItem::new("a")], Insert::End);
+    r.zone.play();
+    r.gate.allow(3);
+    wait_for(|| r.rec.samples.lock().unwrap().len() == 300).await;
+    r.gate.blocked().await;
+    r.zone.pause();
+    r.gate.allow(1);
+    let mut w = r.zone.watch();
+    w.wait_for(|s| s.transport == Transport::Paused).await.unwrap();
+    assert_eq!(*r.rec.pauses.lock().unwrap(), 1);
+    assert_eq!(*r.rec.flushes.lock().unwrap(), 0, "the device keeps its buffer");
+
+    // Resume: the device carries on, same sink
+    r.zone.play();
+    w.wait_for(|s| s.transport == Transport::Playing).await.unwrap();
+    assert_eq!(*r.rec.resumes.lock().unwrap(), 1);
+    r.gate.blocked().await;
+    r.zone.pause();
+    r.gate.allow(1);
+    w.wait_for(|s| s.transport == Transport::Paused).await.unwrap();
+    assert_eq!(r.zone.state().now_playing.unwrap().position_ms, 50);
+
+    // The device dropped the stream meanwhile: a fresh sink, from the paused position
+    r.rec.fail_resume.store(true, Ordering::SeqCst);
+    r.zone.play();
+    w.wait_for(|s| s.transport == Transport::Playing).await.unwrap();
+    assert_eq!(*r.rec.opens.lock().unwrap(), 2, "the output opened again");
+    r.gate.allow(1000);
+    let st = r.zone.wait_stopped().await;
+    assert_eq!(st.error, None);
+    assert_eq!(
+        *r.rec.samples.lock().unwrap(),
+        frames(0, 1000),
+        "nothing lost, nothing twice"
+    );
+    assert_eq!(
+        kinds(&drain_events(&mut r.events)),
+        [
+            "start:a:false",
+            "pause:40",
+            "resume",
+            "pause:50",
+            "resume",
             "end:a",
             "stopped"
         ]

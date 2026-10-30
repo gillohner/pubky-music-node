@@ -123,6 +123,21 @@ pub trait AudioSink: Send {
     /// without gapless, or clean stop).
     fn drain(&mut self) -> Result<(), SinkError>;
 
+    /// Pause: silence now. The default discards the queued audio ([`Self::flush`]); a sink
+    /// whose device buffers seconds of a stream it fetches (a UPnP renderer, a BluOS player)
+    /// tells the device to pause instead, so it stops at once and keeps its buffer for
+    /// [`Self::resume`]. The zone writes nothing while paused.
+    fn pause(&mut self) -> Result<(), SinkError> {
+        self.flush()
+    }
+
+    /// Carry on after [`Self::pause`]. An error means the sink cannot carry on (the device
+    /// dropped the stream during a long pause, or refused to play): the zone opens the output
+    /// again at the paused position.
+    fn resume(&mut self) -> Result<(), SinkError> {
+        Ok(())
+    }
+
     /// Frames written so far, for position reporting.
     fn frames_written(&self) -> u64;
 

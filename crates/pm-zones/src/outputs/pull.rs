@@ -377,6 +377,8 @@ impl PullOutput {
             shared: self.shared.clone(),
             clock: None,
             paced: self.paced,
+            held: None,
+            controlled: self.controlled,
         }))
     }
 }
@@ -391,6 +393,11 @@ struct PullSink {
     /// When the current run started (first write after open or a flush), and `written` then.
     clock: Option<(Instant, u64)>,
     paced: bool,
+    /// How far ahead of real time the stream was when it paused, for the pacing after it.
+    held: Option<Duration>,
+    /// The fetcher is a renderer the node controls ([`PullOutput::controlled`]): its sink
+    /// pauses the device, which keeps its buffer over the pause.
+    controlled: bool,
 }
 
 /// A WAV header for a stream of unknown length: RIFF and data sizes set to the maximum, as
@@ -532,6 +539,44 @@ impl AudioSink for PullSink {
 
     fn flush(&mut self) -> Result<(), SinkError> {
         self.clock = None;
+        Ok(())
+    }
+
+    /// The stream holds still: what the listener has not read yet stays in the channel for
+    /// after [`Self::resume`]. A controlled renderer pauses with its buffer full (its sink sends
+    /// the device's own Pause), so how far ahead of real time the stream was is kept: the
+    /// pacing then does not let it take another [`PACE_AHEAD`] on top, which would make the end
+    /// of the queue stop it before it played its last seconds. A plain listener plays its
+    /// buffer out meanwhile, so it starts afresh.
+    fn pause(&mut self) -> Result<(), SinkError> {
+        self.held = self.controlled.then(|| self.ahead());
+        self.clock = None;
+        Ok(())
+    }
+
+    /// A renderer may hang up during a long pause and fetch the stream again when told to play
+    /// (a BluOS player does): the wait for it to come back starts now, not when it left. A
+    /// stream that cannot go on (aborted, closed) is an error: the zone opens the output again.
+    fn resume(&mut self) -> Result<(), SinkError> {
+        if let Some(e) = self.aborted() {
+            return Err(e);
+        }
+        if self.tx.is_closed() {
+            return Err(SinkError::Device(format!(
+                "{}: listener went away during the pause",
+                self.id
+            )));
+        }
+        {
+            let mut slot = self.shared.slot.lock().expect("pull lock");
+            if slot.left.is_some_and(|(g, _)| g == self.generation) {
+                slot.left = Some((self.generation, Instant::now()));
+            }
+        }
+        if let Some(held) = self.held.take() {
+            let frames = (held.as_secs_f64() * f64::from(self.fmt.rate_hz.max(1))) as u64;
+            self.clock = Some((Instant::now(), self.written.saturating_sub(frames)));
+        }
         Ok(())
     }
 
@@ -858,6 +903,69 @@ mod tests {
         let e = sink.write(&block(fmt, 4)).unwrap_err();
         assert!(e.to_string().contains("refused Play"), "{e}");
         assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    /// A renderer paused by its own Pause keeps its buffer: after the resume the stream stays
+    /// [`PACE_AHEAD`] ahead in all, not that again on top. A plain listener played its buffer out
+    /// meanwhile, so its stream starts afresh.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_paused_renderer_is_not_sent_a_second_buffer_on_resume() {
+        let fmt = AudioFormat::pcm(44_100, 16, 1); // 44 100 frames = 1 s
+        for (out, held) in [
+            (PullOutput::controlled("ctl"), true),
+            (PullOutput::new("plain"), false),
+        ] {
+            let mut sink = out.open_now(fmt).unwrap();
+            let mut live = out.take_stream(Duration::from_secs(2)).await.unwrap();
+            let reader = tokio::spawn(async move { while live.next_chunk().await.is_some() {} });
+            let took = std::thread::spawn(move || {
+                // 5 s ahead at once: no wait yet
+                for _ in 0..5 {
+                    sink.write(&AudioBlock::pcm_i32(fmt, vec![0; 44_100])).unwrap();
+                }
+                sink.pause().unwrap();
+                sink.resume().unwrap();
+                let t = std::time::Instant::now();
+                sink.write(&AudioBlock::pcm_i32(fmt, vec![0; 44_100])).unwrap();
+                t.elapsed()
+            })
+            .join()
+            .unwrap();
+            if held {
+                assert!(took >= Duration::from_millis(700), "controlled: {took:?}");
+            } else {
+                assert!(took < Duration::from_millis(500), "plain: {took:?}");
+            }
+            reader.abort();
+        }
+    }
+
+    /// A renderer that hung up during a long pause gets the stream again when it is told to play:
+    /// the wait for it starts at the resume, so the first write after it does not fail at once.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_listener_that_left_during_a_long_pause_may_come_back_after_resume() {
+        let fmt = AudioFormat::pcm(44_100, 16, 2);
+        let out = Arc::new(PullOutput::controlled("long"));
+        let mut sink = out.open_now(fmt).unwrap();
+        drop(out.take_stream(Duration::from_secs(2)).await.unwrap());
+        let filled = std::thread::spawn(move || {
+            for i in 0..CHANNEL_CHUNKS as i32 {
+                sink.write(&block(fmt, i * 4)).unwrap();
+            }
+            sink.pause().unwrap();
+            sink
+        });
+        let mut sink = filled.join().unwrap();
+        tokio::time::sleep(REATTACH_GRACE + Duration::from_millis(200)).await;
+        sink.resume().unwrap();
+        let writer = std::thread::spawn(move || sink.write(&block(fmt, 9999)));
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let mut back = out.take_stream(Duration::from_secs(2)).await.expect("given back");
+        assert!(back.next_chunk().await.is_some());
+        writer
+            .join()
+            .unwrap()
+            .expect("the write waits for the listener to come back");
     }
 
     /// A listener that takes everything at once still gets it at about real time (5 s ahead at

@@ -401,9 +401,11 @@ impl Engine {
     fn pause(&mut self) {
         let pos = self.position_ms();
         self.cancel_crossfade();
+        // The sink silences the device itself where it buffers (UPnP, BluOS): only stopping the
+        // writes left a renderer playing its seconds of buffer after the press.
         if let Some(s) = self.sink.as_mut() {
-            if let Err(e) = s.flush() {
-                self.fail(format!("flush: {e}"));
+            if let Err(e) = s.pause() {
+                self.fail(format!("pause: {e}"));
                 return;
             }
         }
@@ -416,6 +418,23 @@ impl Engine {
     }
 
     fn resume(&mut self) {
+        if self.current.is_none() {
+            return;
+        }
+        // A sink that cannot carry on (its device dropped the stream during a long pause)
+        // opens again, and the track goes on from the paused position
+        if let Some(Err(e)) = self.sink.as_mut().map(|s| s.resume()) {
+            tracing::info!(zone = %self.id, "resume: opening the output again ({e})");
+            let fmt = self.current.as_ref().map(|c| c.proc.output_format());
+            if let Some(mut s) = self.sink.take() {
+                let _ = s.flush();
+            }
+            if let Some(fmt) = fmt {
+                if !self.ensure_sink(fmt, false) {
+                    return;
+                }
+            }
+        }
         let Some(c) = self.current.as_mut() else {
             return;
         };

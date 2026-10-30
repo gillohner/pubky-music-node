@@ -271,6 +271,13 @@ impl AudioSink for GroupSink {
     fn drain(&mut self) -> Result<(), SinkError> {
         self.sink_mut().drain()
     }
+    /// The lead pauses the group (its renderer's own Pause).
+    fn pause(&mut self) -> Result<(), SinkError> {
+        self.sink_mut().pause()
+    }
+    fn resume(&mut self) -> Result<(), SinkError> {
+        self.sink_mut().resume()
+    }
     fn frames_written(&self) -> u64 {
         self.sink().frames_written()
     }

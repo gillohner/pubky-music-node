@@ -6,6 +6,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-10-30
 
+- **Pause stops a UPnP renderer or BluOS player at once.** Pause only stopped sending the stream, so a Linn or a BluOS player went on with the seconds it had buffered (about 5 s on a PULSE FLEX). The node now sends the device's own Pause and Play (UPnP AVTransport, BluOS `/Pause` and `/Play`), and the device keeps its buffer over the pause. A device that hung up during a long pause gets the stream again when told to play, and one that can't carry on is started again at the paused position. A renderer that refuses Pause plays out its buffer as before. The play/pause button sends what it shows (pause or play), so a double press or a late update no longer plays again instead of pausing.
 - **Playlist imports keep every line** (file, JSON and Roon imports, and a Spotify playlist's local files). Each line is matched the same way: the library's song, else its MusicBrainz id, its ISRC (new `isrc` and `mbid` fields) or a music link in the line. A line that matches nothing stays in its place as a link instead of being dropped:
   - the web page it names, when that is a public page: never an address with a sign-in, a file, share or stream address, another port or a home network's name, so a media server's links are never kept, shown through Pinakes or published;
   - else a MusicBrainz search for its words (never taken from an address's sign-in), shown in the playlist with those words and "Find on MusicBrainz", and never sent to Pinakes;
