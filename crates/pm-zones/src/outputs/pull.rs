@@ -293,7 +293,9 @@ impl PullOutput {
                     // with nothing new (after a restart, a refused SetAVTransportURI) is held
                     // like any request for a stream that isn't playing: answered at once, a
                     // stopped Linn would ask again in a tight loop
-                    let newer_waiting = slot.pending.is_some();
+                    // Only a stream whose sink is still open: a refused start's leftover audio
+                    // (the sink closed) is no stream the renderer will fetch
+                    let newer_waiting = slot.pending.as_ref().is_some_and(|p| !p.rx.is_closed());
                     if generation.is_none() || newer_waiting || slot.generation != start {
                         return Err(Missed::Superseded);
                     }
@@ -797,6 +799,24 @@ mod tests {
             .await
             .is_ok());
         drop(next);
+        // A refused start: the sink wrote a little and closed, its audio left unfetched. That is
+        // no newer stream waiting: an old URL is still held, not answered at once
+        let mut refused = out.open_now(fmt).unwrap();
+        let g = out.generation();
+        std::thread::spawn(move || {
+            refused.write(&block(fmt, 0)).unwrap();
+            refused
+        })
+        .join()
+        .unwrap();
+        let t = Instant::now();
+        let r = out.take_stream_for(Duration::from_millis(600), Some(g - 1)).await;
+        assert_eq!(r.err(), Some(Missed::Timeout));
+        assert!(
+            t.elapsed() >= Duration::from_millis(550),
+            "answered after {:?}",
+            t.elapsed()
+        );
     }
 
     /// Nobody comes back: the sink fails soon after the listener left, not after the full
