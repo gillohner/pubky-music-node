@@ -1113,6 +1113,37 @@
       if (!zonePop.hidden) renderZonePop(e.message); else toast(e.message, 'error');
     } finally { moving = false; }
   };
+  // Listening together on this node (presence.rs): who you listen along with, with Leave, and who
+  // sees what you play. The node keeps it; the page asks every 20 s and when zones come or go.
+  const personName = (l) => l.name || (l.key === 'owner' ? 'the owner' : shortKey(l.key));
+  const VISIBLE = [['hidden', 'Nobody', 'what you play stays yours'], ['followed', 'People you follow', 'on Pubky'], ['everyone', 'Everyone on this node', '']];
+  const renderAlong = () => {
+    const a = state.along; $('#along').hidden = !a;
+    if (a) $('#alongtext').textContent = `Along with ${personName(a)}`;
+  };
+  const refreshAlong = async () => {
+    if (!state.me || isOffline() || document.hidden) return;
+    try {
+      const ls = await api('GET', '/presence'); state.along = ls.find((l) => l.mine) || null;
+      if (state.presenceVisible == null) state.presenceVisible = (await api('GET', '/me/presence')).visible;
+    } catch { return; }
+    renderAlong();
+  };
+  const leaveAlong = async () => {
+    const a = state.along; const b = $('#alongleave'); if (!a) return;
+    b.disabled = true;
+    try {
+      const zs = await api('DELETE', '/presence/along'); state.zones[zs.id] = zs;
+      if (a.your_zone && state.zones[a.your_zone]) { state.zone = a.your_zone; try { localStorage.setItem('pm.zone', state.zone); } catch { /* storage unavailable */ } }
+      state.along = null; renderAlong(); renderZoneName(); renderBar(); refreshQueue();
+      toast(`You left ${personName(a)}'s music`);
+    } catch (e) { toast(e.message, 'error'); } finally { b.disabled = false; }
+  };
+  $('#alongleave').onclick = leaveAlong;
+  setInterval(refreshAlong, 20000);
+  const setVisible = async (v) => {
+    try { state.presenceVisible = (await api('PUT', '/me/presence', { visible: v })).visible; toast(v === 'hidden' ? 'Nobody sees what you play' : `${VISIBLE.find((x) => x[0] === v)[1]} can see what you play`); } catch (e) { toast(e.message, 'error'); }
+  };
   const renderZonePop = (err) => {
     const movable = hasQueue(currentZone());
     const moving = state.starting && state.starting.what === 'move' ? state.starting.zone : null;
@@ -1125,8 +1156,10 @@
       // The sleep timer for the zone in use, here too (UX review: it was only in Now playing)
       + `<div class="pop-title">This zone</div>`
       + (movable && otherZones().length ? `<button class="pop-item" id="zpmove">${icon('zone')}<span><span class="name">Move to…</span><span class="sub">the song where it is, the queue, repeat and radio</span></span></button>` : '')
-      + `<button class="pop-item" id="zpsleep">${icon('moon')}<span><span class="name">${esc(sleepLabel() === 'Sleep' ? 'Sleep timer' : sleepLabel())}</span><span class="sub">pause after a while</span></span></button>`;
+      + `<button class="pop-item" id="zpsleep">${icon('moon')}<span><span class="name">${esc(sleepLabel() === 'Sleep' ? 'Sleep timer' : sleepLabel())}</span><span class="sub">pause after a while</span></span></button>`
+      + (isOffline() ? '' : `<div class="pop-title">Listening together</div><button class="pop-item" id="zpvisible">${icon('artist')}<span><span class="name">Who sees what you play</span><span class="sub">${esc((VISIBLE.find((x) => x[0] === (state.presenceVisible || 'hidden')) || VISIBLE[0])[1])}</span></span></button>`);
     const zs = $('#zpsleep', zonePop); if (zs) zs.onclick = () => { closePop(); showMenu($('#zonebtn'), [{ title: 'Sleep timer' }, ...[15, 30, 45, 60, 90].map((m) => ({ label: `${m} minutes`, icon: 'moon', run: () => setSleep(m * 60) })), { label: 'Off', icon: 'close', run: () => setSleep(null) }]); };
+    const zv = $('#zpvisible', zonePop); if (zv) zv.onclick = () => { closePop(); showMenu($('#zonebtn'), [{ title: 'Who sees what you play' }, ...VISIBLE.map(([v, label, note]) => ({ label, note, icon: 'artist', on: (state.presenceVisible || 'hidden') === v, run: () => setVisible(v) }))]); };
     const zm = $('#zpmove', zonePop); if (zm) zm.onclick = () => { closePop(); showMenu($('#zonebtn'), [{ title: 'Move to' }, ...otherZones().map((o) => ({ label: o.name, icon: 'zone', note: deviceWords(o), run: () => moveTo(o.id) }))]); };
     $$('[data-move]', zonePop).forEach((b) => b.onclick = () => { b.disabled = true; b.innerHTML = '<span class="spin"></span> Moving…'; moveTo(b.dataset.move); });
     $$('[data-zone]', zonePop).forEach((b) => b.onclick = () => {
@@ -5103,7 +5136,7 @@
       } else { state.favUris = new Set(); state.sources = []; }
       const zones = await api('GET', '/zones');
       state.zones = Object.fromEntries(zones.map((z) => [z.id, z]));
-      ensureZone(); renderZoneName(); renderBar(); refreshQueue(false);
+      ensureZone(); renderZoneName(); renderBar(); refreshQueue(false); refreshAlong();
       { const r = routeFromPath(); if (r && r.v === 'search' && r.arg && r.arg.q) { search.value = r.arg.q; history.replaceState({ v: 'search', arg: r.arg, depth: 0 }, '', location.pathname + location.search); runSearch('pop'); } else if (r) setView(r.v, r.arg, 'replace'); else setView(state.view, undefined, 'replace'); }
       link.loaded = true;
       openEvents();
@@ -5141,7 +5174,7 @@
           else if (ev.state.transport === 'stopped' && ev.state.error && ev.state.error !== (old && old.error)) startFail(ev.state.error);
         }
         if (ev.state.transport === 'playing' && state.startError && state.startError.zone === ev.state.id) state.startError = null;
-        if (!old) renderZoneName();
+        if (!old) { renderZoneName(); refreshAlong(); }
         if (ev.state.id === state.zone && (!old || old.queue_version !== ev.state.queue_version)) refreshQueue();
         if (ev.state.id === state.zone && old && old.now_playing && ev.state.now_playing && old.now_playing.item.id !== ev.state.now_playing.item.id && !overlay.hidden) renderNowPlaying();
         if (state.view === 'zones' && (!old || old.transport !== ev.state.transport || old.error !== ev.state.error || (old.now_playing && old.now_playing.item.id) !== (ev.state.now_playing && ev.state.now_playing.item.id))) render();
@@ -5150,7 +5183,11 @@
       else if (ev.type === 'zone_event' && ev.event && ev.event.type === 'error' && ev.zone === state.zone) {
         const zn = state.zones[ev.zone]; toast(`${zn ? zn.name : 'This zone'}: ${ev.event.message || 'something went wrong'}`, 'error');
       }
-      else if (ev.type === 'zone_removed') { delete state.zones[ev.zone]; ensureZone(); renderZoneName(); }
+      else if (ev.type === 'zone_removed') {
+        // The group you listened along in is gone (they ended it): back to your own zone
+        const a = state.along; if (a && a.zone && a.zone.id === ev.zone && ev.zone === state.zone && state.zones[a.your_zone]) state.zone = a.your_zone;
+        delete state.zones[ev.zone]; ensureZone(); renderZoneName(); refreshAlong();
+      }
       else if (ev.type === 'library_changed') { if (link.libRev != null) link.libRev++; onLibraryChanged(); }
       renderBar();
     };

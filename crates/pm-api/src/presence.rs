@@ -232,6 +232,8 @@ pub struct Listening {
     pub you: bool,
     /// The one asking listens along with them.
     pub mine: bool,
+    /// Then: the one asking's own zone, where they go back to on leaving.
+    pub your_zone: Option<String>,
     /// Playing, or paused.
     pub playing: bool,
     pub uri: String,
@@ -300,7 +302,10 @@ pub async fn list(
         let may = accounts::may_use_zone(&s, &c, &st.id.0);
         let mut with = Vec::new();
         let group = along.iter().find(|a| a.group == st.id.0);
-        let mine = group.is_some_and(|a| a.joiners.iter().any(|j| j.key == me));
+        let your_zone = group
+            .and_then(|a| a.joiners.iter().find(|j| j.key == me))
+            .map(|j| j.zone.clone());
+        let mine = your_zone.is_some();
         if let Some(a) = group {
             for j in &a.joiners {
                 if visible_to(&s, &j.key, &me).await {
@@ -312,6 +317,7 @@ pub async fn list(
             name: None,
             avatar: None,
             mine,
+            your_zone,
             you: p.key == me,
             can_join: may && p.key != me && !along_me,
             key: p.key,

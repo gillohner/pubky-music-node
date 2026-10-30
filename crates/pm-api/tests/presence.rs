@@ -229,6 +229,7 @@ async fn presence_is_chosen_per_person_and_listening_along_groups_the_speakers()
         theirs[0]["mine"], true,
         "the listener is along with them: {theirs}"
     );
+    assert_eq!(theirs[0]["your_zone"], "den", "{theirs}");
     assert_eq!(theirs[0]["can_join"], false, "{theirs}");
     assert!(theirs[0]["name"].is_null(), "no profile for the owner: {theirs}");
     call(
