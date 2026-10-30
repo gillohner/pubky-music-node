@@ -16,8 +16,8 @@
 
 use pubky_social_specs::{
     ascii_fold, canonicalize_universal, code_point_len, frozen_trim, namespace_path, sanitize_tag_label,
-    validate_tag_label, validate_timestamp_id_format, PubkySocialFeedLayout, PubkySocialFeedReach, Root,
-    VALIDATION_LIMITS,
+    validate_reference, validate_tag_label, validate_timestamp_id_format, AllowedSchemes,
+    PubkySocialFeedLayout, PubkySocialFeedReach, Root, PUB_CTX, VALIDATION_LIMITS,
 };
 use serde::{Deserialize, Serialize};
 
@@ -196,9 +196,12 @@ pub struct MusicFeedConfig {
     pub content: MusicFeedContent,
     /// The social feed's layouts.
     pub layout: PubkySocialFeedLayout,
-    /// Field rules, all of which an item meets.
+    /// Field rules: an item meets all of them, or any with `rules_match`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rules: Vec<MusicFeedRule>,
+    /// `any` when an item meets any of `rules`; left out (the default) for all of them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rules_match: Option<MusicFeedMatch>,
     /// What to leave out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub leave_out: Option<MusicFeedLeaveOut>,
@@ -338,6 +341,7 @@ impl MusicFeed {
         }
         if strict {
             let unknown = matches!(f.tags_match, MusicFeedMatch::Unknown(_))
+                || matches!(f.rules_match, Some(MusicFeedMatch::Unknown(_)))
                 || matches!(f.reach, PubkySocialFeedReach::Unknown(_))
                 || matches!(f.sort, MusicFeedSort::Unknown(_))
                 || matches!(f.content, MusicFeedContent::Unknown(_))
@@ -367,21 +371,31 @@ impl MusicFeed {
                 return Err("Validation Error: a between rule has a to".into());
             }
         }
+        // A feed may be published as the same bytes, so every URI in it is one a public object
+        // may name (the v1 reference rules): never a /priv/ path, never one version of a post
         let uris_ok = |uris: &[String]| {
             uris.len() <= FEED_URIS_MAX
-                && uris
-                    .iter()
-                    .all(|u| canonicalize_universal(u).as_deref() == Ok(u.as_str()))
+                && uris.iter().all(|u| {
+                    validate_reference(
+                        u,
+                        AllowedSchemes::Universal,
+                        VALIDATION_LIMITS.reference_uri_max_length,
+                        &PUB_CTX,
+                        None,
+                    )
+                    .as_deref()
+                        == Ok(u.as_str())
+                })
         };
         if !uris_ok(&f.seeds) {
             return Err(format!(
-                "Validation Error: at most {FEED_URIS_MAX} seeds, each a canonical URI"
+                "Validation Error: at most {FEED_URIS_MAX} seeds, each a canonical URI a public object may reference"
             ));
         }
         if let Some(x) = &f.leave_out {
             if !uris_ok(&x.uris) {
                 return Err(format!(
-                    "Validation Error: at most {FEED_URIS_MAX} left-out URIs, each canonical"
+                    "Validation Error: at most {FEED_URIS_MAX} left-out URIs, each canonical and one a public object may reference"
                 ));
             }
             if x.artists.len() > FEED_URIS_MAX || x.genres.len() > FEED_URIS_MAX {

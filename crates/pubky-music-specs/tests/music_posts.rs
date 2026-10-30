@@ -346,8 +346,13 @@ fn listening_is_live() {
     let mut no_embed = listening(PLAYED, Some(PLAYED + 1), None, None, None, SONG.into());
     no_embed.embed = None;
     assert!(written(&no_embed, Root::Pub).is_err());
-    // No expiry at all is fine: readers stop a day after the newest version
-    written(&listening(PLAYED, None, None, None, None, SONG.into()), Root::Pub).unwrap();
+    // No expiry at all is fine: readers stop a day after started_at (which every version moves)
+    let open = written(&listening(PLAYED, None, None, None, None, SONG.into()), Root::Pub).unwrap();
+    let open = read_listening(&open).unwrap();
+    assert!(
+        open.is_live(PLAYED + day - 1) && !open.is_live(PLAYED + day),
+        "not forever"
+    );
 }
 
 /// Listening together (2026-10-29): `started_at` is when this song started; a pause and the end
