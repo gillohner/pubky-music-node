@@ -34,7 +34,7 @@ pub const LIVE_WINDOW_MAX_MICROS: i64 = 24 * 60 * 60 * 1_000_000;
 pub const LIVE_NAME_MAX_LENGTH: usize = 100;
 /// The services everyone spells the same way (an open vocabulary: other well-formed names are
 /// fine, and a reader that does not know one treats the source as unknown). Hyphenated, never
-/// underscored: Pinakes maps its `apple_music` to `apple-music`.
+/// underscored: a spelling with underscores folds to hyphens (`apple_music` is `apple-music`).
 pub const SERVICE_NAMES: &[&str] = &[
     "library",
     "roon",

@@ -266,60 +266,78 @@ pub(crate) fn page(lib: &Library, before: Option<i64>, limit: u32) -> Result<Lis
     Ok(ListenPageResult { listens: out, next })
 }
 
-/// Top songs and artists of the history since `since` (microseconds).
+/// A listen post's song and when it was played (microseconds), without reading the track.
+fn activity_of(row: &MusicPostRow) -> Option<(String, i64)> {
+    let post = serde_json::from_str::<pubky_app_specs::PubkyAppPost>(&row.json).ok()?;
+    let music = MusicPost::from_post(post, Some(&row.id)).ok()??;
+    let a = music.as_activity()?;
+    Some((a.uri.clone(), a.played_at))
+}
+
+/// Top songs and artists of the history since `since` (microseconds). Only the period is read
+/// (plays as `(track, time)` pairs, filtered in SQL), and each song is looked up once, not once
+/// per play: the stats hold the library a short while even for a long history.
 pub(crate) fn stats(
     lib: &Library,
     period: &str,
     since: Option<i64>,
     limit: usize,
 ) -> Result<ListenStats, ApiError> {
-    let listens: Vec<ListenEntry> = lib
+    let listens: Vec<(String, i64)> = lib
         .music_posts_between(TYPE_ACTIVITY, since.unwrap_or(i64::MIN), i64::MAX)?
         .iter()
-        .filter_map(|r| listen_entry(lib, r))
+        .filter_map(activity_of)
         .collect();
-    // Node plays without a listen twin, matched in memory
-    let mut twins: HashMap<&str, Vec<i64>> = HashMap::new();
-    for l in &listens {
-        twins
-            .entry(l.uri.as_str())
-            .or_default()
-            .push(l.played_at / 1_000_000);
-    }
     let since_secs = since.map(|t| t.div_euclid(1_000_000));
-    let plays: Vec<ListenEntry> = lib
-        .plays_before(None, u32::MAX)?
-        .into_iter()
-        .filter(|p| since_secs.is_none_or(|s| p.played_at >= s))
-        .filter(|p| {
-            let uri = p.track.publishable_uri().map(|u| u.to_url());
-            !uri.as_deref()
-                .and_then(|u| twins.get(u))
-                .is_some_and(|ts| ts.iter().any(|t| (t - p.played_at).abs() <= TWIN_SECS))
-        })
-        .map(play_entry)
-        .collect();
-    let all: Vec<&ListenEntry> = listens.iter().chain(plays.iter()).collect();
-    let mut by_track: HashMap<&str, (u64, Option<&Track>)> = HashMap::new();
-    let mut by_artist: HashMap<String, (u64, Option<i64>)> = HashMap::new();
-    for e in &all {
-        let slot = by_track.entry(e.uri.as_str()).or_insert((0, None));
-        slot.0 += 1;
-        if slot.1.is_none() {
-            slot.1 = e.track.as_ref();
+    let plays = lib.play_times_since(since_secs)?;
+    // Each song once: a play's by its track id, a listen's by its link
+    let mut by_id: HashMap<i64, (String, Option<Track>)> = HashMap::new();
+    for (tid, _) in &plays {
+        by_id.entry(*tid).or_insert_with(|| {
+            let track = lib.get_track(pm_model::TrackId(*tid)).ok().flatten();
+            let uri = track
+                .as_ref()
+                .and_then(|t| t.publishable_uri().map(|u| u.to_url()))
+                .unwrap_or_else(|| format!("{}{tid}", crate::sources::TRACK_SCHEME));
+            (uri, track)
+        });
+    }
+    // Node plays without a listen twin (the same song within TWIN_SECS)
+    let mut twins: HashMap<&str, Vec<i64>> = HashMap::new();
+    for (uri, at) in &listens {
+        twins.entry(uri.as_str()).or_default().push(at / 1_000_000);
+    }
+    let mut counts: HashMap<String, u64> = HashMap::new();
+    for (uri, _) in &listens {
+        *counts.entry(uri.clone()).or_default() += 1;
+    }
+    let mut total = listens.len() as u64;
+    for (tid, at) in &plays {
+        let uri = &by_id[tid].0;
+        let twin = twins
+            .get(uri.as_str())
+            .is_some_and(|ts| ts.iter().any(|t| (t - at).abs() <= TWIN_SECS));
+        if !twin {
+            *counts.entry(uri.clone()).or_default() += 1;
+            total += 1;
         }
-        if let Some(t) = &e.track {
+    }
+    let mut tracks: HashMap<String, Option<Track>> = by_id.into_values().collect();
+    let mut by_artist: HashMap<String, (u64, Option<i64>)> = HashMap::new();
+    for (uri, n) in &counts {
+        let track = tracks.entry(uri.clone()).or_insert_with(|| track_of(lib, uri));
+        if let Some(t) = track {
             for a in &t.artists {
                 let slot = by_artist.entry(a.name.clone()).or_insert((0, a.id));
-                slot.0 += 1;
+                slot.0 += n;
             }
         }
     }
-    let mut top_tracks: Vec<TopTrack> = by_track
+    let mut top_tracks: Vec<TopTrack> = counts
         .into_iter()
-        .map(|(uri, (plays, track))| TopTrack {
-            uri: uri.to_string(),
-            track: track.cloned(),
+        .map(|(uri, plays)| TopTrack {
+            track: tracks.get(&uri).cloned().flatten(),
+            uri,
             plays,
         })
         .collect();
@@ -338,7 +356,7 @@ pub(crate) fn stats(
     Ok(ListenStats {
         period: period.to_string(),
         since,
-        listens: all.len() as u64,
+        listens: total,
         top_tracks,
         top_artists,
     })
