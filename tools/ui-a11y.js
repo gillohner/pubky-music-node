@@ -55,7 +55,7 @@ const inspect = () => {
 
 (async () => {
   const browser = await chromium.launch();
-  const screens = [['Home', '/'], ['Search', '/search?q=queen'], ['Album', '/album/lib-1'], ['Song', '/song/mb-b1a9c0e9-d987-4042-ae91-78d6a3267d69'], ['Albums', '/albums'], ['Tracks', '/tracks'], ['Playlists', '/playlists'], ['Queue', '/queue'], ['Settings', '/settings'], ...['playback', 'accounts', 'nodehome', 'discover', 'backup', 'import', 'appearance', 'about'].map((t) => [`Settings › ${t}`, `/settings/${t}`]),
+  const screens = [['Home', '/'], ['Search', '/search?q=queen'], ['Album', '/album/lib-1'], ['Song', '/song/mb-b1a9c0e9-d987-4042-ae91-78d6a3267d69'], ['Albums', '/albums'], ['Tracks', '/tracks'], ['Playlists', '/playlists'], ['Queue', '/queue'], ['Settings', '/settings'], ...['playback', 'accounts', 'apps', 'nodehome', 'discover', 'backup', 'import', 'appearance', 'about'].map((t) => [`Settings › ${t}`, `/settings/${t}`]),
     ...['library', 'tidal', 'qobuz', 'soundcloud', 'bandcamp', 'spotify', 'jamendo', 'subsonic', 'jellyfin', 'deezer', 'archive', 'audius', 'radio', 'youtube'].map((id) => [`Sources › ${id}`, `/sources/${id}`])];
   for (const scheme of ['dark', 'light']) {
     for (const width of [1280, 375]) {

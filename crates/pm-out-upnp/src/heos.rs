@@ -440,6 +440,13 @@ mod tests {
         assert!(group.id().0.starts_with("heos-group:"));
         assert_eq!(group.sync(), pm_zones::SyncClass::Tight);
         let sink = group.open(AudioFormat::pcm(44_100, 16, 2)).await.unwrap();
+        // The start runs on its own thread; a sink closed before Play sends none
+        for _ in 0..300 {
+            if log.lock().unwrap().iter().any(|a| a.starts_with("A play")) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
         drop(sink);
         let l = log.lock().unwrap().clone();
         assert_eq!(

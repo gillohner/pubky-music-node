@@ -61,6 +61,21 @@ pub fn audiodb_key() -> &'static str {
         .unwrap_or("123")
 }
 
+/// This build carries the project's TheAudioDB key (not only the public test key).
+pub fn audiodb_built_in() -> bool {
+    option_env!("PM_PROJECT_AUDIODB_KEY").is_some_and(|v| !v.trim().is_empty())
+}
+
+/// The project's Google Drive app (client id).
+pub fn google_client_id() -> Option<&'static str> {
+    option_env!("PM_PROJECT_GOOGLE_CLIENT_ID").filter(|v| !v.trim().is_empty())
+}
+
+/// The project's OneDrive app (a public client id: no secret).
+pub fn onedrive_client_id() -> Option<&'static str> {
+    option_env!("PM_PROJECT_ONEDRIVE_CLIENT_ID").filter(|v| !v.trim().is_empty())
+}
+
 /// The static sign-in return page registered as the redirect URI on the project's apps
 /// (source: github.com/gillohner/pubky-music-auth). `[auth] return_page` overrides it.
 pub const RETURN_PAGE: &str = "https://gillohner.github.io/pubky-music-auth/callback";
