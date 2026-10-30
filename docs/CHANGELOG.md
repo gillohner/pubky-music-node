@@ -4,18 +4,6 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
-- **Comments on songs, albums and artists**. A comment is a public social v1 note on your homeserver whose `parent` is the item's link, so any Pubky app shows it as a reply; a reply's parent is the comment. Item pages show the thread from Nexus by parent (newest first, with names and reply counts) between Tags and About, with Reply, and Delete on your own (`GET/POST/DELETE /v1/comments`).
-- **Post about this** (B2): the ⋯ menu on song, album and artist pages writes a public social v1 note with the item as its `embed`, so pubky.app and other Pubky apps show it with the item's card (`POST /v1/posts`).
-- **Comments on songs, albums and artists**. A comment is a public social v1 note on your homeserver whose `parent` is the item's link, so any Pubky app shows it as a reply; a reply's parent is the comment. Item pages show the thread from Nexus by parent (newest first, with names and reply counts) between Tags and About, with Reply, and Delete on your own (`GET/POST/DELETE /v1/comments`).
-
-- **A collection may hold web links**. Besides songs, albums, artists and Pubky posts, any web page goes in as a `link` item (stored canonical, as social v1 allows). Playing skips it and says so; `GET /v1/cards?uri=` gives its Pinakes card (title, image, site). The playlist page shows a web page or a post as its card, in its place among the songs, with Open instead of Play, and counts songs and links apart. A web-page bookmark from another app is still not read as a music bookmark.
-- **Smart playlists with tags from your network**. "Tags from" (`reach`: people you follow, friends or everyone) with tags finds music tagged so through Pinakes' search and who tagged it through Nexus, each item saying where it plays here or shown as a card (`network` in the preview). Saving one also writes it as a music feed on your homeserver, so other apps can read it; "just me" stays exactly as before. mn-app builds the screen.
-- **Music feeds in `pubky-music-specs`**: `MusicFeed` at `/{priv,pub}/music/v1/feeds/{id}.json`, modelled on the social v1 feed (name, icon, tags with `any`/`all`, reach, sort including `random`, content `songs`/`albums`/`artists`/`playlists`/`sessions`, layout) plus a smart playlist's rules, leave-out lists, limits in songs or minutes and seed URIs. Its id is a timestamp id, so it is edited in place. Vectors in `tests/vectors/feed-v1.json`, documented in the crate README.
-- **Music feeds in `pubky-music-specs`**: `MusicFeed` at `/{priv,pub}/music/v1/feeds/{id}.json`, modelled on the social v1 feed (name, icon, tags with `any`/`all`, reach, sort including `random`, content `songs`/`albums`/`artists`/`playlists`/`sessions`, layout) plus a smart playlist's rules, leave-out lists, limits in songs or minutes and seed URIs. Its id is a timestamp id, so it is edited in place. Vectors in `tests/vectors/feed-v1.json`, documented in the crate README.
-
-- **Share what I'm listening to** (listening together, L2; a draft on #162): the player's Live switch, off by default. On, what the owner plays is one public `listening` post on their homeserver, a new version per song, pause, resume or seek, ended on stop; never a post per song (`GET/PUT /v1/me/listening`).
-- **Listening together in `pubky-music-specs`** (owner decision 2026-10-29; a draft on #111): no party objects. One `listening` post per listening session, a new version per song, pause or resume: `started_at` is when this song started, new `paused_at` and `ended_at`, `expires_at` now optional; `position_ms(now)` and `is_live(now)` for listening along. The `session` kind of the earlier drafts is retired (it reads as unknown). Vectors and README updated.
-
 ### 2026-10-30
 
 - **No guide asks you to open a developer console.** The steps for an app of your own moved to "Advanced: use your own app" in docs/STREAMING-PROVIDERS.md; deploy.md, the Docker entrypoint and the TrueNAS compose file point there, and CI checks the docs (`tools/console-links.py`). Messages that said "add [tidal] client_id" or "[drives] …_client_id" now point to Settings › This node › Service apps. Release builds can carry the project's OneDrive and Google Drive app ids (`PM_PROJECT_ONEDRIVE_CLIENT_ID`, `PM_PROJECT_GOOGLE_CLIENT_ID`, repository variables) once they are registered.
@@ -26,6 +14,45 @@ Newest first. Dates are when the change landed on `main`.
 - **Fixes from the reviews of the cover badges, Move to and the sound pill.** Covers no longer break the page on older WebViews (no `Object.hasOwn`). Moving a zone into This browser is refused, before the zone empties, when the song in hand can't play in a browser, and a resumed song that fails says why; a song moved in keeps its position only for itself. Move to… from the Queue page or This zone says "Moving to …" at once, and Move here waits while a move runs. The sound panel's switches go one at a time and keep what was set: EQ brings back the bands that were on, crossfeed and room correction keep their values; a switch keeps the keyboard. A refused play ends "Starting on …" at once with the node's words; pausing before the browser plays ends it too; replacing the queue waits for the new song, not the old one still playing; radio and playlist plays answer at once.
 - **No more errors on every page.** `/add-music` and `/downloads` open on a reload or a shared link; `GET /v1/homeserver/bundled` says `{configured: false}` on a node without a bundled homeserver instead of a 404; an item with no MusicBrainz id yet has no tags or review yet (instead of a 422 on its page).
 - **Removed: the Umbrel app.** Not supported for now; use the Linux bundle or Docker. `deploy/umbrel/`, its install guide, its CI check and the store mirror are gone; the store repository stays as it is.
+- **Comments on songs, albums and artists**. A comment is a public social v1 note on your homeserver whose `parent` is the item's link, so any Pubky app shows it as a reply; a reply's parent is the comment. Item pages show the thread from Nexus by parent (newest first, with names and reply counts) between Tags and About, with Reply, and Delete on your own (`GET/POST/DELETE /v1/comments`).
+- **Post about this** (B2): the ⋯ menu on song, album and artist pages writes a public social v1 note with the item as its `embed`, so pubky.app and other Pubky apps show it with the item's card (`POST /v1/posts`).
+- **A collection may hold web links**. Besides songs, albums, artists and Pubky posts, any web page goes in as a `link` item (stored canonical, as social v1 allows). Playing skips it and says so; `GET /v1/cards?uri=` gives its Pinakes card (title, image, site). The playlist page shows a web page or a post as its card, in its place among the songs, with Open instead of Play, and counts songs and links apart. A web-page bookmark from another app is still not read as a music bookmark.
+- **Smart playlists with tags from your network**. "Tags from" (`reach`: people you follow, friends or everyone) with tags finds music tagged so through Pinakes' search and who tagged it through Nexus, each item saying where it plays here or shown as a card (`network` in the preview). Saving one also writes it as a music feed on your homeserver, so other apps can read it; "just me" stays exactly as before. mn-app builds the screen.
+- **Music feeds in `pubky-music-specs`**: `MusicFeed` at `/{priv,pub}/music/v1/feeds/{id}.json`, modelled on the social v1 feed (name, icon, tags with `any`/`all`, reach, sort including `random`, content `songs`/`albums`/`artists`/`playlists`/`sessions`, layout) plus a smart playlist's rules, leave-out lists, limits in songs or minutes and seed URIs. Its id is a timestamp id, so it is edited in place. Vectors in `tests/vectors/feed-v1.json`, documented in the crate README.
+- **Share what I'm listening to** (listening together, L2; a draft on #162): the player's Live switch, off by default. On, what the owner plays is one public `listening` post on their homeserver, a new version per song, pause, resume or seek, ended on stop; never a post per song (`GET/PUT /v1/me/listening`).
+- **Listening together in `pubky-music-specs`** (owner decision 2026-10-29; a draft on #111): no party objects. One `listening` post per listening session, a new version per song, pause or resume: `started_at` is when this song started, new `paused_at` and `ended_at`, `expires_at` now optional; `position_ms(now)` and `is_live(now)` for listening along. The `session` kind of the earlier drafts is retired (it reads as unknown). Vectors and README updated.
+- **Collections**: a playlist is a collection of songs; a collection may also hold albums, artists and public Pubky posts.
+  - Each has a layout: `list`, `grid` or `visual`.
+  - `/v1/collections` and `/v1/playlists` are the same resource. Answers add `layout`, `tracks_only` and `entries`: each item with its kind and what the library has of it.
+  - Playing one queues its songs and the library's albums; artists and posts are listed as `missing`.
+  - The public switch keeps the private draft and adds or removes the public copy, as playlists always did.
+  - Other people's public collections are read from their homeserver (`/v1/shared/{user}/collections`). Their posts are filtered by kind before the cap, so someone with many notes still shows their playlists.
+  - Saving someone's collection is now two things: **Bookmark** it (a bookmark of its `pubky://…/posts/<id>` link; bookmarks of posts are listed in `posts`) or **Duplicate** it (a copy of your own that names the original in `ext.music.original`).
+  - A fresh node recovers public collections as public.
+- **Listen history** (Part A.3): every play becomes a music `listen` post where the new setting says: off, private (the default, `/priv/music/v1/posts/`) or public (`/pub/music/v1/posts/`).
+  - Zone plays now become listens as well (before, only the Roon bridge, Subsonic scrobbles and the ListenBrainz import did), and all of them follow the setting.
+  - `GET /v1/me/listens` (paged, newest first) and `/v1/me/listens/stats` (top songs and artists by week, month, year or all time).
+  - `POST /v1/me/listens/visibility` moves the whole history between roots, and `DELETE /v1/me/listens` deletes it (listens another node wrote before then are deleted when the sync finds them).
+  - The sync brings listens other nodes wrote into the history.
+  - The ListenBrainz import asks first when the history is public, and leaves `source` out.
+  - Listeners can't read the owner's history. A zone play is the owner's listen only when no party is open on the zone and the owner was the last to change it; guests' and listeners' plays never enter the owner's history.
+  - A listen's post id is when it was written, so deleting the history removes listens written before then, and an import of old plays made later stays.
+- **Tags are social v1 tags** (Part A.4): the node writes `/pub/social/v1/tags/<id>.json` (same id as before), which Nexus indexes as resource tags. The sync moves the older `/pub/pubky.app/tags/` and `/pub/pubky.music/tags/` tags once and reads them until then. Other apps' v1 tags are read once and not fetched again.
+- **Follows and profiles on social v1** (Part A.6): following writes `/pub/social/v1/follows/<key>.json` as well as the pubky.app follow (until Nexus indexes v1 follows); a profile from a homeserver is read from `/pub/social/v1/profile.json` first.
+- **pubky-social-specs from crates.io:** `=1.0.0-rc.1` replaces the git pin `acde362` (the same data model).
+- **The node and pubky-social-migrator don't duplicate each other:** where both move an object from `/pub/pubky.app/`, they write the same v1 path (a tag on a music URL keeps its id; bookmarks are keyed by target; follows by followee). The node no longer fetches the person's other public social posts on each sync, and never imports them as reviews. It reads a public social post only as the published copy of a collection it has a draft of. Checked with the spec's own transforms in a unit test and on a testnet.
+- **`pubky-music-specs`** (Part A.3 and A3):
+  - a `listen` may be public;
+  - times (`*_at`) are microseconds, and readers take older millisecond values (anything below 3000-01-01 in ms); the node writes its public collections again once;
+  - durations keep `_ms`;
+  - new kinds `listening` (now playing, until it expires; an ordinary kind, no feed-only tier) and `session` (`host` a pubky user), each with an optional `name` (trimmed, 1–100 code points; absent, clients write and readers show the generic "<display name>'s listening session" / "<display name> is listening"; vectors in `tests/vectors/live-v1.json`, documented in the crate README);
+  - a hyphenated service vocabulary (`SERVICE_NAMES`, `service_name`);
+  - `ext.music.original` on a duplicate.
+- **Bookmarks, by name**: favourites are called bookmarks, as in social specs v1.
+  - The API is `/v1/bookmarks`; answers say `bookmarked`. `/v1/favourites` answers the same for one release, with a `Deprecation` header (docs/api.md, Deprecated).
+  - The library table is `bookmarks` (migration 15 renames it and the node-only bookmark settings); the code says `Bookmark`, `ItemRef` and `bookmarks::`.
+  - Smart playlist rules take `bookmark` (`favourite` still works), the Roon import `bookmarks=`, and Home answers `bookmarked_albums`; the old names stay for one release.
+  - The homeserver format does not change (`/priv/social/v1/bookmarks/`).
 
 ## 0.2.1
 
@@ -102,38 +129,6 @@ Newest first. Dates are when the change landed on `main`.
   - Each group says in one line where it is saved. On a phone the groups are one list; on tablets and desktops they are the left pane.
   - Edit Home now saves your own layout (in your preferences). The node's layout stays the default for everyone, and "Use the node's default" goes back to it.
 
-- **Collections**: a playlist is a collection of songs; a collection may also hold albums, artists and public Pubky posts.
-  - Each has a layout: `list`, `grid` or `visual`.
-  - `/v1/collections` and `/v1/playlists` are the same resource. Answers add `layout`, `tracks_only` and `entries`: each item with its kind and what the library has of it.
-  - Playing one queues its songs and the library's albums; artists and posts are listed as `missing`.
-  - The public switch keeps the private draft and adds or removes the public copy, as playlists always did.
-  - Other people's public collections are read from their homeserver (`/v1/shared/{user}/collections`). Their posts are filtered by kind before the cap, so someone with many notes still shows their playlists.
-  - Saving someone's collection is now two things: **Bookmark** it (a bookmark of its `pubky://…/posts/<id>` link; bookmarks of posts are listed in `posts`) or **Duplicate** it (a copy of your own that names the original in `ext.music.original`).
-  - A fresh node recovers public collections as public.
-- **Listen history** (Part A.3): every play becomes a music `listen` post where the new setting says: off, private (the default, `/priv/music/v1/posts/`) or public (`/pub/music/v1/posts/`).
-  - Zone plays now become listens as well (before, only the Roon bridge, Subsonic scrobbles and the ListenBrainz import did), and all of them follow the setting.
-  - `GET /v1/me/listens` (paged, newest first) and `/v1/me/listens/stats` (top songs and artists by week, month, year or all time).
-  - `POST /v1/me/listens/visibility` moves the whole history between roots, and `DELETE /v1/me/listens` deletes it (listens another node wrote before then are deleted when the sync finds them).
-  - The sync brings listens other nodes wrote into the history.
-  - The ListenBrainz import asks first when the history is public, and leaves `source` out.
-  - Listeners can't read the owner's history. A zone play is the owner's listen only when no party is open on the zone and the owner was the last to change it; guests' and listeners' plays never enter the owner's history.
-  - A listen's post id is when it was written, so deleting the history removes listens written before then, and an import of old plays made later stays.
-- **Tags are social v1 tags** (Part A.4): the node writes `/pub/social/v1/tags/<id>.json` (same id as before), which Nexus indexes as resource tags. The sync moves the older `/pub/pubky.app/tags/` and `/pub/pubky.music/tags/` tags once and reads them until then. Other apps' v1 tags are read once and not fetched again.
-- **Follows and profiles on social v1** (Part A.6): following writes `/pub/social/v1/follows/<key>.json` as well as the pubky.app follow (until Nexus indexes v1 follows); a profile from a homeserver is read from `/pub/social/v1/profile.json` first.
-- **pubky-social-specs from crates.io:** `=1.0.0-rc.1` replaces the git pin `acde362` (the same data model).
-- **The node and pubky-social-migrator don't duplicate each other:** where both move an object from `/pub/pubky.app/`, they write the same v1 path (a tag on a music URL keeps its id; bookmarks are keyed by target; follows by followee). The node no longer fetches the person's other public social posts on each sync, and never imports them as reviews. It reads a public social post only as the published copy of a collection it has a draft of. Checked with the spec's own transforms in a unit test and on a testnet.
-- **`pubky-music-specs`** (Part A.3 and A3):
-  - a `listen` may be public;
-  - times (`*_at`) are microseconds, and readers take older millisecond values (anything below 3000-01-01 in ms); the node writes its public collections again once;
-  - durations keep `_ms`;
-  - new kinds `listening` (now playing, until it expires; an ordinary kind, no feed-only tier) and `session` (`host` a pubky user), each with an optional `name` (trimmed, 1–100 code points; absent, clients write and readers show the generic "<display name>'s listening session" / "<display name> is listening"; vectors in `tests/vectors/live-v1.json`, documented in the crate README);
-  - a hyphenated service vocabulary (`SERVICE_NAMES`, `service_name`);
-  - `ext.music.original` on a duplicate.
-- **Bookmarks, by name**: favourites are called bookmarks, as in social specs v1.
-  - The API is `/v1/bookmarks`; answers say `bookmarked`. `/v1/favourites` answers the same for one release, with a `Deprecation` header (docs/api.md, Deprecated).
-  - The library table is `bookmarks` (migration 15 renames it and the node-only bookmark settings); the code says `Bookmark`, `ItemRef` and `bookmarks::`.
-  - Smart playlist rules take `bookmark` (`favourite` still works), the Roon import `bookmarks=`, and Home answers `bookmarked_albums`; the old names stay for one release.
-  - The homeserver format does not change (`/priv/social/v1/bookmarks/`).
 - **The music spec stays generic; Pubky Music's own data moved into the node** (STEWARD-SPEC-SPLIT.md, no change in behaviour).
   - `pubky-music-specs` holds only the music kinds, their rules and the `ext.music` playlist hints (`/pub|priv/music/v1/`). A test fails if it ever names a `pubky.music/` path or depends on a node crate.
   - The sources vault (module, VAULT.md, tests, vectors) moved to the new `pm-appdata` crate, with every app path in `pm_appdata::paths`.
