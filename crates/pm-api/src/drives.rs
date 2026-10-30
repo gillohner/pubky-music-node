@@ -200,10 +200,10 @@ pub fn apps_from(google: App, onedrive: App) -> HashMap<Provider, App> {
             })
         }
     };
-    if let Some(a) = pick(google, option_env!("PM_PROJECT_GOOGLE_CLIENT_ID")) {
+    if let Some(a) = pick(google, crate::project_apps::google_client_id()) {
         m.insert(Provider::Google, a);
     }
-    if let Some(a) = pick(onedrive, option_env!("PM_PROJECT_ONEDRIVE_CLIENT_ID")) {
+    if let Some(a) = pick(onedrive, crate::project_apps::onedrive_client_id()) {
         m.insert(Provider::Onedrive, a);
     }
     m
@@ -700,9 +700,8 @@ pub(crate) async fn login(
         ApiError::new(
             StatusCode::PRECONDITION_FAILED,
             format!(
-                "{} is not set up on this node: add [drives] {}_client_id",
-                p.name(),
-                p.id()
+                "{} is not set up on this node: add an app in Settings › This node › Service apps",
+                p.name()
             ),
         )
     })?;
@@ -1058,6 +1057,16 @@ pub(crate) async fn sign_out(
     s.drives.write().expect("drives").accounts.remove(&p);
     save(&s)?;
     Ok(Json(serde_json::json!({"signed_out": p.id()})))
+}
+
+/// The node's app for `p` changed (Settings › Service apps): the drive's sign-in belonged to the
+/// old app and can't be refreshed with the new one, so it goes (its folders stay; signing in again
+/// picks them up).
+pub(crate) fn app_changed(s: &NodeState, p: Provider) -> Result<(), ApiError> {
+    if s.drives.write().expect("drives").accounts.remove(&p).is_some() {
+        save(s)?;
+    }
+    Ok(())
 }
 
 /// Rescans every drive folder now and then.
