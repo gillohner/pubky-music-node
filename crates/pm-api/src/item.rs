@@ -20,11 +20,14 @@ use std::sync::Arc;
 pub(crate) async fn page(
     State(s): State<Arc<NodeState>>,
     Path((kind, id)): Path<(String, String)>,
+    axum::extract::Query(q): axum::extract::Query<LangQuery>,
+    headers: axum::http::HeaderMap,
 ) -> ApiResult<ItemPage> {
     if !matches!(kind.as_str(), "song" | "album" | "artist") {
         return Err(ApiError::bad_request("kind is song, album or artist"));
     }
-    let mut pg = raw_page(&s, &kind, &id).await?;
+    let lang = crate::about::language(q.lang.as_deref(), &headers);
+    let mut pg = raw_page(&s, &kind, &id, &lang).await?;
     // A generic id (`isrc-…`, `mb-…`) is the item's global page: platform-neutral, every source
     // a row (the library's copy too), tags on the item's own id (STEWARD-UX-INSTANCES item 8)
     if id.starts_with("isrc-") || id.starts_with("mb-") {
@@ -69,7 +72,7 @@ pub(crate) async fn page(
             if let Some(isrc) = isrc {
                 let generic = format!("isrc-{isrc}");
                 pg.song_uri = url_of_page("song", &generic);
-                if let Ok(g) = raw_page(&s, &kind, &generic).await {
+                if let Ok(g) = raw_page(&s, &kind, &generic, &lang).await {
                     if let Some(n) = g.id.strip_prefix("lib-") {
                         pg.versions.push(Version {
                             page: None,
@@ -148,15 +151,22 @@ pub(crate) async fn page(
     Ok(Json(pg))
 }
 
-async fn raw_page(s: &Arc<NodeState>, kind: &str, id: &str) -> Result<ItemPage, ApiError> {
+/// `?lang=`: the reader's language for Wikipedia (the browser's), else Accept-Language.
+#[derive(Debug, Default, serde::Deserialize)]
+pub(crate) struct LangQuery {
+    #[serde(default)]
+    pub lang: Option<String>,
+}
+
+async fn raw_page(s: &Arc<NodeState>, kind: &str, id: &str, lang: &str) -> Result<ItemPage, ApiError> {
     if let Some(n) = id.strip_prefix("lib-") {
         let n: i64 = n
             .parse()
             .map_err(|_| ApiError::bad_request("lib- ids are numbers"))?;
         return match kind {
-            "song" => library_song(s, n).await,
-            "album" => library_album(s, n).await,
-            _ => library_artist(s, n).await,
+            "song" => library_song(s, n, lang).await,
+            "album" => library_album(s, n, lang).await,
+            _ => library_artist(s, n, lang).await,
         };
     }
     let url = url_of_page(kind, id).ok_or_else(|| ApiError::bad_request("unknown page id"))?;
@@ -176,7 +186,7 @@ async fn raw_page(s: &Arc<NodeState>, kind: &str, id: &str) -> Result<ItemPage, 
                     })
             };
             if let Some(t) = owned.and_then(|t| t.id) {
-                return library_song(s, t.0).await;
+                return library_song(s, t.0, lang).await;
             }
         }
     }
@@ -528,7 +538,10 @@ const EXTRAS_BUDGET: std::time::Duration = std::time::Duration::from_millis(1500
 pub(crate) async fn page_extras(
     State(s): State<Arc<NodeState>>,
     Path((kind, id)): Path<(String, String)>,
+    axum::extract::Query(q): axum::extract::Query<LangQuery>,
+    headers: axum::http::HeaderMap,
 ) -> ApiResult<ItemExtras> {
+    let lang = crate::about::language(q.lang.as_deref(), &headers);
     // The facts extras need (the canonical uri, the artist's MusicBrainz id) come from the page,
     // which is cached by now
     let pg = if let Some(n) = id.strip_prefix("lib-") {
@@ -536,9 +549,9 @@ pub(crate) async fn page_extras(
             .parse()
             .map_err(|_| ApiError::bad_request("lib- ids are numbers"))?;
         match kind.as_str() {
-            "song" => library_song(&s, n).await,
-            "album" => library_album(&s, n).await,
-            _ => library_artist(&s, n).await,
+            "song" => library_song(&s, n, &lang).await,
+            "album" => library_album(&s, n, &lang).await,
+            _ => library_artist(&s, n, &lang).await,
         }?
     } else {
         let url = url_of_page(&kind, &id).ok_or_else(|| ApiError::bad_request("unknown page id"))?;
@@ -686,7 +699,7 @@ fn open_on(versions: &[Version]) -> Vec<Version> {
         .collect()
 }
 
-async fn library_song(s: &Arc<NodeState>, n: i64) -> Result<ItemPage, ApiError> {
+async fn library_song(s: &Arc<NodeState>, n: i64, lang: &str) -> Result<ItemPage, ApiError> {
     let t = s
         .library
         .lock()
@@ -753,6 +766,19 @@ async fn library_song(s: &Arc<NodeState>, n: i64) -> Result<ItemPage, ApiError> 
         }
         None => about.push(fact("Identity", "not identified yet")),
     }
+    // The work it records, and that work's Wikipedia article
+    let recording = t.recording_mbid.or(match &t.canonical {
+        Some((MusicUri::Recording { mbid }, _)) => Some(*mbid),
+        _ => None,
+    });
+    let more = match recording {
+        Some(r) => crate::about::song(s, n, r, lang).await,
+        None => None,
+    };
+    let about_text = more.as_ref().and_then(|m| m.text.clone());
+    if let Some(m) = more {
+        about.extend(m.facts);
+    }
     let albums = t
         .album
         .as_ref()
@@ -808,7 +834,9 @@ async fn library_song(s: &Arc<NodeState>, n: i64) -> Result<ItemPage, ApiError> 
         link: None,
         on_pubky,
         about,
-        blurb: None,
+        blurb: about_text.as_ref().map(|t| t.text.clone()),
+        about_text,
+        image_credit: None,
         section: "tracks".into(),
         mb_match: None,
         related: Vec::new(),
@@ -816,7 +844,7 @@ async fn library_song(s: &Arc<NodeState>, n: i64) -> Result<ItemPage, ApiError> 
     })
 }
 
-async fn library_album(s: &Arc<NodeState>, n: i64) -> Result<ItemPage, ApiError> {
+async fn library_album(s: &Arc<NodeState>, n: i64, lang: &str) -> Result<ItemPage, ApiError> {
     let (a, tracks, mb_match) = {
         let lib = s.library.lock().expect("library poisoned");
         let a = lib
@@ -880,6 +908,17 @@ async fn library_album(s: &Arc<NodeState>, n: i64) -> Result<ItemPage, ApiError>
     if let Some(u) = &a.upc {
         about.push(fact("UPC", u.to_string()));
     }
+    // Label, release date, the Wikipedia article and "Also on" by the release group
+    let more = match mb_match {
+        Some(m) => crate::about::album(s, n, m.mbid, a.release_mbid, lang).await,
+        None => None,
+    };
+    let about_text = more.as_ref().and_then(|m| m.text.clone());
+    // Its links become sources like the rest: "Also on" and "Open on"
+    if let Some(m) = more {
+        versions.extend(m.links);
+        about.extend(m.facts);
+    }
     let first_artist = tracks.first().and_then(|t| t.artists.first().cloned());
     Ok(ItemPage {
         kind: "album".into(),
@@ -924,7 +963,9 @@ async fn library_album(s: &Arc<NodeState>, n: i64) -> Result<ItemPage, ApiError>
         link: None,
         on_pubky,
         about,
-        blurb: None,
+        blurb: about_text.as_ref().map(|t| t.text.clone()),
+        about_text,
+        image_credit: None,
         section: "albums".into(),
         mb_match,
         related: Vec::new(),
@@ -932,7 +973,7 @@ async fn library_album(s: &Arc<NodeState>, n: i64) -> Result<ItemPage, ApiError>
     })
 }
 
-async fn library_artist(s: &Arc<NodeState>, n: i64) -> Result<ItemPage, ApiError> {
+async fn library_artist(s: &Arc<NodeState>, n: i64, lang: &str) -> Result<ItemPage, ApiError> {
     let unknown = n == pm_library::UNKNOWN_ARTIST_ID;
     let (a, albums, tracks) = {
         let lib = s.library.lock().expect("library poisoned");
@@ -966,7 +1007,7 @@ async fn library_artist(s: &Arc<NodeState>, n: i64) -> Result<ItemPage, ApiError
     let info = if unknown {
         None
     } else {
-        crate::artist_info::artist_info(s, n).await.ok()
+        crate::artist_info::artist_info(s, n, lang).await.ok()
     };
     let canonical = mb_match.map(|m| format!("https://musicbrainz.org/artist/{}", m.mbid));
     let on_pubky = match &canonical {
@@ -986,6 +1027,7 @@ async fn library_artist(s: &Arc<NodeState>, n: i64) -> Result<ItemPage, ApiError
         ),
     ));
     if let Some(i) = &info {
+        about.extend(i.facts.iter().cloned());
         for (label, u) in [
             ("Wikipedia", &i.wikipedia),
             ("Wikidata", &i.wikidata),
@@ -1057,7 +1099,11 @@ async fn library_artist(s: &Arc<NodeState>, n: i64) -> Result<ItemPage, ApiError
                 })
             })
             .collect(),
-        versions: matches_for(s, &format!("lib:artist:{n}")),
+        // MusicBrainz's and Pinakes' links become sources: "Also on" and "Open on"
+        versions: matches_for(s, &format!("lib:artist:{n}"))
+            .into_iter()
+            .chain(info.iter().flat_map(|i| i.links.iter().cloned()))
+            .collect(),
         also_on: Vec::new(),
         opened_as: None,
         plays_note: None,
@@ -1066,6 +1112,8 @@ async fn library_artist(s: &Arc<NodeState>, n: i64) -> Result<ItemPage, ApiError
         open_on: Vec::new(),
         on_pubky,
         about,
+        about_text: info.as_ref().and_then(|i| i.text.clone()),
+        image_credit: info.as_ref().and_then(|i| i.image_credit.clone()),
         blurb: info.and_then(|i| i.bio),
         section: "artists".into(),
         mb_match,
@@ -1254,6 +1302,8 @@ async fn external(s: &Arc<NodeState>, kind: &str, id: &str, url: &str) -> ItemPa
         blurb: it.description.clone().filter(|d| !d.is_empty() && kind != "song"),
         section: if it.in_library.is_some() { "albums" } else { "home" }.into(),
         mb_match: None,
+        about_text: None,
+        image_credit: None,
         related: Vec::new(),
         concerts: Vec::new(),
     }
@@ -1651,6 +1701,8 @@ mod instance_tests {
             source_id: "library".into(),
             section: "tracks".into(),
             mb_match: None,
+            about_text: None,
+            image_credit: None,
             target: serde_json::json!({}),
             versions: vec![
                 v("library", "Your library · FLAC", "", Some("track:7")),

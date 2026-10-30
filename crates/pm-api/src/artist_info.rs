@@ -1,20 +1,18 @@
 //! Artist pages get a portrait and a biography from open sources, keyed by
-//! the artist's MusicBrainz id: MusicBrainz (URL relations) → Wikidata
-//! (image P18, English Wikipedia sitelink) → Wikipedia REST summary, and when
-//! those have no portrait or no text, fanart.tv (with the project's key) and
-//! TheAudioDB (compare-music-assistant #16). Fetched
-//! lazily on the first request, cached in the library settings for 30 days
-//! (misses for 7), the image stored in the art directory. Every origin is a
-//! field on `NodeState` so tests point them at a local server.
+//! the artist's MusicBrainz id (from the tags, else `library_match`): MusicBrainz (URL
+//! relations: Wikidata and "Also on") → Wikidata (image P18 with its Commons credit, facts, the
+//! Wikipedia sitelink in the reader's language, else English) → Wikipedia REST summary (see
+//! `about`), and when those have no portrait or no text, fanart.tv (with the project's key) and
+//! TheAudioDB (compare-music-assistant #16). Fetched lazily on the first request, cached in the
+//! library settings per language for 30 days (misses a day), the image stored in the art
+//! directory. Every origin is a field on `NodeState` so tests point them at a local server.
 
+use crate::about::{self, HIT_TTL_SECS, MISS_TTL_SECS};
 use crate::state::NodeState;
-use crate::types::ArtistInfo;
+use crate::types::{AboutText, ArtistInfo};
 use pm_model::Mbid;
 use std::collections::HashSet;
 use std::sync::Mutex;
-
-const HIT_TTL_SECS: i64 = 30 * 24 * 3600;
-const MISS_TTL_SECS: i64 = 7 * 24 * 3600;
 
 /// Where the lookups go; tests swap these for a local server.
 #[derive(Debug, Clone)]
@@ -27,6 +25,28 @@ pub struct InfoBases {
     pub audiodb: String,
     /// The fanart.tv project key (built in; tests set one).
     pub fanart_key: Option<String>,
+    /// Between two Wikimedia requests (200 a minute); tests set none.
+    pub wikimedia_interval: std::time::Duration,
+}
+
+impl InfoBases {
+    /// The Wikipedia in `lang` (`{lang}` in the base is replaced; a test's base is used as is).
+    pub fn wikipedia_for(&self, lang: &str) -> String {
+        self.wikipedia.replace("{lang}", lang)
+    }
+
+    /// A request to Wikidata, Wikipedia or Commons, paced as Wikimedia asks.
+    pub fn is_wikimedia(&self, url: &str) -> bool {
+        let wikipedia = url::Url::parse(url)
+            .ok()
+            .and_then(|u| u.host_str().map(|h| h.ends_with(".wikipedia.org")))
+            .unwrap_or(false);
+        [self.wikidata.as_str(), self.commons.as_str()]
+            .iter()
+            .any(|b| url.starts_with(b))
+            || wikipedia
+            || (!self.wikipedia.contains("{lang}") && url.starts_with(&self.wikipedia))
+    }
 }
 
 impl Default for InfoBases {
@@ -34,11 +54,12 @@ impl Default for InfoBases {
         Self {
             musicbrainz: "https://musicbrainz.org".into(),
             wikidata: "https://www.wikidata.org".into(),
-            wikipedia: "https://en.wikipedia.org".into(),
+            wikipedia: "https://{lang}.wikipedia.org".into(),
             commons: "https://commons.wikimedia.org".into(),
             fanart: "https://webservice.fanart.tv".into(),
             audiodb: "https://www.theaudiodb.com".into(),
             fanart_key: crate::project_apps::fanart_key().map(str::to_string),
+            wikimedia_interval: std::time::Duration::from_millis(300),
         }
     }
 }
@@ -47,8 +68,8 @@ fn client(s: &NodeState) -> reqwest::Client {
     s.http_client()
 }
 
-fn in_flight() -> &'static Mutex<HashSet<i64>> {
-    static SET: std::sync::OnceLock<Mutex<HashSet<i64>>> = std::sync::OnceLock::new();
+fn in_flight() -> &'static Mutex<HashSet<(i64, String)>> {
+    static SET: std::sync::OnceLock<Mutex<HashSet<(i64, String)>>> = std::sync::OnceLock::new();
     SET.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
@@ -58,13 +79,15 @@ struct Cached {
     info: ArtistInfo,
 }
 
-/// The artist's info, from cache or freshly fetched. Never fails on network
-/// trouble: it answers what it has and remembers a miss.
+/// The artist's info in `lang` (a bare language code, see `about::language`), from cache or
+/// freshly fetched. Never fails on network trouble: it answers what it has and remembers a
+/// miss.
 pub(crate) async fn artist_info(
     s: &NodeState,
     artist_id: i64,
+    lang: &str,
 ) -> Result<ArtistInfo, pm_library::LibraryError> {
-    let key = format!("artist.info.{artist_id}");
+    let key = format!("artist.info.{artist_id}.{lang}");
     let (mbid, name) = {
         let lib = s.library.lock().expect("library poisoned");
         let Some(a) = lib.get_artist(artist_id)? else {
@@ -75,7 +98,7 @@ pub(crate) async fn artist_info(
             .and_then(|j| serde_json::from_str::<Cached>(&j).ok())
         {
             let age = pm_library::db::now_unix() - c.at;
-            let ttl = if c.info.bio.is_some() || c.info.image {
+            let ttl = if c.info.bio.is_some() || c.info.image || !c.info.links.is_empty() {
                 HIT_TTL_SECS
             } else {
                 MISS_TTL_SECS
@@ -93,14 +116,15 @@ pub(crate) async fn artist_info(
             ..ArtistInfo::default()
         });
     };
-    if !in_flight().lock().expect("in-flight lock").insert(artist_id) {
+    let flight = (artist_id, lang.to_string());
+    if !in_flight().lock().expect("in-flight lock").insert(flight.clone()) {
         return Ok(ArtistInfo {
             note: Some("Looking this artist up…".into()),
             ..ArtistInfo::default()
         });
     }
-    let info = fetch(s, artist_id, mbid, &name).await;
-    in_flight().lock().expect("in-flight lock").remove(&artist_id);
+    let info = fetch(s, artist_id, mbid, &name, lang).await;
+    in_flight().lock().expect("in-flight lock").remove(&flight);
     let lib = s.library.lock().expect("library poisoned");
     let cached = Cached {
         at: pm_library::db::now_unix(),
@@ -114,33 +138,30 @@ pub(crate) fn image_path(s: &NodeState, artist_id: i64) -> std::path::PathBuf {
     s.art_dir.join(format!("artist-{artist_id}.jpg"))
 }
 
-async fn get_json(http: &reqwest::Client, url: &str) -> Option<serde_json::Value> {
-    // MusicBrainz: one request at a time with the rest of the node
-    let mut turn = match url.contains("/ws/2/") {
-        true => Some(pm_library::musicbrainz::take_turn(url, std::time::Duration::from_secs(1)).await),
-        false => None,
-    };
-    let resp = http
-        .get(url)
-        .header(reqwest::header::ACCEPT, "application/json")
-        .send()
-        .await
-        .ok()?;
-    if matches!(resp.status().as_u16(), 503 | 429) {
-        if let Some(t) = turn.as_mut() {
-            t.back_off(pm_library::musicbrainz::retry_after(
-                resp.headers(),
-                std::time::Duration::from_secs(2),
-            ));
-        }
-    }
-    if !resp.status().is_success() {
+/// A Commons file's name from an upload URL (`…/commons/a/ab/Name.jpg`, or a thumbnail's
+/// `…/commons/thumb/a/ab/Name.jpg/320px-Name.jpg`).
+fn commons_name(url: &str) -> Option<String> {
+    let u = url::Url::parse(url).ok()?;
+    if u.host_str()? != "upload.wikimedia.org" {
         return None;
     }
-    resp.json().await.ok()
+    let segs: Vec<&str> = u.path_segments()?.collect();
+    let at = segs.iter().position(|s| *s == "commons")?;
+    let rest = &segs[at + 1..];
+    let name = if rest.first() == Some(&"thumb") {
+        rest.get(3)?
+    } else {
+        rest.get(2)?
+    };
+    Some(
+        url::form_urlencoded::parse(format!("n={name}").as_bytes())
+            .next()?
+            .1
+            .into_owned(),
+    )
 }
 
-async fn fetch(s: &NodeState, artist_id: i64, mbid: Mbid, name: &str) -> ArtistInfo {
+async fn fetch(s: &NodeState, artist_id: i64, mbid: Mbid, name: &str, lang: &str) -> ArtistInfo {
     let bases = s.info_bases.read().expect("info bases").clone();
     let http = client(s);
     let mut info = ArtistInfo {
@@ -148,95 +169,85 @@ async fn fetch(s: &NodeState, artist_id: i64, mbid: Mbid, name: &str) -> ArtistI
         ..ArtistInfo::default()
     };
     // 1. MusicBrainz: URL relations.
-    let mb = get_json(
-        &http,
+    let mb = about::get_json(
+        s,
         &format!(
             "{}/ws/2/artist/{mbid}?inc=url-rels&fmt=json",
             bases.musicbrainz.trim_end_matches('/')
         ),
     )
     .await;
-    let mut wikidata_id: Option<String> = None;
-    let mut wikipedia_title: Option<String> = None;
-    if let Some(rels) = mb.as_ref().and_then(|v| v["relations"].as_array()) {
-        for r in rels {
-            let kind = r["type"].as_str().unwrap_or("");
-            let url = r["url"]["resource"].as_str().unwrap_or("");
-            match kind {
-                "wikidata" => wikidata_id = url.rsplit('/').next().map(str::to_string),
-                // Anyone can edit MusicBrainz: only a web link is kept
-                "official homepage" if info.homepage.is_none() => info.homepage = crate::web::web_link(url),
-                "wikipedia" if url.contains("en.wikipedia.org/wiki/") => {
-                    wikipedia_title = url.rsplit('/').next().map(str::to_string)
-                }
-                _ => {}
-            }
+    let rels = mb.as_ref().map(about::relations).unwrap_or_default();
+    info.homepage = rels.homepage.clone();
+    info.links = rels.links.clone();
+    // 2. Wikidata: portrait, facts and the article.
+    let ent = match &rels.wikidata {
+        Some(q) => {
+            info.wikidata = Some(format!("https://www.wikidata.org/wiki/{q}"));
+            about::entity(s, q).await
         }
-    }
-    // 2. Wikidata: portrait and the English article.
-    let mut commons_file: Option<String> = None;
-    if let Some(q) = &wikidata_id {
-        info.wikidata = Some(format!("https://www.wikidata.org/wiki/{q}"));
-        if let Some(v) = get_json(
-            &http,
-            &format!(
-                "{}/wiki/Special:EntityData/{q}.json",
-                bases.wikidata.trim_end_matches('/')
-            ),
-        )
-        .await
-        {
-            let ent = &v["entities"][q.as_str()];
-            commons_file = ent["claims"]["P18"][0]["mainsnak"]["datavalue"]["value"]
-                .as_str()
-                .map(str::to_string);
-            if wikipedia_title.is_none() {
-                wikipedia_title = ent["sitelinks"]["enwiki"]["title"].as_str().map(str::to_string);
-            }
-        }
+        None => None,
+    };
+    let mut commons_file: Option<String> = ent.as_ref().and_then(|e| {
+        e["claims"]["P18"][0]["mainsnak"]["datavalue"]["value"]
+            .as_str()
+            .map(str::to_string)
+    });
+    if let Some(e) = &ent {
+        info.facts = about::artist_facts(s, e, lang).await;
     }
     // 3. Wikipedia summary.
-    if let Some(title) = &wikipedia_title {
-        let t = title.replace(' ', "_");
-        if let Some(v) = get_json(
-            &http,
-            &format!(
-                "{}/api/rest_v1/page/summary/{}",
-                bases.wikipedia.trim_end_matches('/'),
-                urlencode(&t)
-            ),
-        )
-        .await
-        {
-            info.bio = v["extract"]
-                .as_str()
-                .filter(|e| !e.trim().is_empty())
-                .map(str::to_string);
-            info.wikipedia = v["content_urls"]["desktop"]["page"]
-                .as_str()
-                .map(str::to_string)
-                .or_else(|| Some(format!("https://en.wikipedia.org/wiki/{t}")));
+    if let Some((l, title)) = about::article(lang, &rels, ent.as_ref()) {
+        if let Some((text, picture)) = about::summary(s, &l, &title).await {
+            info.bio = Some(text.text.clone());
+            info.wikipedia = text.url.clone();
+            info.text = Some(text);
+            // No P18: the article's picture, credited from Commons when it is there
             if commons_file.is_none() {
-                if let Some(src) = v["thumbnail"]["source"].as_str() {
+                commons_file = picture.as_deref().and_then(commons_name);
+                if let (None, Some(src)) = (&commons_file, &picture) {
                     info.image = download(&http, src, &image_path(s, artist_id)).await;
+                    if info.image {
+                        info.image_from = Some("Wikipedia".into());
+                    }
                 }
             }
         }
     }
-    // 4. The portrait from Commons.
+    // 4. The portrait from Commons, with its author and licence.
     if let Some(file) = commons_file {
-        let url = format!(
-            "{}/wiki/Special:FilePath/{}?width=800",
-            bases.commons.trim_end_matches('/'),
-            urlencode(&file.replace(' ', "_"))
-        );
-        info.image = download(&http, &url, &image_path(s, artist_id)).await;
+        if let Some((url, credit)) = about::commons_file(s, &file).await {
+            info.image = download(&http, &url, &image_path(s, artist_id)).await;
+            if info.image {
+                info.image_credit = Some(credit);
+            }
+        }
+        if !info.image {
+            // The file without its details (Commons' API didn't answer): its page has the credit
+            let page = format!(
+                "https://commons.wikimedia.org/wiki/File:{}",
+                about::urlencode(&file.replace(' ', "_"))
+            );
+            let url = format!(
+                "{}/wiki/Special:FilePath/{}?width=800",
+                bases.commons.trim_end_matches('/'),
+                about::urlencode(&file.replace(' ', "_"))
+            );
+            info.image = download(&http, &url, &image_path(s, artist_id)).await;
+            if info.image {
+                info.image_credit = Some(crate::types::ImageCredit {
+                    file_page: Some(page),
+                    source: "Wikimedia Commons".into(),
+                    ..Default::default()
+                });
+            }
+        }
     }
     // 5. fanart.tv: a portrait, with the project's key.
     if !info.image {
         if let Some(key) = bases.fanart_key.as_deref() {
-            if let Some(v) = get_json(
-                &http,
+            if let Some(v) = about::get_json(
+                s,
                 &format!(
                     "{}/v3/music/{mbid}?api_key={key}",
                     bases.fanart.trim_end_matches('/')
@@ -255,8 +266,8 @@ async fn fetch(s: &NodeState, artist_id: i64, mbid: Mbid, name: &str) -> ArtistI
     }
     // 6. TheAudioDB: a portrait and a biography where the others had none.
     if !info.image || info.bio.is_none() {
-        if let Some(v) = get_json(
-            &http,
+        if let Some(v) = about::get_json(
+            s,
             &format!(
                 "{}/api/v1/json/{}/artist-mb.php?i={mbid}",
                 bases.audiodb.trim_end_matches('/'),
@@ -281,12 +292,24 @@ async fn fetch(s: &NodeState, artist_id: i64, mbid: Mbid, name: &str) -> ArtistI
                     .map(str::trim)
                     .filter(|b| !b.is_empty())
                     .map(|b| b.chars().take(1200).collect::<String>());
-                if info.bio.is_some() {
+                if let Some(b) = &info.bio {
                     info.bio_from = Some("TheAudioDB".into());
+                    info.text = Some(AboutText {
+                        text: b.clone(),
+                        source: "TheAudioDB".into(),
+                        ..AboutText::default()
+                    });
                 }
             }
         }
     }
+    // 7. What Pinakes knows is "also on" (by the artist's MusicBrainz link)
+    about::with_pinakes(
+        s,
+        &format!("https://musicbrainz.org/artist/{mbid}"),
+        &mut info.links,
+    )
+    .await;
     if info.bio.is_none() && !info.image {
         info.note = Some(format!(
             "Nothing found for {name} on Wikidata, Wikipedia, fanart.tv or TheAudioDB yet."
@@ -345,17 +368,4 @@ async fn download(http: &reqwest::Client, url: &str, to: &std::path::Path) -> bo
         return false;
     }
     tokio::fs::write(to, &bytes).await.is_ok()
-}
-
-fn urlencode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'(' | b')' | b',' => {
-                out.push(b as char)
-            }
-            _ => out.push_str(&format!("%{b:02X}")),
-        }
-    }
-    out
 }
