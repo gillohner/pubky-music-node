@@ -2,7 +2,11 @@
 //   * Home's Get started shows the steps the node names (no music step: the config has a folder),
 //     goes when hidden, stays hidden in a new browser (kept on the node), comes back from
 //     Settings › Home for everyone, and goes by itself when only optional steps are left;
-//   * Library folders marks the config's folder and offers no Remove for it;
+//   * Your library › Node library marks the config's folder and offers no Remove for it;
+//   * Your library: My music lists homeserver files as songs (names, not hashes) with the save
+//     status and Save now, edits a song's tags on the node, deletes a file; Add music offers
+//     upload, a folder or share, and playlists; Node library takes a song out and brings it back;
+//     a listener gets My music only, with no edit controls; Settings has no library or import tab;
 //   * Group outputs offers the outputs that group in sync (Sonos, HEOS, BluOS, squeezelite, the
 //     app's players on a DAC), by
 //     kind, one kind at a time, says what a pick becomes, and doesn't offer one that shares no
@@ -82,10 +86,10 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
     await p.unroute(/\/v1\/me\/first-steps$/);
     await c.close();
 
-    // ---- Library folders ----
+    // ---- Your library › Node library: folders ----
     c = await ctx(); p = await c.newPage();
     const ns = await api('GET', '/node/settings');
-    await p.goto(BASE + '/settings/library');
+    await p.goto(BASE + '/library/node');
     await p.waitForSelector('#folderadd');
     const rows = await p.$$eval('#main code.path', (els) => els.map((e) => { const r = e.closest('.set-row'); return { path: e.textContent, text: r.textContent, remove: !!r.querySelector('[data-folder-del]') }; }));
     for (const f of ns.config_folders) {
@@ -303,6 +307,87 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
       await api('DELETE', `/zones/${encodeURIComponent(nz.id)}/dsp`).catch(() => {});
       await api('PUT', '/node/settings', { dev_outputs: !!devBefore }).catch(() => {});
     }
+    // ---- Your library ----
+    c = await ctx(); p = await c.newPage();
+    const choose = async (label) => { await p.waitForSelector('dialog[open] .choice'); await p.locator('dialog[open] .choice', { hasText: label }).first().click(); };
+    // The owner: three tabs; without a Pubky session (CI's node) My music says to sign in
+    await p.goto(BASE + '/library'); await p.waitForSelector('#libadd');
+    const libTabs = await p.$$eval('#main [data-libtab]', (els) => els.map((e) => e.textContent.trim()));
+    check(JSON.stringify(libTabs) === '["My music","Node library","Import"]', `the owner's tabs (${libTabs.join(', ')})`);
+    check(/Sign in with Pubky/.test(await p.textContent('#main')), 'without a Pubky session My music asks to sign in');
+    check(await p.locator('.nav-item[data-view="library"]').count() === 1, 'Your library is in the main navigation');
+    await p.goto(BASE + '/settings'); await p.waitForSelector('#main .set-group', { state: 'attached' });
+    const setNav = await p.textContent('#main');
+    check(!/Library folders/.test(setNav) && !/Move from Roon/.test(setNav), 'Settings keeps settings: no library folders, no import');
+    // My music with a session (mocked): songs by name, the save status, Save now, the ⋯ menu
+    const libTracks = (await api('GET', '/library/tracks?limit=5')).tracks;
+    const lt0 = libTracks[0];
+    await p.route(/\/v1\/pubky$/, (r) => r.fulfill({ json: { user: 'k'.repeat(52), sync: null, needs_resign: false } }));
+    await p.route(/\/v1\/storage$/, (r) => r.fulfill({ json: { homeserver: { mode: 'bundled', quota_mb: 1000, used_bytes: 8300000 }, saving: { state: 'saved', pending: 0, last_saved_at: Math.floor(Date.now() / 1000) - 120 } } }));
+    const HASHED = '0123456789abcdef-one.flac';
+    await p.route(/\/v1\/me\/music$/, (r) => r.fulfill({ json: { count: 2, bytes: 8300100, files: [
+      { path: `/priv/pubky.music/files/${HASHED}`, name: 'one.flac', size: 8300000, song: { id: lt0.id, title: lt0.title, artist: 'The Band', duration_ms: 5000, edited: false } },
+      { path: '/priv/pubky.music/files/fedcba9876543210-new.flac', name: 'new.flac', size: 100 },
+    ] } }));
+    let deleted = null;
+    await p.route(/\/v1\/pubky\/files$/, (r) => { if (r.request().method() !== 'DELETE') return r.continue(); deleted = r.request().postDataJSON(); return r.fulfill({ json: [] }); });
+    await p.goto(BASE + '/library'); await p.waitForSelector('#main .mrow');
+    const mineText = await p.textContent('#main');
+    check(mineText.includes(lt0.title) && !mineText.includes(HASHED), 'a homeserver file shows as its song, not its hashed name');
+    check(/Being added/.test(mineText) && mineText.includes('new.flac'), 'a file the library hasn’t read yet shows by its own name');
+    check(/Saved · 2 min ago/.test(await p.textContent('#libsaved')) && (await p.textContent('#sync')).trim() === 'Save now', 'the save status in a few words, with Save now');
+    await p.click('#main [data-mmore]');
+    const mItems = await p.$$eval('.popover.menu:not([hidden]) .pop-item', (els) => els.map((e) => e.textContent.trim()));
+    check(['Edit tags…', 'Download', 'Delete from my homeserver'].every((x) => mItems.includes(x)), `a song’s ⋯: edit, download, delete (${mItems.join(', ')})`);
+    // Edit tags: on the node, the file untouched; then back to the file's tags
+    await p.locator('.popover.menu:not([hidden]) .pop-item', { hasText: 'Edit tags…' }).click();
+    await p.waitForSelector('dialog[open] [data-k="title"]');
+    check(await p.inputValue('dialog[open] [data-k="title"]') === lt0.title, 'the edit dialog starts from the song’s tags');
+    await p.fill('dialog[open] [data-k="title"]', 'Edited by ui-setup'); await p.click('dialog[open] [data-save]');
+    await p.waitForTimeout(600);
+    check((await api('GET', `/library/tracks/${lt0.id}`)).title === 'Edited by ui-setup', 'Save edits the song on the node');
+    await api('DELETE', `/library/tracks/${lt0.id}/edit`);
+    check((await api('GET', `/library/tracks/${lt0.id}`)).title === lt0.title, 'and it goes back to the file’s tags');
+    // Delete a file from the homeserver, after asking
+    await p.goto(BASE + '/library'); await p.waitForSelector('#main [data-mdel]');
+    await p.click('#main [data-mdel]'); await choose('Delete'); await p.waitForTimeout(400);
+    check(deleted && JSON.stringify(deleted.paths) === JSON.stringify(['/priv/pubky.music/files/fedcba9876543210-new.flac']), `Delete removes that file from the homeserver (${JSON.stringify(deleted)})`);
+    // Add music: three ways in; Upload opens the drop zone, Import its tab, a folder is checked
+    await p.click('#libadd');
+    await p.waitForSelector('dialog[open] .choice');
+    const ways = await p.$$eval('dialog[open] .choice .choice-label', (els) => els.map((e) => e.textContent.trim()));
+    check(JSON.stringify(ways) === '["Upload files","Add a folder or network share","Import playlists"]', `Add music: ${ways.join(', ')}`);
+    await choose('Upload files');
+    check(await visible(p, '#libupload #updrop'), 'Upload files opens the drop zone');
+    await p.click('#libadd'); await choose('Add a folder or network share'); await choose('A folder on the node');
+    await p.waitForSelector('dialog[open] [data-field]'); await p.fill('dialog[open] [data-field]', '/no/such/folder/ui-setup'); await choose('Add folder');
+    check(await visible(p, '.toast.error'), 'a folder that isn’t there is refused before it is saved');
+    await p.click('#libadd'); await choose('Import playlists');
+    check(await p.locator('#libplimport').waitFor({ state: 'attached', timeout: 8000 }).then(() => true).catch(() => false) && new URL(p.url()).pathname === '/library/import' && /Move from Roon/.test(await p.textContent('#main')), 'Import playlists opens Your library › Import (playlist files, Move from Roon)');
+    await p.unroute(/\/v1\/pubky$/); await p.unroute(/\/v1\/storage$/); await p.unroute(/\/v1\/me\/music$/); await p.unroute(/\/v1\/pubky\/files$/);
+    // Node library: a song taken out from its ⋯ menu, then brought back
+    const before = (await api('GET', '/library/tracks?limit=50')).tracks.length;
+    await p.goto(BASE + '/tracks'); await p.waitForSelector('.track'); await p.hover('.track'); await p.click('.track [data-act="more"]');
+    await p.waitForSelector('.popover.menu:not([hidden]) .pop-item');
+    await p.locator('.popover.menu:not([hidden]) .pop-item', { hasText: 'Remove from library' }).click();
+    await choose('Remove'); await p.waitForTimeout(600);
+    check((await api('GET', '/library/tracks?limit=50')).tracks.length === before - 1, 'Remove from library takes the song out');
+    await p.goto(BASE + '/library/node'); await p.waitForSelector('#main [data-unhide]');
+    check(/Taken out of the library/.test(await p.textContent('#main')), 'Node library lists it as taken out');
+    await p.click('#main [data-unhide]');
+    const backN = await (async () => { const end = Date.now() + 20000; for (;;) { const n = (await api('GET', '/library/tracks?limit=50')).tracks.length; if (n === before || Date.now() > end) return n; await p.waitForTimeout(300); } })();
+    check(backN === before, `Bring back returns it (${backN} of ${before})`);
+    await c.close();
+    // A listener: My music only, no edit controls
+    c = await ctx(); p = await c.newPage();
+    await p.route(/\/v1\/me$/, async (r) => { const res = await r.fetch(); const j = await res.json(); return r.fulfill({ json: { ...j, role: 'listener', zones: null } }); });
+    await p.goto(BASE + '/library'); await p.waitForSelector('#libadd');
+    check(JSON.stringify(await p.$$eval('#main [data-libtab]', (els) => els.map((e) => e.textContent.trim()))) === '["My music"]', 'a listener gets My music only');
+    await p.goto(BASE + '/tracks'); await p.waitForSelector('.track'); await p.hover('.track'); await p.click('.track [data-act="more"]');
+    await p.waitForSelector('.popover.menu:not([hidden]) .pop-item');
+    const lItems = await p.$$eval('.popover.menu:not([hidden]) .pop-item', (els) => els.map((e) => e.textContent.trim()));
+    check(lItems.includes('Play next') && !lItems.includes('Edit tags…') && !lItems.includes('Remove from library'), `no edit controls for a listener (${lItems.join(', ')})`);
+    await c.close();
 
     // ---- The login dialog ----
     c = await browser.newContext(); p = await c.newPage();

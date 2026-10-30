@@ -1335,3 +1335,12 @@ html[data-art] #nowplaying { background: radial-gradient(1100px 700px at 30% 0%,
 .set-group-h:first-child { padding-top: 2px; }
 .set-group-t { font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--fg-2); }
 .set-group-s { font-size: 12px; color: var(--muted); line-height: 1.35; }
+
+/* Your library: tabs under the head, a one-line status, file rows with their size */
+.libtabs { margin: 10px 0 14px; }
+.libstatus + .muted.small { margin: -6px 0 14px; }
+.libstatus { font-size: 13px; color: var(--fg-2); margin: 0 0 14px; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; }
+.libstatus .spin { margin-right: 4px; }
+.mrow .thumb { margin-right: 0; }
+.mrow .msize { min-width: 64px; text-align: right; }
+@media (max-width: 600px) { .mrow .msize { display: none; } }

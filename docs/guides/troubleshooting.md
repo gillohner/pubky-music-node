@@ -42,7 +42,7 @@ its first start and keeps it in the `api-token` file in its data folder. Where i
 
 ## The library stays empty
 
-- **Settings › Library folders** lists the folders. In Docker and Umbrel, `/music` (your mounted
+- **Your library › Node library** lists the folders. In Docker and Umbrel, `/music` (your mounted
   music folder) is there by itself, marked **From config**, and read at every start. "Not found
   on this computer" means the folder isn't mounted or the path is wrong.
 - Another folder: type its path there and press **Add folder**. In Docker the path is the one

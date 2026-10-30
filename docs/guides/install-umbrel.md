@@ -29,9 +29,10 @@ Pubky Music app and in Subsonic apps (user `pubky`).
 - **Umbrel's shared storage** (the Files app, downloads from other Umbrel apps) is visible to the
   node, read-only, as `/music`, and the node reads it by itself when it starts. New files are picked up
   about 15 seconds after they land.
-- **Add music**, a button on the Albums and Tracks pages, uploads files from your browser, or
-  copies a folder, into your homeserver's private storage. The node plays them from there without
-  a second copy.
+- **Add music**, the button on **Your library** (and on the Albums and Tracks pages), uploads files
+  from your browser, or copies a folder, into your homeserver's private storage; the node plays
+  them from there without a second copy. It also adds a folder or a network share, and imports
+  playlists.
 
 ## Speakers
 

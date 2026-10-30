@@ -50,7 +50,7 @@ three, then connect them to it.
    when those steps are done; **Hide these steps** hides it for everyone, and **Settings › Home
    for everyone** shows it again.
 3. **Add your music.** With Docker and Umbrel, the node reads your music folder (`/music`) by
-   itself when it starts. Otherwise, in **Settings › Library folders** (or on the Get started
+   itself when it starts. Otherwise, in **Your library › Node library** (or on the Get started
    card), type the music folder's path and press **Add folder**. The node keeps watching its
    folders: new files show up about 15 seconds after they land.
 4. **Pick a speaker.** Speakers on your network show up by themselves under **Settings › Zones and

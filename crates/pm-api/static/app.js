@@ -267,6 +267,182 @@
   };
   window.addEventListener('beforeunload', (e) => { if (up.running) { e.preventDefault(); e.returnValue = ''; } });
 
+  // ---- Your library (owner, 2026-10-29; TASK-pinakes-social-ux G) ----
+  // One place for the music: My music (what is on your homeserver, as songs, with saving and
+  // tagging) and, for the node's owner, Node library (the folders, shares and drives the node plays
+  // in place, scans, edits). One "Add music" button. Settings keeps settings only.
+  // Settings-style rows, the same look as Settings
+  const sHelp = (h) => (h ? `<p class="set-help">${h}</p>` : '');
+  const sRow = (label, h, ctl, cls = '') => `<div class="set-row ${cls}"><div class="set-label"><div class="set-name">${label}</div>${sHelp(h)}</div>${ctl ? `<div class="set-ctl">${ctl}</div>` : ''}</div>`;
+  const sBlock = (label, h, body) => `<div class="set-row set-block">${label || h ? `<div class="set-label">${label ? `<div class="set-name">${label}</div>` : ''}${sHelp(h)}</div>` : ''}<div class="set-body">${body}</div></div>`;
+  const sGroup = (title, body) => `<div class="set-group">${title ? `<h3 class="set-h">${title}</h3>` : ''}<div class="set-rows">${body}</div></div>`;
+  // The folders, shares and drives the node plays in place (was Settings › Library folders)
+  const nodeLibraryHtml = ({ info, folders, ns, shares, drv }) => {
+    const row = sRow; const block = sBlock; const group = sGroup;
+      const scanErrs = info.last_scan && info.last_scan.error_count ? `<details class="scanerrs small"><summary>${countOf(info.last_scan.error_count, 'files')} could not be read in the last scan</summary><ul>${info.last_scan.errors.map(([fp, why]) => `<li><code>${esc(fp.split('/').slice(-2).join('/'))}</code>: ${esc(why.replace(fp, '').replace(/^[: ]+/, '') || 'unreadable')}</li>`).join('')}</ul></details>` : '';
+      const library = group('Music folders',
+        (folders.length ? folders.map(([fp, present]) => { const fromConfig = (ns.config_folders || []).includes(fp); return row(`<code class="path">${esc(fp)}</code>`, [present ? '' : 'Not found on this computer.', fromConfig ? 'From the node’s config (<code>node.toml</code>, or <code>PM_FOLDERS</code> in Docker), read at every start. To remove it, take it out there and restart the node; then Remove here forgets its songs.' : ''].filter(Boolean).join(' '), fromConfig ? '<span class="pill">From config</span>' : `<button class="btn sm ghost" data-folder-del="${esc(fp)}">Remove</button>`); }).join('') : row('No folders yet', 'Add the folder with your music below.', ''))
+        + block('Add a folder', 'A folder on the node. It is read now and watched for new files; your files stay as they are.', `<div class="toolbar"><input class="input" id="folderadd" placeholder="/path/to/your/Music" aria-label="Folder to add"><button class="btn primary" id="folderbtn">${icon('plus')} Add folder</button></div>${scanErrs}`)
+        + row('Check for changes', 'Reads every folder again; unchanged files are skipped.', '<button class="btn" id="scan">Scan now</button>'))
+        + group('WebDAV shares', shares.map((sh) => row(esc(sh.name), `${esc(sh.url)} · ${countOf(sh.tracks, 'songs')}`, `<button class="btn sm" data-wd-scan="${esc(sh.id)}">Rescan</button><button class="btn sm ghost" data-wd-del="${esc(sh.id)}">Remove</button>`)).join('')
+          + row('Add a WebDAV share', 'A music folder on Nextcloud, ownCloud or a NAS, played where it is (it is read again every 6 hours).', `<button class="btn" id="wdopen">${icon('plus')} Add share</button>`))
+        + group('Cloud drives', drv.roots.map((r) => row(esc(r.name), `${r.provider === 'google' ? 'Google Drive' : 'OneDrive'} · ${countOf(r.tracks, 'songs')}`, `<button class="btn sm" data-dr-scan="${esc(r.id)}">Rescan</button><button class="btn sm ghost" data-dr-del="${esc(r.id)}">Remove</button>`)).join('')
+          + drv.providers.map((p) => row(esc(p.name), !p.configured ? `Not set up on this node (an app's client id: <code>[drives] ${esc(p.id)}_client_id</code>)` : p.connected ? `Signed in${p.user ? ` as ${esc(p.user)}` : ''}` : 'Sign in, then pick a music folder; it is read again every 6 hours.', !p.configured ? '' : p.connected ? `<button class="btn" data-dr-add="${esc(p.id)}" data-dr-name="${esc(p.name)}">${icon('plus')} Add a folder</button><button class="btn sm ghost" data-dr-out="${esc(p.id)}">Sign out</button>` : `<button class="btn" data-dr-login="${esc(p.id)}">Sign in</button>`)).join(''))
+        + group('Fix my files\u2019 tags', block('', 'Write what the node knows into your files, so other players see it too: each artist on their own (not one artist called \u201cSefa, Dr. Peacock\u201d), and the MusicBrainz match of each song. You see every change first; each file\u2019s tags are saved before it changes, and the music itself is never touched.', '<div class="actions"><button class="btn" id="fixcheck">Check my files</button></div><div id="fixout" aria-live="polite"></div>'))
+        + group('Identify', block('Match songs to MusicBrainz', 'Gives every file an identity that playlists, tags and other apps understand: IDs in the tags first, then how it sounds (AcoustID), with the folder as the album. Unsure matches wait for you.', '<div id="idcard"><div id="idbox" class="muted small">Loading…</div></div>'));
+    return library;
+  };
+  const bindNodeLibrary = () => {
+      // Fix my files' tags: the list first, then the write
+      const loadFixes = async () => {
+        const out = $('#fixout'); if (!out) return;
+        out.innerHTML = '<div class="skeleton" style="height:60px;margin-top:10px"></div>';
+        let r; try { r = await api('GET', '/library/tag-fixes?limit=50'); } catch (e) { out.innerHTML = `<p class="small warn-text">${esc(e.message)}</p>`; return; }
+        const label = (k) => ({ ARTISTS: 'Artists', 'MUSICBRAINZ_TRACKID': 'MusicBrainz song', 'MusicBrainz Track Id': 'MusicBrainz song', 'MUSICBRAINZ_ALBUMID': 'MusicBrainz album', 'MusicBrainz Album Id': 'MusicBrainz album', 'MUSICBRAINZ_ARTISTID': 'MusicBrainz artists', 'MusicBrainz Artist Id': 'MusicBrainz artists', 'ACOUSTID_ID': 'AcoustID', 'Acoustid Id': 'AcoustID' }[k] || k);
+        if (!r.total) { out.innerHTML = `<p class="small muted" style="margin-top:10px">Your files already say everything the node knows.${r.cannot ? ` (${countOf(r.cannot, 'files')} in a format the writer leaves alone.)` : ''}</p>`; return; }
+        out.innerHTML = `<p class="small" style="margin-top:10px">${countOf(r.total, 'files')} would change${r.total > r.files.length ? ` (the first ${r.files.length} below)` : ''}${r.cannot ? `; ${countOf(r.cannot, 'files')} in a format the writer leaves alone` : ''}.</p>
+          <div class="set-list fixlist">${r.files.map((f) => `<div class="set-item"><div class="grow"><div class="name">${esc(f.title)}</div><div class="sub">${f.changes.map((c) => `${esc(label(c.key))}: ${c.now.length ? `<s>${esc(c.now.join(' · '))}</s> → ` : ''}${esc(c.then.join(' · '))}`).join('<br>')}</div></div></div>`).join('')}</div>
+          <div class="actions" style="margin-top:10px"><button class="btn primary" id="fixgo">Write into ${countOf(r.total, 'files')}</button></div>`;
+        $('#fixgo').onclick = async () => { const b = $('#fixgo'); b.disabled = true; b.textContent = 'Writing…'; try { const w = await api('POST', '/library/tag-fixes', {}); toast(`${countOf(w.written, 'files')} fixed${w.skipped.length ? `; ${w.skipped.length} left as they were` : ''}. Backups: ${w.backup_dir}`); loadFixes(); } catch (e) { toast(e.message, 'error'); b.disabled = false; } };
+      };
+      const fc = $('#fixcheck'); if (fc) fc.onclick = loadFixes;
+      $('#scan').onclick = async () => { try { await api('POST', '/library/scan', {}); toast('Scan started'); watchScan({ scanning: true }); } catch (e) { toast(e.message, 'error'); } };
+      const addFolder = async () => { const p = $('#folderadd').value.trim(); if (!p) return; try { const r = await api('POST', '/library/folders', { path: p }); toast(r.scan_started ? 'Folder added; scanning' : 'Folder added; scanned after the current scan'); watchScan({ scanning: true }); render(); } catch (e) { toast(e.message, 'error'); } };
+      $$('[data-dr-login]').forEach((b) => b.onclick = async () => { try { const r = await api('POST', `/library/drives/${b.dataset.drLogin}/login`); location.href = r.url; } catch (e) { toast(e.message, 'error'); } });
+      $$('[data-dr-add]').forEach((b) => b.onclick = async () => { const r = await driveFolderDialog(b.dataset.drAdd, b.dataset.drName); if (r) { toast(`${r.name} added; scanning`); render(); } });
+      $$('[data-dr-out]').forEach((b) => b.onclick = async () => { try { await api('DELETE', `/library/drives/${b.dataset.drOut}/account`); render(); } catch (e) { toast(e.message, 'error'); } });
+      $$('[data-dr-scan]').forEach((b) => b.onclick = async () => { try { await api('POST', `/library/drives/roots/${b.dataset.drScan}/scan`); toast('Reading the folder again'); } catch (e) { toast(e.message, 'error'); } });
+      $$('[data-dr-del]').forEach((b) => b.onclick = async () => { if (!confirm('Remove this folder and its songs from the library? The files on the drive stay.')) return; try { const r = await api('DELETE', `/library/drives/roots/${b.dataset.drDel}`); toast(`Removed, with ${countOf(r.tracks, 'songs')}`); render(); } catch (e) { toast(e.message, 'error'); } });
+      $('#wdopen').onclick = async () => { const sh = await webdavDialog(); if (sh) { toast(`${sh.name} added; scanning`); render(); } };
+      $$('[data-wd-scan]').forEach((b) => b.onclick = async () => { try { await api('POST', `/library/webdav/${b.dataset.wdScan}/scan`); toast('Reading the share again'); } catch (e) { toast(e.message, 'error'); } });
+      $$('[data-wd-del]').forEach((b) => b.onclick = async () => { if (!confirm('Remove this share and its songs from the library? The files on the share stay.')) return; try { const r = await api('DELETE', `/library/webdav/${b.dataset.wdDel}`); toast(`Removed, with ${countOf(r.tracks, 'songs')}`); render(); } catch (e) { toast(e.message, 'error'); } });
+      $('#folderbtn').onclick = addFolder; $('#folderadd').onkeydown = (e) => { if (e.key === 'Enter') addFolder(); };
+      $$('[data-folder-del]', main).forEach((b) => b.onclick = async () => { if (!b.dataset.armed) { b.dataset.armed = '1'; b.textContent = 'Really remove?'; setTimeout(() => { if (b.isConnected) { delete b.dataset.armed; b.textContent = 'Remove'; } }, 3000); return; } try { const r = await api('DELETE', '/library/folders?path=' + encodeURIComponent(b.dataset.folderDel)); toast(`Folder removed · ${countOf(r.removed_tracks, 'tracks')} gone`); render(); } catch (e) { toast(e.message, 'error'); } });
+    renderIdentify();
+  };
+  // Playlists from files and moving from Roon (was Settings › Import)
+  const importHtml = () => {
+    const block = sBlock; const group = sGroup;
+      const importTab = group('Move from Roon', block('', '', `<ol class="muted small steps"><li>In Roon, open Tracks (and Albums), select all, then ⋯ › Export › Excel. Export each playlist you want the same way.</li><li>Choose the files here and check them: nothing changes yet.</li><li>Import what matched.</li></ol><input type="file" id="roonfiles" accept=".xlsx,.csv" multiple aria-label="Roon export files"><label class="check small"><input type="checkbox" id="roonfav" checked> Roon favourites become Favourites</label><label class="check small"><input type="checkbox" id="roonpl" checked> Playlist exports become playlists</label><label class="check small"><input type="checkbox" id="roontags"> Roon tags become tags on Pubky <span class="muted">(public)</span></label><div class="toolbar"><button class="btn" id="rooncheck">${icon('search')} Check</button><button class="btn primary" id="roongo" disabled>${icon('download')} Import</button></div><div id="roonout" aria-live="polite"></div>`));
+    return group('Playlists from files', sBlock('', 'An M3U or M3U8 list, a CSV, or a Roon playlist export: each line is matched to a song (MusicBrainz, ISRC, then title and artist); what doesn’t match stays as its line.', `<label class="btn file-btn">${icon('upload')} Choose a playlist file<input type="file" id="libplimport" accept=".m3u,.m3u8,.csv,.xlsx"></label><div id="libplout" class="small" aria-live="polite"></div>`)
+      + sRow('Playlists on a service', 'TIDAL, Spotify, Deezer and the others: open the playlist on Sources and choose Import.', '<button class="btn ghost" data-view-go="sources">Open Sources</button>'))
+      + importTab;
+  };
+  const bindImport = () => {
+    const pi = $('#libplimport');
+    if (pi) pi.onchange = async (e) => {
+      const f = e.target.files[0]; if (!f) return; const out = $('#libplout');
+      out.innerHTML = '<span class="spin"></span> Importing…';
+      try {
+        const r = await fetch('/v1/playlists/import/file?file=' + encodeURIComponent(f.name), { method: 'POST', headers: { 'content-type': 'application/octet-stream', ...(state.token ? { authorization: 'Bearer ' + state.token } : {}) }, body: await f.arrayBuffer() });
+        const j = await r.json(); if (!r.ok) throw new Error(j.error || r.status);
+        out.innerHTML = `Imported “${esc(j.name)}”: ${j.imported} of ${j.parsed} matched${j.unresolved.length ? ` · not matched: ${esc(j.unresolved.slice(0, 4).map((d) => d.title).join(', '))}` : ''} · <button class="lnk" data-view-go="playlists">Open Playlists</button>`;
+        $$('[data-view-go]', out).forEach((b) => b.onclick = () => setView(b.dataset.viewGo));
+        state.playlists = await api('GET', '/playlists').catch(() => state.playlists);
+      } catch (er) { out.innerHTML = `<span class="warn-text">${esc(er.message)}</span>`; }
+      e.target.value = '';
+    };
+      // Move from Roon: a dry run per file, then the import of what matched (roon_import.rs).
+      const roonRun = async (dry) => {
+        const files = [...($('#roonfiles').files || [])]; const out = $('#roonout');
+        if (!files.length) { toast('Choose the Roon export files first', 'error'); return; }
+        const opts = `favourites=${$('#roonfav').checked}&playlist=${$('#roonpl').checked}&tags=${$('#roontags').checked}&dry_run=${dry}`;
+        out.innerHTML = '<div class="skeleton" style="height:60px"></div>';
+        const parts = []; let matched = 0;
+        for (const f of files) {
+          try {
+            const res = await fetch(`/v1/import/roon?file=${encodeURIComponent(f.name)}&${opts}`, { method: 'POST', headers: { 'content-type': 'application/octet-stream', ...(state.token ? { authorization: 'Bearer ' + state.token } : {}) }, body: await f.arrayBuffer() });
+            const r = await res.json(); if (!res.ok) throw new Error(r.error || res.status);
+            matched += r.matched;
+            const kind = { tracks: 'Tracks', albums: 'Albums', playlist: `Playlist “${r.name || f.name}”` }[r.kind] || r.kind;
+            const did = [r.favourites ? `${r.favourites} favourite${r.favourites === 1 ? '' : 's'}${dry ? ' to add' : ' added'}` : '', r.tags_added ? `${r.tags_added} tag${r.tags_added === 1 ? '' : 's'}${dry ? ' to put on Pubky' : ' put on Pubky'}` : '', r.playlist ? `playlist made with ${countOf(r.playlist.imported, 'songs')}` : '', r.not_identified ? `${r.not_identified} need identifying first` : ''].filter(Boolean).join(' · ');
+            parts.push(`<div class="roonfile"><div class="name">${esc(f.name)} <span class="muted small">${esc(kind)}</span></div><p class="small">${r.matched} of ${r.rows} matched this library${did ? ' · ' + esc(did) : ''}</p>`
+              + (r.tags_found.length ? `<p class="muted small">Roon tags: ${r.tags_found.slice(0, 12).map(([l, c]) => `${esc(l)} (${c})`).join(', ')}${r.tags_found.length > 12 ? '…' : ''}</p>` : '')
+              + (r.misses.length ? `<details class="small"><summary>${r.unmatched + r.not_identified} not moved, and why</summary><ul class="misses">${r.misses.map((m) => `<li><strong>${esc(m.what)}</strong>: ${esc(m.reason)}</li>`).join('')}</ul></details>` : '') + '</div>');
+          } catch (e) { parts.push(`<div class="roonfile"><div class="name">${esc(f.name)}</div><p class="small joberr">${esc(e.message)}</p></div>`); }
+        }
+        out.innerHTML = (dry ? '<p class="muted small">Checked: nothing changed yet.</p>' : '<p class="small">Imported.</p>') + parts.join('');
+        $('#roongo').disabled = !dry || !matched;
+        if (dry && !matched) out.insertAdjacentHTML('afterbegin', '<p class="small">Nothing in these files matched this library yet: scan your music folders first (Library folders below), then check again.</p>');
+        if (!dry) { state.playlists = await api('GET', '/playlists').catch(() => state.playlists); }
+      };
+      $('#roonfiles').onchange = () => { $('#roongo').disabled = true; $('#roonout').innerHTML = ''; };
+      $('#rooncheck').onclick = () => roonRun(true);
+      $('#roongo').onclick = () => roonRun(false);
+  };
+  // "Saved · 2 min ago": where saving to the homeserver stands, in a few words
+  const savedWords = (sv, pk) => (!sv ? ''
+    : pk && pk.sync && pk.sync.running ? `<span class="spin"></span> ${esc(pk.sync.step || 'Saving')}…`
+      : sv.state === 'saving' ? `<span class="spin"></span> Saving ${countOf(sv.pending, 'changes')}…`
+        : sv.state === 'error' ? `<span class="warn-text">Not saved${sv.error ? `: ${esc(sv.error)}` : ''}</span>`
+          : sv.pending ? `${countOf(sv.pending, 'changes')} to save`
+            : `Saved${sv.last_saved_at ? ` · ${ago(sv.last_saved_at)}` : ''}`);
+  // Edit a song's tags on the node (the file is not touched)
+  const editTagsDialog = (t) => new Promise((resolve) => {
+    const d = document.createElement('dialog'); d.className = 'dialog';
+    const artist = (t.artists || []).map((a) => a.name).join(', ');
+    d.innerHTML = `<h2>Edit tags</h2><p class="muted small">Kept on this node; the file stays as it is. Leave a field empty for what the file says.</p>
+      <label class="field"><span>Title</span><input class="input" data-k="title" value="${esc(t.title || '')}"></label>
+      <label class="field"><span>Artist</span><input class="input" data-k="artist" value="${esc(artist)}"></label>
+      <label class="field"><span>Album</span><input class="input" data-k="album" value="${esc((t.album && t.album.title) || '')}"></label>
+      <label class="field"><span>Album artist</span><input class="input" data-k="album_artist" value="${esc((t.album && t.album.album_artist) || '')}"></label>
+      <div class="dialog-actions"><button class="btn ghost" data-undo>Back to the file’s tags</button><button class="btn ghost" data-close>Cancel</button><button class="btn primary" data-save>Save</button></div>`;
+    document.body.appendChild(d);
+    const tr = { open: () => d.open, close: (fromBack) => done(null, fromBack) };
+    const done = (v, fromBack) => { const k = transients.indexOf(tr); if (k >= 0) transients.splice(k, 1); if (d.open) { if (d.close) d.close(); else d.removeAttribute('open'); } d.remove(); if (fromBack !== true) popTransient(); resolve(v); };
+    transients.push(tr); pushTransient();
+    $('[data-close]', d).onclick = () => done(null);
+    $('[data-undo]', d).onclick = () => done({ undo: true });
+    $('[data-save]', d).onclick = () => done(Object.fromEntries($$('[data-k]', d).map((i) => [i.dataset.k, i.value.trim()])));
+    d.addEventListener('cancel', (e) => { e.preventDefault(); done(null); });
+    if (d.showModal) d.showModal(); else d.setAttribute('open', '');
+    $('[data-k]', d).focus();
+  });
+  const editTrackTags = async (id) => {
+    let t; try { t = await api('GET', `/library/tracks/${id}`); } catch (e) { return toast(e.message, 'error'); }
+    const v = await editTagsDialog(t); if (!v) return;
+    try {
+      if (v.undo) await api('DELETE', `/library/tracks/${id}/edit`); else await api('PUT', `/library/tracks/${id}/edit`, v);
+      toast(v.undo ? 'Back to the file’s tags' : 'Saved on this node'); onLibraryChanged(); if (state.view === 'library') render();
+    } catch (e) { toast(e.message, 'error'); }
+  };
+  const removeFromLibrary = async (id, title) => {
+    const ok = await choiceDialog({ title: 'Remove from the library?', text: `“${title || 'This song'}” leaves the library; the file stays where it is and scans skip it. Your library › Node library can bring it back.`, choices: [{ label: 'Remove', value: true, primary: true }] });
+    if (!ok) return;
+    try { await api('DELETE', `/library/tracks/${id}`); toast('Removed from the library'); onLibraryChanged(); render(); } catch (e) { toast(e.message, 'error'); }
+  };
+  const editAlbumTags = async (albumId, title, artist) => {
+    const v = await choiceDialog({ title: 'Rename the album', text: 'Kept on this node; the files stay as they are.', field: { label: 'Album title', value: title || '' }, choices: [{ label: 'Save', value: 'save', primary: true }] });
+    if (!v || !v.text) return;
+    try { await api('PUT', `/library/albums/${albumId}/edit`, { title: v.text, ...(artist != null ? { album_artist: artist } : {}) }); toast('Album renamed on this node'); onLibraryChanged(); render(); } catch (e) { toast(e.message, 'error'); }
+  };
+  // "Add music": one button, three ways in
+  const addMusicDialog = async () => {
+    const owner = isOwner();
+    const pick = await choiceDialog({ title: 'Add music', text: 'Wherever the files are, they’re one library: albums, search and playback don’t change.', choices: [
+      { label: 'Upload files', note: 'From this device to your homeserver, kept privately; a cut connection carries on where it stopped.', value: 'upload', primary: true },
+      ...(owner ? [{ label: 'Add a folder or network share', note: 'Played where it is: a folder on the node’s machine, a NAS (WebDAV) or a cloud drive. Checked before it is saved.', value: 'folder' }] : []),
+      ...(owner ? [{ label: 'Import playlists', note: 'M3U, CSV or a Roon export; service playlists from their page in Sources.', value: 'import' }] : []),
+    ] });
+    if (pick === 'upload') { state.libUpload = true; if (state.view === 'library' && (state.viewArg || 'mine') === 'mine') render(); else setView('library', null); }
+    if (pick === 'folder') addPlaceDialog();
+    if (pick === 'import') setView('library', 'import');
+  };
+  const addPlaceDialog = async () => {
+    const how = await choiceDialog({ title: 'Add a folder or network share', text: 'The node reads it now and plays from it; nothing is copied.', choices: [
+      { label: 'A folder on the node’s machine', note: 'A disk or a mounted share (USB, NAS, SMB mounted on the machine).', value: 'folder', primary: true },
+      { label: 'A WebDAV share', note: 'Nextcloud, ownCloud or a NAS over the network, with its login.', value: 'webdav' },
+      { label: 'A cloud drive', note: 'Google Drive or OneDrive: sign in on Node library.', value: 'drive' },
+    ] });
+    if (how === 'folder') {
+      const v = await choiceDialog({ title: 'Add a folder', text: 'Its path on the node’s machine. The node checks it is there before saving it.', field: { label: 'Folder', value: '' }, choices: [{ label: 'Add folder', value: 'add', primary: true }] });
+      if (!v || !v.text) return;
+      try { const r = await api('POST', '/library/folders', { path: v.text }); toast(r.scan_started ? 'Folder added: reading your files' : 'Folder added'); watchScan({ scanning: true }); setView('library', 'node'); } catch (e) { toast(e.message, 'error'); }
+    }
+    if (how === 'webdav') { const sh = await webdavDialog(); if (sh) { toast(`${sh.name} added; scanning`); setView('library', 'node'); } }
+    if (how === 'drive') setView('library', 'node');
+  };
+
   // A small dialog with a few choices; resolves to the picked value, or null (Esc, Cancel).
   // With `field` ({label, value}) it shows a text field and resolves to {value, text}.
   const choiceDialog = ({ title, text, choices, field }) => new Promise((resolve) => {
@@ -1875,16 +2051,16 @@
     { group: 'device', title: 'This device', saved: saved.device || SETTINGS_GROUPS.device },
     ['appearance', 'Display', 'sun'],
     { group: 'node', title: 'This node · admin', saved: saved.node || SETTINGS_GROUPS.node },
-    ['apps', 'Service apps', 'settings'], ['people', 'People', 'artist'], ['library', 'Library folders', 'disc'], ['playback', 'Zones and outputs', 'zone'],
+    ['apps', 'Service apps', 'settings'], ['people', 'People', 'artist'], ['playback', 'Zones and outputs', 'zone'],
     ['nodehome', 'Home for everyone', 'home'],
     ...(tunnel && !bundled ? [['remote', 'Remote access', 'external']] : []),
-    ['discover', 'Discover', 'compass'], ['backup', 'Backup', 'download'], ['import', 'Import', 'upload'], ['about', 'About and updates', 'info'],
+    ['discover', 'Discover', 'compass'], ['backup', 'Backup', 'download'], ['about', 'About and updates', 'info'],
     ...(bundled ? [{ group: 'homeserver', title: 'This homeserver · admin', saved: saved.homeserver || SETTINGS_GROUPS.homeserver }, ['homeserver', 'Homeserver', 'archive'], ...(tunnel ? [['remote', 'Domain and tunnel', 'external']] : [])] : []),
   ];
   const SETTINGS_TABS = settingsTabs({ bundled: true, tunnel: true }).filter(Array.isArray); // every tab, for routes
   // ---- paths and back (navigation brief): real URLs, back/forward restore view and scroll ----
-  const NAV_VIEWS = ['home', 'favourites', 'albums', 'artists', 'genres', 'tracks', 'playlists', 'radio', 'sources', 'queue', 'zones', 'settings', 'identify', 'add-music', 'downloads'];
-  const VIEW_LABELS = { downloads: 'Downloads', 'add-music': 'Add music', home: 'Home', favourites: 'Favourites', albums: 'Albums', artists: 'Artists', genres: 'Genres', tracks: 'Tracks', playlists: 'Playlists', radio: 'Radio', sources: 'Sources', discover: 'Discover', queue: 'Queue', zones: 'Zones', settings: 'Settings', identify: 'Confirm matches', album: 'Album', artist: 'Artist', genre: 'Genre', playlist: 'Playlist', shared: 'Shared playlist' };
+  const NAV_VIEWS = ['library', 'home', 'favourites', 'albums', 'artists', 'genres', 'tracks', 'playlists', 'radio', 'sources', 'queue', 'zones', 'settings', 'identify', 'add-music', 'downloads'];
+  const VIEW_LABELS = { library: 'Your library', downloads: 'Downloads', 'add-music': 'Add music', home: 'Home', favourites: 'Favourites', albums: 'Albums', artists: 'Artists', genres: 'Genres', tracks: 'Tracks', playlists: 'Playlists', radio: 'Radio', sources: 'Sources', discover: 'Discover', queue: 'Queue', zones: 'Zones', settings: 'Settings', identify: 'Confirm matches', album: 'Album', artist: 'Artist', genre: 'Genre', playlist: 'Playlist', shared: 'Shared playlist' };
   const b64u = (x) => btoa(unescape(encodeURIComponent(x))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
   const unb64u = (x) => decodeURIComponent(escape(atob(x.replace(/-/g, '+').replace(/_/g, '/'))));
   const itemSeg = (kind) => (kind === 'artist' ? 'artist' : kind === 'album' ? 'album' : 'song');
@@ -1899,6 +2075,7 @@
   const uriOf = (seg, id) => { if (id.startsWith('mb-')) return `https://musicbrainz.org/${seg === 'artist' ? 'artist' : seg === 'album' ? 'release-group' : 'recording'}/${id.slice(3)}`; if (id.startsWith('isrc-')) return `https://musicbrainz.org/isrc/${id.slice(5)}`; if (id.startsWith('u-')) { try { return unb64u(id.slice(2)); } catch { return null; } } const yv = /^youtube-([A-Za-z0-9_-]{11})$/.exec(id); if (yv) return `https://www.youtube.com/watch?v=${yv[1]}`; const sm = /^(tidal|deezer|spotify)-([A-Za-z0-9]+)$/.exec(id); if (sm) return `${SVC_BASES[sm[1]]}/${seg === 'artist' ? 'artist' : seg === 'album' ? 'album' : 'track'}/${sm[2]}`; return null; };
   const pathFor = (v, arg) => {
     if (v === 'item' && arg && arg.kind && arg.id) return `/${arg.kind}/${arg.id}`;
+    if (v === 'library' && (arg === 'node' || arg === 'import')) return `/library/${arg}`;
     if (v === 'home-section' && arg && arg.section) return `/home/${arg.section}${arg.window && arg.window !== '7d' ? `?window=${arg.window}` : ''}`;
     if (v === 'tag' && arg) return `/tag/${String(arg).split(',').map(encodeURIComponent).join(',')}`;
     if (v === 'playlist' && arg != null) return `/playlist/${encodeURIComponent(arg)}`;
@@ -1924,6 +2101,8 @@
     const hs = /^#sources(?:\/([a-z0-9-]+))?$/.exec(location.hash || '');
     if (hs) return hs[1] ? { v: 'sources', arg: { source: hs[1] } } : { v: 'sources' };
     const p = location.pathname.replace(/\/+$/, '') || '/';
+    if (p === '/library/node' || p === '/settings/library') return { v: 'library', arg: 'node' };
+    if (p === '/library/import' || p === '/settings/import') return { v: 'library', arg: 'import' };
     const st = p.match(/^\/settings\/([a-z]+)$/);
     if (st && SETTINGS_TABS.some(([k]) => k === st[1])) return { v: 'settings', arg: st[1] };
     let m = p.match(/^\/(song|album|artist)\/([^/]+)$/);
@@ -2004,7 +2183,7 @@
     }
     state.view = v; state.viewArg = arg;
     // The tabs (phone) and the rail (tablet): Home, Search, Library (every library view and item page), Zones, Settings
-    const LIB_VIEWS = ['albums', 'artists', 'tracks', 'genres', 'genre', 'playlists', 'playlist', 'favourites', 'item', 'album', 'artist', 'shared', 'sources', 'source-item', 'radio', 'person', 'identify', 'add-music'];
+    const LIB_VIEWS = ['library', 'albums', 'artists', 'tracks', 'genres', 'genre', 'playlists', 'playlist', 'favourites', 'item', 'album', 'artist', 'shared', 'sources', 'source-item', 'radio', 'person', 'identify', 'add-music'];
     if (LIB_TOP.some(([k]) => k === v)) state.lastLib = v;
     $$('.bnav').forEach((b) => { const k = b.dataset.bnav; const on = k === 'library' ? LIB_VIEWS.includes(v) : k === v; b.classList.toggle('on', on); if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
     $$('.nav-item').forEach((b) => { const on = b.dataset.view === v || (v === 'item' && b.dataset.view === (state.itemSection || (arg && arg.kind === 'artist' ? 'artists' : 'albums'))) || (v === 'album' && b.dataset.view === 'albums') || (v === 'artist' && b.dataset.view === 'artists') || (v === 'genre' && b.dataset.view === 'genres') || ((v === 'playlist' || v === 'shared') && b.dataset.view === 'playlists') || (v === 'source-item' && b.dataset.view === 'sources'); b.classList.toggle('on', on); if (on) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
@@ -2248,7 +2427,7 @@
     const line = $('[data-taggers]', box.closest('section') || box);
     if (line) { const ids = [...new Set(all)]; const cards = ids.map((x) => profileCache.get(x)).filter(Boolean); if (cards.length) { line.innerHTML = `${faceStack(cards, Number(line.dataset.taggers) || cards.length)} <span>${line.textContent}</span>`; line.classList.add('faces-line'); line.onclick = () => peopleMenu(line, 'Who tagged this', cards); } }
   };
-  // Settings › Library folders › Cloud drives › Add a folder: browse the drive's folders, pick one.
+  // Your library › Node library › Cloud drives › Add a folder: browse the drive's folders, pick one.
   const driveFolderDialog = (provider, name) => new Promise((resolve) => {
     const d = document.createElement('dialog'); d.className = 'dialog';
     d.innerHTML = `<h2>A folder on ${esc(name)}</h2><p class="muted">Its songs join the library and play from the drive; nothing is copied.</p><div id="dfpath" class="muted small"></div><div id="dfbox" class="list"></div><p class="muted small" id="dfmsg"></p><div class="toolbar"><button class="btn primary" id="dfadd" disabled>Add this folder</button><button class="btn ghost" data-dfclose>Cancel</button></div>`;
@@ -2278,7 +2457,7 @@
     if (d.showModal) d.showModal(); else d.setAttribute('open', '');
     show();
   });
-  // Settings › Library folders › Add a WebDAV share: the folder's address, user and password; the node
+  // Your library › Node library › Add a WebDAV share: the folder's address, user and password; the node
   // checks it, keeps it and scans it (POST /library/webdav).
   const webdavDialog = () => new Promise((resolve) => {
     const d = document.createElement('dialog'); d.className = 'dialog';
@@ -2457,6 +2636,8 @@
       ...radioItem,
       ...versionItems,
       ...nav,
+      // The owner's library: edit tags on the node, take the song out (Your library › Node library)
+      ...(single && single.id != null && isOwner() ? [{ label: 'Edit tags…', icon: 'notes', run: () => editTrackTags(single.id) }, { label: 'Remove from library', icon: 'trash', run: () => removeFromLibrary(single.id, single.title) }] : []),
       ...(tracks.length && tracks.every((t) => t && trackHasId(t)) && state.pubkyUser ? [{ label: tracks.length === 1 ? 'Copy to my homeserver' : `Copy ${countOf(tracks.length, 'songs')} to my homeserver`, icon: 'upload', run: () => startUpload({ track_ids: tracks.map((t) => t.id) }) }] : []),
     ];
     showMenu(anchor, items);
@@ -2693,6 +2874,9 @@
       ...(o.albumId && !onThis('album', o.albumId) ? [{ label: 'Go to album', icon: 'disc', run: () => setView('item', { kind: 'album', id: o.albumId }) }] : []),
       ...(o.openOn || []).slice(0, 4).map((v) => ({ label: `Open on ${SERVICE_NAMES[v.source] || v.label.split(' · ')[0] || (() => { try { return new URL(v.url).hostname.replace(/^www\./, ''); } catch { return 'the web'; } })()}`, icon: 'external', run: () => openWeb(v.url) })),
       ...(o.extra || []),
+      // The owner's library: edit tags on the node, take a song out (Your library › Node library)
+      ...(isOwner() && single && single.track_id != null ? [{ label: 'Edit tags…', icon: 'notes', run: () => editTrackTags(single.track_id) }, { label: 'Remove from library', icon: 'trash', run: () => removeFromLibrary(single.track_id, single.title) }] : []),
+      ...(isOwner() && /^\/album\/lib-\d+$/.test(o.path || '') ? [{ label: 'Rename album…', icon: 'disc', run: () => editAlbumTags(Number(o.path.split('-').pop()), o.title) }] : []),
       ...(o.path ? [{ label: 'Copy link', icon: 'compass', run: () => copyLink(o.path) }] : []),
       // Library files only: services' songs are not the user's files
       ...(state.pubkyUser && trackIds.length ? [{ label: trackIds.length === 1 ? 'Copy to my homeserver' : `Copy ${countOf(trackIds.length, 'songs')} to my homeserver`, icon: 'upload', run: () => startUpload({ track_ids: trackIds }) }] : []),
@@ -2968,7 +3152,7 @@
     if (dp) dp.onchange = () => { try { if (dp.checked) localStorage.setItem('pm.dense', '1'); else localStorage.removeItem('pm.dense'); } catch { /* no storage */ } applyShell(); };
   };
   // The library's sections as a row of chips above the page title; shown on phones and tablets (desktop has the sidebar)
-  const LIB_TOP = [['albums', 'Albums'], ['artists', 'Artists'], ['tracks', 'Songs'], ['playlists', 'Playlists'], ['favourites', 'Favourites'], ['genres', 'Genres'], ['radio', 'Radio'], ['sources', 'Sources']];
+  const LIB_TOP = [['library', 'Your library'], ['albums', 'Albums'], ['artists', 'Artists'], ['tracks', 'Songs'], ['playlists', 'Playlists'], ['favourites', 'Favourites'], ['genres', 'Genres'], ['radio', 'Radio'], ['sources', 'Sources']];
   const libNav = () => {
     if (!LIB_TOP.some(([k]) => k === state.view)) return '';
     const off = new Set((state.sources || []).filter((x) => x.enabled === false).map((x) => x.id));
@@ -3120,7 +3304,7 @@
         <div class="toolbar"><input class="input" id="setupfolder" placeholder="${suggestions.length ? 'Or another folder' : 'The folder with your music, e.g. /home/you/Music'}" aria-label="Music folder on this computer"><button class="btn primary" id="setupadd">Add folder</button></div>
         <p class="muted small">No music files on this computer? <a class="lnk" href="/sources" data-setup-sources>Play from ${(state.sources || []).some((x) => x.id === 'jamendo' && x.status === 'ready') ? 'Internet Archive, Audius or Jamendo' : 'Internet Archive or Audius'}</a>, no account needed.</p>`;
     const text = {
-      music: () => ['Add your music', has.music ? `${countOf(n(info.library.tracks), 'tracks')}${info.library.albums ? ` · ${countOf(n(info.library.albums), 'albums')}` : ''}. More folders: Settings › Library folders.` : 'Pick the folder with your music files. The node reads it and keeps watching it for new files; your files stay as they are.', musicBody],
+      music: () => ['Add your music', has.music ? `${countOf(n(info.library.tracks), 'tracks')}${info.library.albums ? ` · ${countOf(n(info.library.albums), 'albums')}` : ''}. More folders: Your library › Node library.` : 'Pick the folder with your music files. The node reads it and keeps watching it for new files; your files stay as they are.', musicBody],
       play: () => ['Play something', tracks ? 'It plays in this browser. To play on speakers or another device, use the zone button at the bottom right.' : musicTodo ? 'Once your music is in.' : 'Search for a song, or browse your services on Sources. It plays in this browser, or on a speaker from the zone button.', tracks ? `<button class="btn sm primary" id="setupplay">${icon('play')} Shuffle my music</button>` : musicTodo ? '' : '<button class="btn sm" data-setup-sources>Open Sources</button>'],
       contact: () => ['See what people on Pubky play', has.contact ? 'Trending songs, tags and friends\' picks show on Home.' : 'The music index (Pinakes), MusicBrainz and Wikipedia ask each app for a way to reach whoever runs it: an email or a website. It goes only to them.', '<div class="toolbar"><input class="input" id="setupcontact" placeholder="you@example.org or https://your.site" aria-label="Your email or website"><button class="btn" id="setupcontactsave">Save</button></div>'],
       speakers: () => ['Play on your speakers (optional)', 'No speaker found yet. Speakers and streamers on your network show up by themselves; Snapcast and MPD need a line in the node’s config.', `<button class="btn sm" id="setupspeakers">Look for speakers</button> <a class="lnk small" href="https://github.com/gillohner/pubky-music-node/blob/main/docs/guides/speakers.md" target="_blank" rel="noopener">Which speakers work</a>`],
@@ -3770,7 +3954,7 @@
           const account = active === 'jamendo' ? jamAccount : active === 'subsonic' ? subAccount : active === 'jellyfin' ? jfAccount : '';
 
           const body = !cur ? '' : cur.id === 'library'
-            ? group('', row('Music folders, scans and matches', 'Your own files. Folders, scans, tags and MusicBrainz matches are in Settings.', '<button class="btn" data-goto-settings="library">Open Settings › Library folders</button>')
+            ? group('', row('Music folders, scans and matches', 'Your own files. Folders, scans, tags and MusicBrainz matches are in Your library.', '<button class="btn" data-view-go="library" data-view-arg="node">Open Your library › Node library</button>')
               + row('Play from', 'Which source plays a song first when several have it.', '<button class="btn ghost" data-goto-settings="playback">Open Settings › Zones and outputs</button>'))
             : group('', row(cur.enabled ? 'On' : 'Turned off', cur.enabled ? `Shown in search, on Home, on song and album pages and in the play order.` : `Hidden from search, Home, song and album pages and the play order. Its sign-in and settings are kept.`, srcSwitch(cur, ' on'))
                 + (() => { const st = srcState({ ...cur, enabled: true }); return row('Status', esc(st.long), `<span class="pill ${st.cls === 'ok' ? 'ok' : st.cls === 'bad' ? 'bad' : ''}">${esc(st.label)}</span>`); })()
@@ -3988,6 +4172,7 @@
             })();
           }
           $$('[data-goto-settings]', main).forEach((b) => b.onclick = () => setView('settings', b.dataset.gotoSettings));
+          $$('[data-view-go]', main).forEach((b) => b.onclick = () => setView(b.dataset.viewGo, b.dataset.viewArg || null));
           $$('[data-src-on]', main).forEach((sw) => sw.onchange = async () => {
             const id = sw.dataset.srcOn; const want = sw.checked;
             try { await api('PUT', `/sources/${encodeURIComponent(id)}/enabled`, { enabled: want }); applySourcesOff(); homeCache.clear(); toast(`${srcName(id)} ${want ? 'is on' : 'is off: hidden everywhere until you switch it on'}`); render(); } catch (e) { sw.checked = !want; toast(e.message, 'error'); }
@@ -4347,56 +4532,126 @@
           break;
         }
         case 'add-music': {
-          const [st, folders] = await Promise.all([api('GET', '/storage').catch(() => null), api('GET', '/library/folders').catch(() => [])]);
-          if (state.view !== 'add-music') return;
-          const hs = (st && st.homeserver) || { mode: 'none' };
-          const onHs = hs.mode !== 'none' && st.saving && st.saving.state !== 'signed_out';
-          const where = hs.mode === 'bundled' ? 'this node’s Pubky homeserver' : 'your Pubky homeserver';
-          const room = hs.quota_mb && hs.quota_mb !== 'unlimited' && hs.used_bytes != null ? ` ${fmtBytes(hs.used_bytes)} of ${fmtBytes(hs.quota_mb * 1e6)} used.` : '';
-          const needHs = `<p class="muted small">Needs a Pubky homeserver to keep the files on. <button class="lnk" data-goto-accounts>Sign in or create an account</button> first.</p>`;
-          const flist = (folders || []).map((f) => (Array.isArray(f) ? f[0] : f.path || f)).filter(Boolean);
-          main.innerHTML = backBtn('albums', 'Albums') + pageHead('Add music', null)
-            + `<p class="muted">Three ways in. Wherever the files are, they’re one library: albums, search and playback don’t change.</p>`
-            + `<section class="section card addm" aria-labelledby="addup"><div class="section-head"><h3 id="addup">${icon('upload')} Upload files</h3></div>`
-            + `<p class="muted small">From this ${matchMedia('(pointer: coarse)').matches ? 'device' : 'computer'} to ${where}, kept privately (never public), then added to your library.${room} A cut connection carries on where it stopped.</p>`
-            + (onHs ? `<div class="dropzone" id="updrop" tabindex="0" role="button" aria-label="Drop music files or folders here, or press Enter to choose files">${icon('upload')}<p><strong>Drop music files or whole folders here</strong></p><p class="muted small">FLAC, MP3, AAC, ALAC, Ogg, Opus, WAV, AIFF, DSD…</p><div class="row-btns"><button class="btn primary" id="uppick">Choose files</button><button class="btn" id="uppickdir">Choose a folder</button></div><input type="file" id="upfiles" multiple accept="audio/*,.flac,.dsf,.dff,.ape,.wv,.mka" hidden><input type="file" id="updir" webkitdirectory multiple hidden></div><div id="upbox"></div>` : needHs)
-            + `</section>`
-            + `<section class="section card addm" aria-labelledby="addcopy"><div class="section-head"><h3 id="addcopy">${icon('copy')} Copy from a folder</h3></div>`
-            + `<p class="muted small">A folder on the node’s machine or a mounted share (a USB disk, a NAS): its music files are copied to ${where} once, as a job you can follow and stop. Files already there are skipped.</p>`
-            + (onHs ? `<form class="toolbar" id="impform"><label class="sr-only" for="imppath">Folder to copy</label><input class="input" id="imppath" placeholder="/mnt/usb/Music" autocomplete="off" spellcheck="false"><button class="btn primary" id="impgo">Check</button></form><div id="impplan"></div>` : needHs)
-            + `</section>`
-            + `<section class="section card addm" aria-labelledby="addfolder"><div class="section-head"><h3 id="addfolder">${icon('disc')} Use a folder in place</h3></div>`
-            + `<p class="muted small">Play files where they are: a folder on the node’s machine, a mounted NAS share. Nothing is copied; the folder is watched for new music.</p>`
-            + (flist.length ? `<ul class="uplist">${flist.map((p) => `<li><code class="path">${esc(p)}</code></li>`).join('')}</ul>` : '')
-            + `<form class="toolbar" id="fipform"><label class="sr-only" for="fippath">Folder to use</label><input class="input" id="fippath" placeholder="/srv/music" autocomplete="off" spellcheck="false"><button class="btn" id="fipgo">Add folder</button></form><p class="muted small">Network shares (WebDAV), Google Drive and OneDrive: <button class="lnk" data-goto-library>Settings › Library folders</button>.</p></section>`;
-          $('[data-back]', main).onclick = () => goBack('albums');
-          $$('[data-goto-accounts]', main).forEach((b) => b.onclick = () => setView('settings', 'accounts'));
-          $$('[data-goto-library]', main).forEach((b) => b.onclick = () => setView('settings', 'library'));
-          const drop = $('#updrop');
-          if (drop) {
-            $('#uppick').onclick = (e) => { e.stopPropagation(); $('#upfiles').click(); };
-            $('#uppickdir').onclick = (e) => { e.stopPropagation(); $('#updir').click(); };
-            drop.onkeydown = (e) => { if (e.key === 'Enter' && e.target === drop) $('#upfiles').click(); };
-            $('#upfiles').onchange = (e) => { addUploads(e.target.files); e.target.value = ''; };
-            $('#updir').onchange = (e) => { addUploads(e.target.files); e.target.value = ''; };
-            drop.ondragover = (e) => { e.preventDefault(); drop.classList.add('over'); };
-            drop.ondragleave = () => drop.classList.remove('over');
-            drop.ondrop = async (e) => { e.preventDefault(); drop.classList.remove('over'); addUploads(await filesFromDrop(e.dataTransfer)); };
-            drawUploads();
+          // The old page: Your library with "Add music" open
+          state.libAsk = true;
+          return setView('library', null, 'replace');
+        }
+        case 'library': {
+          const owner = isOwner();
+          const tab = !owner ? 'mine' : state.viewArg === 'node' || state.viewArg === 'import' ? state.viewArg : 'mine';
+          const tabsHtml = `<div class="chips libtabs" role="tablist" aria-label="Your library">${[['mine', 'My music'], ...(owner ? [['node', 'Node library'], ['import', 'Import']] : [])].map(([k, l]) => `<button class="chip ${tab === k ? 'on' : ''}" role="tab" aria-selected="${tab === k}" data-libtab="${k}">${l}</button>`).join('')}</div>`;
+          const head = pageHead('Your library', null, `<button class="btn primary" id="libadd">${icon('plus')} Add music</button>`) + tabsHtml;
+          if (tab === 'mine') {
+            if (!owner) {
+              main.innerHTML = head + '<div class="card"><p>Your own music lives on your Pubky homeserver: the Pubky Music app keeps it there and plays it here when this node lets you.</p><p class="muted small">This node’s songs, albums and playlists are under Albums, Artists, Songs and Playlists.</p></div>';
+              $('#libadd').onclick = addMusicDialog;
+              break;
+            }
+            const [st, pk] = await Promise.all([api('GET', '/storage').catch(() => null), api('GET', '/pubky').catch(() => null)]);
+            const mine = pk && pk.user ? await api('GET', '/me/music').catch((er) => ({ error: er.message })) : null;
+            if (state.view !== 'library') return;
+            const hs = (st && st.homeserver) || { mode: 'none' };
+            const sv = st && st.saving;
+            const room = hs.quota_mb && hs.quota_mb !== 'unlimited' && hs.used_bytes != null ? ` of ${fmtBytes(hs.quota_mb * 1e6)}` : '';
+            const used = mine && !mine.error ? `${countOf(mine.count, 'files')} · ${fileSize(mine.bytes)}${room} used` : '';
+            // Saving: a failed save offers Try again; otherwise Save now (a full sync, off while the node needs re-approval)
+            const saveBtn = !sv || (pk.sync && pk.sync.running) || sv.state === 'saving' ? ''
+              : sv.state === 'error' ? ' · <button class="lnk" id="stsave">Try again</button>'
+                : ` · <button class="lnk" id="sync" ${pk.needs_resign ? `disabled title="${esc(pk.notice || RESIGN_TEXT)}"` : ''}>Save now</button>`;
+            const status = pk && pk.user ? `${resignNotice(pk)}<div class="libstatus" role="status"><span id="libsaved">${savedWords(sv, pk)}</span>${saveBtn}${used ? ` · <span class="muted">${used}</span>` : ''}</div>` : '';
+            const upOpen = state.libUpload || up.files.length > 0;
+            const upload = `<section class="section card addm" id="libupload" ${upOpen ? '' : 'hidden'} aria-labelledby="libuph"><div class="section-head"><h3 id="libuph">${icon('upload')} Upload files</h3><button class="icon-btn" id="libupclose" aria-label="Close upload" title="Close">${icon('close')}</button></div>`
+              + '<p class="muted small">To your homeserver, kept privately (never public), then added to your library.</p>'
+              + (pk && pk.user ? `<div class="dropzone" id="updrop" tabindex="0" role="button" aria-label="Drop music files or folders here, or press Enter to choose files">${icon('upload')}<p><strong>Drop music files or whole folders here</strong></p><p class="muted small">FLAC, MP3, AAC, ALAC, Ogg, Opus, WAV, AIFF, DSD…</p><div class="row-btns"><button class="btn primary" id="uppick">Choose files</button><button class="btn" id="uppickdir">Choose a folder</button></div><input type="file" id="upfiles" multiple accept="audio/*,.flac,.dsf,.dff,.ape,.wv,.mka" hidden><input type="file" id="updir" webkitdirectory multiple hidden></div><div id="upbox"></div>` : '<p class="muted small">Sign in with Pubky first: the files are kept on your homeserver.</p>')
+              + (hs.mode !== 'none' ? '<details class="set-adv"><summary>Or copy a folder from the node’s machine</summary><form class="toolbar" id="impform"><label class="sr-only" for="imppath">Folder to copy</label><input class="input" id="imppath" placeholder="/mnt/usb/Music" autocomplete="off" spellcheck="false"><button class="btn" id="impgo">Check</button></form><div id="impplan"></div></details>' : '')
+              + '</section>';
+            let body;
+            if (!pk || !pk.user) body = '<div class="card"><p>Sign in with Pubky to keep your music, playlists and favourites on your homeserver.</p><button class="btn primary" data-goto-accounts>Sign in</button></div>';
+            else if (mine && mine.error) body = `<div class="notice warn">${esc(mine.error)}</div>`;
+            else {
+              const songs = mine.files.filter((f) => f.song);
+              const loose = mine.files.filter((f) => !f.song);
+              const cover = (f) => (f.song.album_id ? `<img class="thumb" src="${esc(imgSrc(`/v1/library/albums/${f.song.album_id}/cover`))}" alt="" loading="lazy" data-err="hide">` : '<span class="thumb"></span>');
+              const songRow = (f, k) => `<div class="list-row mrow" data-mrow="${k}">${cover(f)}<button class="icon-btn" data-mplay="${f.song.id}" aria-label="Play ${esc(f.song.title)}" title="Play">${icon('play')}</button><div class="grow"><div class="name">${esc(f.song.title)}${f.song.edited ? ' <span class="pill" title="Tags edited on this node">edited</span>' : ''}</div><div class="sub">${esc([f.song.artist, f.song.album].filter(Boolean).join(' · '))}</div></div><span class="muted small">${f.song.duration_ms ? fmt(f.song.duration_ms) : ''}</span><span class="muted small msize">${fileSize(f.size)}</span><button class="icon-btn" data-mmore="${k}" aria-label="More for ${esc(f.song.title)}" title="More">${icon('more')}</button></div>`;
+              const looseRow = (f, k) => `<div class="list-row mrow"><div class="grow"><div class="name">${esc(f.name)}</div><div class="sub">Not in the library yet: it is read with the next scan.</div></div><span class="muted small msize">${fileSize(f.size)}</span><button class="btn sm ghost" data-mdel="${k}">Delete</button></div>`;
+              body = (songs.length ? `<section class="section"><div class="section-head"><h3>On your homeserver</h3><span class="muted small">${countOf(songs.length, 'songs')}</span></div><div class="list">${songs.map((f) => songRow(f, mine.files.indexOf(f))).join('')}</div></section>` : `<div class="card"><p>No music on your homeserver yet.</p><button class="btn primary" data-libup>${icon('upload')} Upload files</button></div>`)
+                + (loose.length ? `<section class="section"><div class="section-head"><h3>Being added</h3></div><div class="list">${loose.map((f) => looseRow(f, mine.files.indexOf(f))).join('')}</div></section>` : '')
+                + sGroup('Tag my library', sBlock('', 'One public tag on every identified song, so the music index matches your songs across services (saved to your homeserver with your other changes).', '<div class="toolbar"><input class="input" id="bulklabel" value="library" aria-label="Tag label"><button class="btn" id="bulktag">Tag</button></div><p class="muted small" id="bulkout" aria-live="polite"></p>'))
+                + (hs.mode !== 'bundled' ? `<details class="set-adv"><summary>Copy between this node and your homeserver</summary>${sRow('Copy this node’s library to your homeserver', 'Files already there are skipped.', `<button class="btn ghost" id="pkcopyall">${icon('upload')} Copy</button>`)}${sRow('Bring files here', 'Files on your homeserver this node doesn’t have yet.', `<button class="btn ghost" id="pkmirror">${icon('download')} Bring them</button>`)}</details>` : '');
+            }
+            main.innerHTML = head + status + upload + body;
+            // Files: play, edit, download, delete
+            const files = (mine && mine.files) || [];
+            $$('[data-mplay]', main).forEach((b) => b.onclick = async () => { try { playTracks([await api('GET', `/library/tracks/${b.dataset.mplay}`)], true); } catch (er) { toast(er.message, 'error'); } });
+            const delFile = async (f) => {
+              const ok = await choiceDialog({ title: 'Delete from your homeserver?', text: `“${f.song ? f.song.title : f.name}” is deleted from your homeserver${hs.mode === 'bundled' ? ' and leaves the library' : ''}. This can’t be undone.`, choices: [{ label: 'Delete', value: true, primary: true }] });
+              if (!ok) return;
+              try { await api('DELETE', '/pubky/files', { paths: [f.path] }); toast('Deleted'); render(); } catch (er) { toast(er.message, 'error'); }
+            };
+            $$('[data-mdel]', main).forEach((b) => b.onclick = () => delFile(files[Number(b.dataset.mdel)]));
+            $$('[data-mmore]', main).forEach((b) => b.onclick = () => { const f = files[Number(b.dataset.mmore)]; showMenu(b, [{ title: f.song.title }, { label: 'Edit tags…', icon: 'notes', run: () => editTrackTags(f.song.id) }, { label: 'Download', icon: 'download', run: () => { location.href = `/v1/library/tracks/${f.song.id}/download${tokenQ()}`; } }, ...(f.song.album_id ? [{ label: 'Go to album', icon: 'disc', run: () => setView('item', { kind: 'album', id: `lib-${f.song.album_id}` }) }] : []), { label: 'Delete from my homeserver', icon: 'trash', run: () => delFile(f) }]); });
+            const sts = $('#stsave'); if (sts) sts.onclick = async () => { sts.disabled = true; try { await api('POST', '/storage/save'); toast('Saving to your homeserver'); } catch (er) { toast(er.message, 'error'); } render(); };
+            const sy = $('#sync'); if (sy) sy.onclick = async () => { sy.disabled = true; try { syncToast(await api('POST', '/pubky/sync')); } catch (er) { toast(er.message, 'error'); } render(); };
+            bindResign(main);
+            if ((sv && sv.state === 'saving') || (pk && pk.sync && pk.sync.running)) { clearTimeout(state.savePoll); state.savePoll = setTimeout(() => { if (state.view === 'library' && (state.viewArg || 'mine') === 'mine') render(); }, 3000); }
+            $$('[data-goto-accounts]', main).forEach((b) => b.onclick = () => setView('settings', 'accounts'));
+        const bt = $('#bulktag'); if (bt) bt.onclick = async () => {
+          const label = $('#bulklabel').value.trim(); if (!label) return; bt.disabled = true;
+          try { const r = await api('POST', '/tags/bulk', { label }); $('#bulkout').textContent = `#${r.label}: ${countOf(r.tagged, 'tracks')} tagged, ${r.already} already had it, ${r.skipped_no_identity} skipped (no MusicBrainz id or ISRC). Sync with Pubky to publish.`; }
+          catch (e) { toast(e.message, 'error'); }
+          bt.disabled = false;
+        };
+        const ca = $('#pkcopyall'); if (ca) ca.onclick = () => startUpload({ all: true });
+        const mi = $('#pkmirror'); if (mi) mi.onclick = async () => { mi.disabled = true; await bringFiles(); mi.disabled = false; };
+            // Upload: the drop zone, choosing files or a folder, and copying a folder on the machine
+            const showUpload = () => { const s2 = $('#libupload'); s2.hidden = false; s2.scrollIntoView({ block: 'start' }); const z = $('#updrop'); if (z) z.focus(); };
+            $$('[data-libup]', main).forEach((b) => b.onclick = showUpload);
+            $('#libupclose').onclick = () => { state.libUpload = false; $('#libupload').hidden = true; };
+            const drop = $('#updrop');
+            if (drop) {
+              $('#uppick').onclick = (ev) => { ev.stopPropagation(); $('#upfiles').click(); };
+              $('#uppickdir').onclick = (ev) => { ev.stopPropagation(); $('#updir').click(); };
+              drop.onkeydown = (ev) => { if (ev.key === 'Enter' && ev.target === drop) $('#upfiles').click(); };
+              $('#upfiles').onchange = (ev) => { addUploads(ev.target.files); ev.target.value = ''; };
+              $('#updir').onchange = (ev) => { addUploads(ev.target.files); ev.target.value = ''; };
+              drop.ondragover = (ev) => { ev.preventDefault(); drop.classList.add('over'); };
+              drop.ondragleave = () => drop.classList.remove('over');
+              drop.ondrop = async (ev) => { ev.preventDefault(); drop.classList.remove('over'); addUploads(await filesFromDrop(ev.dataTransfer)); };
+              drawUploads();
+            }
+            const imp = $('#impform');
+            if (imp) imp.onsubmit = async (ev) => {
+              ev.preventDefault(); const path = $('#imppath').value.trim(); if (!path) return;
+              const box = $('#impplan'); box.innerHTML = '<p class="small" role="status"><span class="spin"></span> Looking at the folder…</p>';
+              let plan; try { plan = await api('POST', '/library/imports', { path, dry_run: true }); } catch (er) { box.innerHTML = `<p class="small joberr">${esc(er.message)}</p>`; return; }
+              if (!plan.total) { box.innerHTML = '<p class="small">No music files in that folder.</p>'; return; }
+              box.innerHTML = `<p class="small">${countOf(plan.total, 'music files')}, ${fmtBytes(plan.bytes_total)}. Files already on your homeserver are skipped while it runs.</p><div class="row-btns"><button class="btn primary" id="impstart">Copy them</button></div>`;
+              $('#impstart').onclick = async () => { try { const j = await api('POST', '/library/imports', { path }); watchJob(j.id); box.innerHTML = '<p class="small">Copying. Follow it in the job chip by the player; you can leave this page.</p>'; } catch (er) { toast(er.message, 'error'); } };
+            };
+          } else if (tab === 'node') {
+            const [info, folders, shares, drv, ns, hidden] = await Promise.all([
+              api('GET', '/info'), api('GET', '/library/folders').catch(() => []), api('GET', '/library/webdav').catch(() => []),
+              api('GET', '/library/drives').catch(() => ({ providers: [], roots: [] })), api('GET', '/node/settings').catch(() => ({})), api('GET', '/library/hidden').catch(() => []),
+            ]);
+            if (state.view !== 'library' || state.viewArg !== 'node') return;
+            state.info = info;
+            const lsc = info.last_scan;
+            const scanLine = info.scanning ? `<span class="spin"></span> Scanning… ${countOf(info.library.tracks, 'songs')} so far`
+              : `${countOf(info.library.tracks, 'songs')} in the library${lsc ? ` · last scan ${ago(lsc.finished_at)}${lsc.error_count ? ` · ${countOf(lsc.error_count, 'files')} could not be read` : ''}` : ''}`;
+            main.innerHTML = head + `<div class="libstatus" role="status">${scanLine}</div><p class="muted small">Edit a song’s tags or take it out of the library from its ⋯ menu, an album from the album’s ⋯ menu. Edits stay on this node; files are never changed.</p>`
+              + nodeLibraryHtml({ info, folders, ns, shares, drv })
+              + (hidden.length ? sGroup('Taken out of the library', hidden.map((h, k) => sRow(`<code class="path">${esc(h.path.split('/').slice(-2).join('/'))}</code>`, `Taken out ${ago(h.hidden_at)}; the file is still there.`, `<button class="btn sm ghost" data-unhide="${k}">Bring back</button>`)).join('')) : '');
+            bindNodeLibrary();
+            $$('[data-unhide]', main).forEach((b) => b.onclick = async () => { b.disabled = true; try { const r = await api('POST', '/library/hidden/restore', { path: hidden[Number(b.dataset.unhide)].path }); toast(r.scan_started ? 'Back: reading it again' : 'Back with the next scan'); watchScan({ scanning: !!r.scan_started }); render(); } catch (er) { toast(er.message, 'error'); b.disabled = false; } });
+            if (info.scanning) { clearTimeout(state.libPoll); state.libPoll = setTimeout(() => { if (state.view === 'library' && state.viewArg === 'node') render(); }, 3000); }
+          } else {
+            main.innerHTML = head + importHtml();
+            bindImport();
           }
-          const imp = $('#impform');
-          if (imp) imp.onsubmit = async (e) => {
-            e.preventDefault(); const path = $('#imppath').value.trim(); if (!path) return;
-            const box = $('#impplan'); box.innerHTML = '<p class="small" role="status"><span class="spin"></span> Looking at the folder…</p>';
-            let plan; try { plan = await api('POST', '/library/imports', { path, dry_run: true }); } catch (er) { box.innerHTML = `<p class="small joberr">${esc(er.message)}</p>`; return; }
-            if (!plan.total) { box.innerHTML = '<p class="small">No music files in that folder.</p>'; return; }
-            box.innerHTML = `<p class="small">${countOf(plan.total, 'music files')}, ${fmtBytes(plan.bytes_total)}. Files already on your homeserver are skipped while it runs.</p><div class="row-btns"><button class="btn primary" id="impstart">Copy them</button></div>`;
-            $('#impstart').onclick = async () => { try { const j = await api('POST', '/library/imports', { path }); watchJob(j.id); box.innerHTML = '<p class="small">Copying. Follow it in the job chip by the player; you can leave this page.</p>'; } catch (er) { toast(er.message, 'error'); } };
-          };
-          $('#fipform').onsubmit = async (e) => {
-            e.preventDefault(); const path = $('#fippath').value.trim(); if (!path) return;
-            try { const r = await api('POST', '/library/folders', { path }); toast(r.scan_started ? 'Folder added: reading your files' : 'Folder added'); watchScan({ scanning: true }); render(); } catch (er) { toast(er.message, 'error'); }
-          };
+          $$('[data-libtab]', main).forEach((b) => b.onclick = () => setView('library', b.dataset.libtab === 'mine' ? null : b.dataset.libtab, 'replace'));
+          $$('[data-view-go]', main).forEach((b) => b.onclick = () => setView(b.dataset.viewGo));
+          $('#libadd').onclick = addMusicDialog;
+          if (state.libAsk) { state.libAsk = false; addMusicDialog(); }
           break;
         }
         case 'downloads': {
@@ -4464,16 +4719,12 @@
           }
           const info = await api('GET', '/info'); state.info = info;
           const outs = await api('GET', '/outputs');
-          const folders = await api('GET', '/library/folders').catch(() => []);
-          const shares = await api('GET', '/library/webdav').catch(() => []);
-          const drv = await api('GET', '/library/drives').catch(() => ({ providers: [], roots: [] }));
           const ns = await api('GET', '/node/settings').catch(() => ({ contact: '', discovery: false }));
           // The homeserver bundled with the node (deploy/bundle) and its Cloudflare Tunnel, when there is one
           const bundled = await api('GET', '/homeserver/bundled').catch(() => null);
           const tunnel = await api('GET', '/remote/tunnel').catch(() => null);
           const hsHere = !!(bundled && bundled.configured && bundled.reachable);
           let pk = null; try { pk = await api('GET', '/pubky'); state.pubkyStatus = pk; state.pubkyUser = pk.user || null; } catch { /* no pubky config */ }
-          const stor = await api('GET', '/storage').catch(() => null);
           const fresh = (c) => c && Date.now() - c.at < 30000;
           const [nodeMap, prefs, apps, nodeHome] = await Promise.all([
             api('GET', '/node').catch(() => null),
@@ -4493,17 +4744,6 @@
           const block = (label, h, body) => `<div class="set-row set-block">${label || h ? `<div class="set-label">${label ? `<div class="set-name">${label}</div>` : ''}${help(h)}</div>` : ''}<div class="set-body">${body}</div></div>`;
           const group = (title, body) => `<div class="set-group">${title ? `<h3 class="set-h">${title}</h3>` : ''}<div class="set-rows">${body}</div></div>`;
           const panel = (k, html) => tabs.panel(k, html);
-          const scanErrs = info.last_scan && info.last_scan.error_count ? `<details class="scanerrs small"><summary>${countOf(info.last_scan.error_count, 'files')} could not be read in the last scan</summary><ul>${info.last_scan.errors.map(([fp, why]) => `<li><code>${esc(fp.split('/').slice(-2).join('/'))}</code>: ${esc(why.replace(fp, '').replace(/^[: ]+/, '') || 'unreadable')}</li>`).join('')}</ul></details>` : '';
-          const library = group('Music folders',
-            (folders.length ? folders.map(([fp, present]) => { const fromConfig = (ns.config_folders || []).includes(fp); return row(`<code class="path">${esc(fp)}</code>`, [present ? '' : 'Not found on this computer.', fromConfig ? 'From the node’s config (<code>node.toml</code>, or <code>PM_FOLDERS</code> in Docker), read at every start. To remove it, take it out there and restart the node; then Remove here forgets its songs.' : ''].filter(Boolean).join(' '), fromConfig ? '<span class="pill">From config</span>' : `<button class="btn sm ghost" data-folder-del="${esc(fp)}">Remove</button>`); }).join('') : row('No folders yet', 'Add the folder with your music below.', ''))
-            + block('Add a folder', 'A folder on the node. It is read now and watched for new files; your files stay as they are.', `<div class="toolbar"><input class="input" id="folderadd" placeholder="/path/to/your/Music" aria-label="Folder to add"><button class="btn primary" id="folderbtn">${icon('plus')} Add folder</button></div>${scanErrs}`)
-            + row('Check for changes', 'Reads every folder again; unchanged files are skipped.', '<button class="btn" id="scan">Scan now</button>'))
-            + group('WebDAV shares', shares.map((sh) => row(esc(sh.name), `${esc(sh.url)} · ${countOf(sh.tracks, 'songs')}`, `<button class="btn sm" data-wd-scan="${esc(sh.id)}">Rescan</button><button class="btn sm ghost" data-wd-del="${esc(sh.id)}">Remove</button>`)).join('')
-              + row('Add a WebDAV share', 'A music folder on Nextcloud, ownCloud or a NAS, played where it is (it is read again every 6 hours).', `<button class="btn" id="wdopen">${icon('plus')} Add share</button>`))
-            + group('Cloud drives', drv.roots.map((r) => row(esc(r.name), `${r.provider === 'google' ? 'Google Drive' : 'OneDrive'} · ${countOf(r.tracks, 'songs')}`, `<button class="btn sm" data-dr-scan="${esc(r.id)}">Rescan</button><button class="btn sm ghost" data-dr-del="${esc(r.id)}">Remove</button>`)).join('')
-              + drv.providers.map((p) => row(esc(p.name), !p.configured ? `Not set up on this node (an app's client id: <code>[drives] ${esc(p.id)}_client_id</code>)` : p.connected ? `Signed in${p.user ? ` as ${esc(p.user)}` : ''}` : 'Sign in, then pick a music folder; it is read again every 6 hours.', !p.configured ? '' : p.connected ? `<button class="btn" data-dr-add="${esc(p.id)}" data-dr-name="${esc(p.name)}">${icon('plus')} Add a folder</button><button class="btn sm ghost" data-dr-out="${esc(p.id)}">Sign out</button>` : `<button class="btn" data-dr-login="${esc(p.id)}">Sign in</button>`)).join(''))
-            + group('Fix my files\u2019 tags', block('', 'Write what the node knows into your files, so other players see it too: each artist on their own (not one artist called \u201cSefa, Dr. Peacock\u201d), and the MusicBrainz match of each song. You see every change first; each file\u2019s tags are saved before it changes, and the music itself is never touched.', '<div class="actions"><button class="btn" id="fixcheck">Check my files</button></div><div id="fixout" aria-live="polite"></div>'))
-            + group('Identify', block('Match songs to MusicBrainz', 'Gives every file an identity that playlists, tags and other apps understand: IDs in the tags first, then how it sounds (AcoustID), with the folder as the album. Unsure matches wait for you.', '<div id="idcard"><div id="idbox" class="muted small">Loading…</div></div>'));
           state.devOutputs = !!ns.dev_outputs;
           const shownOuts = outs.filter((o) => state.devOutputs || !devOutput(o.id));
           const outList = shownOuts.length ? `<div class="set-list">${shownOuts.map((o) => `<div class="set-item"><div class="grow"><div class="name">${esc(o.name)}</div><div class="sub">${esc(o.id)}</div></div><span class="muted small caps">${o.caps.max_pcm_bits}-bit · ${o.caps.pcm_rates.map((r) => (r / 1000).toFixed(1).replace('.0', '') + 'k').join(' ')}${o.caps.dsd ? ' · DSD' : ''}</span></div>`).join('')}</div>` : '<p class="muted small">No outputs found.</p>';
@@ -4515,33 +4755,12 @@
             + group('Zones', zoneRows + '<div id="dspbox"></div>'
               + block('Group outputs', 'Pick two or more of one kind to play as one zone, in sync; the first one checked leads. Sonos, HEOS and BluOS speakers group with their own kind, squeezelite players with each other, and so do the app\u2019s players on a DAC.', shownOuts.filter(groupKind).length > 1 ? `<div id="groupouts">${GROUP_KINDS.map(([k, label]) => { const os = shownOuts.filter((o) => groupKind(o) === k); return os.length ? `<div class="groupkind"><div class="small muted">${label}</div><div class="chips">${os.map((o) => `<label class="chip"><input type="checkbox" value="${esc(o.id)}" style="margin:0 6px 0 0"> ${esc(o.name)}</label>`).join('')}</div></div>` : ''; }).join('')}</div><p class="small muted" id="groupsync" role="status"></p><div class="toolbar" style="margin-top:10px"><input class="input" id="groupname" placeholder="Group name (Everywhere)" aria-label="Group name"><button class="btn" id="groupmake">${icon('plus')} Create group</button></div>` : '<p class="muted small">No two speakers of one kind yet.</p>'))
             + group('Subsonic apps', row('Jukebox zone', 'The zone Subsonic apps (Symfonium, Feishin…) control with their jukebox mode.', `<select class="input" id="jukeboxzone" aria-label="Subsonic jukebox zone"><option value="" ${ns.jukebox_zone ? '' : 'selected'}>First zone by name</option>${zoneList().filter((z) => z.id !== BROWSER).map((z) => `<option value="${esc(z.id)}" ${ns.jukebox_zone === z.id ? 'selected' : ''}>${esc(z.name)}</option>`).join('')}</select>`));
-          // Accounts (STEWARD-BUNDLED-HOMESERVER.md §7): saving is the node's business. One status
-          // line and where the music is; saving by hand, the private-file list and (with a homeserver
-          // that isn't this node's own) the copy tools wait under Advanced.
-          const legacyRows = pk && pk.user ? ((pk.user ? row('Sync', pk.sync && pk.sync.running ? `<span role="status"><span class="spin"></span> ${esc(pk.sync.step || 'Syncing with your homeserver')}…</span>` : (pk.unsynced ? `${countOf(pk.unsynced, 'changes')} waiting to go to your homeserver.` : 'Everything is on your homeserver.') + (pk.sync && pk.sync.ms != null && !pk.sync.running ? ` Last sync took ${(pk.sync.ms / 1000).toFixed(1)} s.` : '') + (pk.sync && pk.sync.error ? ` <span class="warn-text">The last sync failed: ${esc(pk.sync.error)}</span>` : ''), `<button class="btn" id="sync" ${pk.needs_resign || (pk.sync && pk.sync.running) ? 'disabled' : ''} ${pk.needs_resign ? `title="${esc(pk.notice || RESIGN_TEXT)}"` : ''}>Sync now</button>`) : row('Sync', 'Starts once you sign in: then your playlists, favourites and tags are kept on your homeserver.', ''))
-              + (pk.user ? row('Music files on your homeserver', 'Copy this library to your private storage, or bring files from it to this node.', `<button class="btn ghost" id="pkcopyall" title="Copy every library file to your homeserver's private storage (files already there are skipped)">${icon('upload')} Copy library</button><button class="btn ghost" id="pkmirror" title="Download files from the homeserver that this node does not have yet, then scan them">${icon('download')} Bring files here</button>`) + row('Copy speed', 'Copies share your internet upload with this node\u2019s pages and the music it streams to you away from home. Gentler leaves more room.', `<select class="input" id="copyrate" aria-label="Copy speed">${[[1000000, 'Gentle (1 MB/s)'], [2500000, 'Normal (2.5 MB/s)'], [0, 'As fast as possible']].map(([v, l]) => `<option value="${v}" ${Number(ns.copy_rate ?? 2500000) === v ? 'selected' : ''}>${l}</option>`).join('')}</select>`) + '<div id="pkfiles" class="muted small set-note">Loading homeserver files…</div>' : '')) : '';
-          const sv = stor && stor.saving;
-          const onHs = stor && stor.music && stor.music.on_homeserver;
-          const inFolders = stor && stor.music ? stor.music.folders.reduce((n, f) => n + (f.tracks || 0), 0) : 0;
-          const savedLine = !sv ? '' : pk && pk.sync && pk.sync.running ? `<span role="status"><span class="spin"></span> ${esc(pk.sync.step || 'Saving to your homeserver')}…</span>`
-            : sv.state === 'saving' ? `<span role="status"><span class="spin"></span> Saving ${countOf(sv.pending, 'changes')}…</span>`
-            : sv.state === 'error' ? `<span class="warn-text" role="status">Saving to your homeserver failed${sv.error ? `: ${esc(sv.error)}` : ''}.</span>`
-            : sv.pending ? `${countOf(sv.pending, 'changes')} waiting to be saved.`
-            : `Everything is saved on your homeserver.${sv.last_saved_at ? ` Last saved ${ago(sv.last_saved_at)}.` : ''}`;
-          const savedRows = !stor ? '' : row('Saved', savedLine, sv && sv.state === 'error' ? '<button class="btn" id="stsave">Try again</button>' : '')
-            + row('Your music', [onHs && onHs.tracks ? `${countOf(onHs.tracks, 'songs')} on your homeserver (${fileSize(onHs.bytes)})` : '', inFolders ? `${countOf(inFolders, 'songs')} in folders this node plays in place` : ''].filter(Boolean).join(' · ') || 'No music yet.', '<button class="btn ghost" data-addmusic>Add music</button>');
-          const savedAdv = !stor ? '' : `<details class="set-adv"><summary>Advanced</summary>`
-            + row('Save now', 'Changes are saved by themselves about 20 s after the last one. This saves them at once, for troubleshooting.', `<button class="btn" id="sync" ${pk.needs_resign || (pk.sync && pk.sync.running) ? 'disabled' : ''} ${pk.needs_resign ? `title="${esc(pk.notice || RESIGN_TEXT)}"` : ''}>Save now</button>`)
-            + (stor.homeserver.mode !== 'bundled' ? row('Music files on your homeserver', 'Copy this library to your private storage, or bring files from it to this node.', `<button class="btn ghost" id="pkcopyall" title="Copy every library file to your homeserver's private storage (files already there are skipped)">${icon('upload')} Copy library</button><button class="btn ghost" id="pkmirror" title="Download files from the homeserver that this node does not have yet, then scan them">${icon('download')} Bring files here</button>`) + row('Copy speed', 'Copies share your internet upload with this node\u2019s pages and the music it streams to you away from home. Gentler leaves more room.', `<select class="input" id="copyrate" aria-label="Copy speed">${[[1000000, 'Gentle (1 MB/s)'], [2500000, 'Normal (2.5 MB/s)'], [0, 'As fast as possible']].map(([v, l]) => `<option value="${v}" ${Number(ns.copy_rate ?? 2500000) === v ? 'selected' : ''}>${l}</option>`).join('')}</select>`) : '')
-            + '<div id="pkfiles" class="muted small set-note">Loading homeserver files…</div></details>';
           const accounts = group('Pubky', pk ? (
               (!pk.user && hsHere ? row('Create your Pubky account on this node\u2019s homeserver', 'Your playlists, favourites, tags and files stay on this machine. Pubky Ring creates the account here and signs this node in.', '<button class="btn primary" id="pkhscreate">Create account here</button>') : '')
               + row(pk.user ? 'Signed in' : hsHere ? 'Use an existing homeserver' : 'Not signed in', pk.user ? keyHtml(pk.user) : hsHere ? 'Already have a Pubky account somewhere else? Sign in with Pubky Ring instead.' : 'Sign in with the Pubky Ring app to keep your playlists, favourites and tags in your own Pubky storage.', pk.user ? `<button class="btn ${pk.needs_resign ? 'primary' : 'ghost'}" id="pklogin" title="Approve this node again in Pubky Ring (replaces the current session)">Sign in again</button>` : `<button class="btn ${hsHere ? 'ghost' : 'primary'}" id="pklogin">Sign in with Pubky</button>`)
               + (pk.needs_resign ? `<div class="notice warn resign" role="status" id="pkresign"><span>${esc(pk.notice || RESIGN_TEXT)}</span></div>` : '')
               + '<div id="pkurl"></div>'
-              + (pk.user ? (stor ? savedRows : legacyRows) : row('Saving', 'Starts once you sign in: then your playlists, favourites and tags are kept on your homeserver.', ''))
-              + (pk.user ? block('Tag your whole library', 'One public tag on every identified song, so the music index matches your songs across services (saved to your homeserver with your other changes).', `<div class="toolbar"><input class="input" id="bulklabel" value="library" aria-label="Tag label"><button class="btn" id="bulktag">${icon('plus')} Tag every song</button></div><div id="bulkout" class="muted small"></div>`) : '')
-              + (pk.user && stor ? savedAdv : '')
+              + (pk.user ? row('Your music', 'Your files on the homeserver, saving and tagging are in Your library.', '<button class="btn ghost" data-view-go="library">Open Your library</button>') : row('Saving', 'Starts once you sign in: then your playlists, favourites and tags are kept on your homeserver.', ''))
             ) : row('Pubky', 'Pubky is not set up on this node.', ''))
             + group('ListenBrainz', block('', '', '<div id="lbcard"><div id="lbbody"><div class="skeleton" style="height:80px"></div></div></div>'))
             + group('Last.fm', block('', '', '<div id="lfcard"><div id="lfbody"><div class="skeleton" style="height:80px"></div></div></div>'))
@@ -4551,7 +4770,6 @@
           const backup = group('Download a backup', block('', 'One file with everything needed to rebuild this node: matches and corrections, playlists, favourites, tags, play history, queues and settings. Never your music files.', `<form id="bkform" class="stack"><label class="small" for="bkpass">Passphrase for your sign-ins (TIDAL, Spotify, ListenBrainz, Pubky…)</label><input class="input" id="bkpass" type="password" autocomplete="new-password" placeholder="Leave empty to leave sign-ins out"><input class="input" id="bkpass2" type="password" autocomplete="new-password" placeholder="The same passphrase again" aria-label="Repeat the passphrase" hidden><p class="muted small">Without it you can restore everything else and sign in to those services again. Nothing opens the sign-ins without it.</p><div class="actions"><button class="btn primary" id="bkdown" type="submit">${icon('download')} Download a backup</button></div></form>`))
             + group('Every day or week, to a folder', block('', '', '<div id="bksched"><div class="skeleton" style="height:60px"></div></div>'))
             + group('Restore', block('', 'Replaces this node’s library and settings with the backup’s. Your music files are not touched.', `<label class="btn file-btn">${icon('upload')} Choose a backup file<input type="file" id="rsfile" accept=".pmbackup,.zip"></label><div id="rsout"></div>`));
-          const importTab = group('Move from Roon', block('', '', `<ol class="muted small steps"><li>In Roon, open Tracks (and Albums), select all, then ⋯ › Export › Excel. Export each playlist you want the same way.</li><li>Choose the files here and check them: nothing changes yet.</li><li>Import what matched.</li></ol><input type="file" id="roonfiles" accept=".xlsx,.csv" multiple aria-label="Roon export files"><label class="check small"><input type="checkbox" id="roonfav" checked> Roon favourites become Favourites</label><label class="check small"><input type="checkbox" id="roonpl" checked> Playlist exports become playlists</label><label class="check small"><input type="checkbox" id="roontags"> Roon tags become tags on Pubky <span class="muted">(public)</span></label><div class="toolbar"><button class="btn" id="rooncheck">${icon('search')} Check</button><button class="btn primary" id="roongo" disabled>${icon('download')} Import</button></div><div id="roonout" aria-live="polite"></div>`));
           const appearance = group('Theme', row('Light or dark', 'Or follow this device.', `<div class="chips themeswitch" role="radiogroup" aria-label="Theme">${[['system', 'System'], ['light', 'Light'], ['dark', 'Dark']].map(([v, l]) => `<button class="chip scope ${themePref() === v ? 'on' : ''}" role="radio" aria-checked="${themePref() === v}" data-theme-pick="${v}">${icon(v === 'dark' ? 'moon' : v === 'light' ? 'sun' : 'settings')} ${l}</button>`).join('')}</div>`)) + layoutGroup(group, row) + colourGroup(group, row);
           const about = group('This node', row('Name', '', esc(info.name)) + row('Version', '', esc(info.version)) + row('Library', '', `${countOf(info.library.tracks, 'tracks')} · ${countOf(info.library.albums, 'albums')} · ${countOf(info.library.artists, 'artists')}`) + row('Files', '', `${info.library.files}${info.library.missing_files ? ` · <span class="warn-text">${info.library.missing_files} missing</span>` : ''}`))
             + group('Access', row('This browser', 'Changes only the token this browser uses to reach the node; the node’s token stays as it is.', '<button class="btn ghost" id="logout">Use a different token in this browser</button>')
@@ -4589,36 +4807,20 @@
             + row('People', '', `${countOf(bundled.users || 0, 'accounts')}${bundled.disabled_users ? ` · ${bundled.disabled_users} turned off` : ''}`)
             + row('Invites', '', countOf(bundled.unused_invites || 0, 'unused invites'))
             + row('Storage', '', bundled.disk_used_mb != null ? `${bundled.disk_used_mb} MB used` : '—')) : '';
-          main.innerHTML = tabs.page(`${panel('home', homeTab)}${panel('quality', qualityTab)}${panel('apps', appsTab)}${panel('nodehome', nodeHomeTab)}${hsTab ? panel('homeserver', hsTab) : ''}${panel('library', library)}${panel('playback', playback)}${panel('accounts', accounts)}${panel('people', '<div id="peoplebox"><div class="skeleton" style="height:160px"></div></div>')}${tunnel && tunnel.available ? panel('remote', '<div id="remotebox"><div class="skeleton" style="height:160px"></div></div>') : ''}${panel('discover', discover)}${panel('backup', backup)}${panel('import', importTab)}${panel('appearance', appearance)}${panel('about', about)}`);
+          main.innerHTML = tabs.page(`${panel('home', homeTab)}${panel('quality', qualityTab)}${panel('apps', appsTab)}${panel('nodehome', nodeHomeTab)}${hsTab ? panel('homeserver', hsTab) : ''}${panel('playback', playback)}${panel('accounts', accounts)}${panel('people', '<div id="peoplebox"><div class="skeleton" style="height:160px"></div></div>')}${tunnel && tunnel.available ? panel('remote', '<div id="remotebox"><div class="skeleton" style="height:160px"></div></div>') : ''}${panel('discover', discover)}${panel('backup', backup)}${panel('appearance', appearance)}${panel('about', about)}`);
           tabs.wire(main, (k) => { state.settingsTab = k; });
           $$('[data-goto-sources]', main).forEach((b) => b.onclick = () => setView('sources'));
+          $$('[data-view-go]', main).forEach((b) => b.onclick = () => setView(b.dataset.viewGo));
           const he = $('#sethomeedit'); if (he) he.onclick = () => { state.homeEdit = true; setView('home'); };
           const hd = $('#sethomedefault'); if (hd) hd.onclick = async () => { hd.disabled = true; try { await api('PUT', '/home/layout', { order: mine.order || [], hidden: mine.hidden || [] }); toast('Your Home is the default for everyone now'); render(); } catch (e) { hd.disabled = false; toast(e.message, 'error'); } };
           const hr = $('#sethomereset'); if (hr) hr.onclick = async () => { try { await api('PUT', '/me/prefs', { home_layout: null }); state.homeLayout = null; state.homeSaved = null; toast('Home follows the node’s default'); render(); } catch (e) { toast(e.message, 'error'); } };
           $$('[data-qreset]', main).forEach((b) => b.onclick = async () => { try { await api('PUT', '/me/prefs', { quality: { [b.dataset.qreset]: null } }); toast('Back to the node’s quality'); render(); } catch (e) { toast(e.message, 'error'); } });
-          // Fix my files' tags: the list first, then the write
-          const loadFixes = async () => {
-            const out = $('#fixout'); if (!out) return;
-            out.innerHTML = '<div class="skeleton" style="height:60px;margin-top:10px"></div>';
-            let r; try { r = await api('GET', '/library/tag-fixes?limit=50'); } catch (e) { out.innerHTML = `<p class="small warn-text">${esc(e.message)}</p>`; return; }
-            const label = (k) => ({ ARTISTS: 'Artists', 'MUSICBRAINZ_TRACKID': 'MusicBrainz song', 'MusicBrainz Track Id': 'MusicBrainz song', 'MUSICBRAINZ_ALBUMID': 'MusicBrainz album', 'MusicBrainz Album Id': 'MusicBrainz album', 'MUSICBRAINZ_ARTISTID': 'MusicBrainz artists', 'MusicBrainz Artist Id': 'MusicBrainz artists', 'ACOUSTID_ID': 'AcoustID', 'Acoustid Id': 'AcoustID' }[k] || k);
-            if (!r.total) { out.innerHTML = `<p class="small muted" style="margin-top:10px">Your files already say everything the node knows.${r.cannot ? ` (${countOf(r.cannot, 'files')} in a format the writer leaves alone.)` : ''}</p>`; return; }
-            out.innerHTML = `<p class="small" style="margin-top:10px">${countOf(r.total, 'files')} would change${r.total > r.files.length ? ` (the first ${r.files.length} below)` : ''}${r.cannot ? `; ${countOf(r.cannot, 'files')} in a format the writer leaves alone` : ''}.</p>
-              <div class="set-list fixlist">${r.files.map((f) => `<div class="set-item"><div class="grow"><div class="name">${esc(f.title)}</div><div class="sub">${f.changes.map((c) => `${esc(label(c.key))}: ${c.now.length ? `<s>${esc(c.now.join(' · '))}</s> → ` : ''}${esc(c.then.join(' · '))}`).join('<br>')}</div></div></div>`).join('')}</div>
-              <div class="actions" style="margin-top:10px"><button class="btn primary" id="fixgo">Write into ${countOf(r.total, 'files')}</button></div>`;
-            $('#fixgo').onclick = async () => { const b = $('#fixgo'); b.disabled = true; b.textContent = 'Writing…'; try { const w = await api('POST', '/library/tag-fixes', {}); toast(`${countOf(w.written, 'files')} fixed${w.skipped.length ? `; ${w.skipped.length} left as they were` : ''}. Backups: ${w.backup_dir}`); loadFixes(); } catch (e) { toast(e.message, 'error'); b.disabled = false; } };
-          };
-          const fc = $('#fixcheck'); if (fc) fc.onclick = loadFixes;
           const pff = $('#preferfull'); if (pff) pff.onchange = async () => { try { await api('PUT', '/node/settings', { prefer_full: pff.checked }); toast(pff.checked ? 'Previews give way to full tracks from your Play from order' : 'A song page plays its own service, previews included'); } catch (e) { toast(e.message, 'error'); pff.checked = !pff.checked; } };
           const fst = $('#firststeps'); if (fst) fst.onchange = async () => { try { await api('PUT', '/node/settings', { first_steps_hidden: !fst.checked }); toast(fst.checked ? 'First steps show on Home again' : 'First steps are hidden for everyone'); render(); } catch (e) { toast(e.message, 'error'); fst.checked = !fst.checked; } };
           const dvo = $('#devouts'); if (dvo) dvo.onchange = async () => { try { await api('PUT', '/node/settings', { dev_outputs: dvo.checked }); state.devOutputs = dvo.checked; toast(dvo.checked ? 'Developer outputs are shown' : 'Developer outputs are hidden'); renderZoneName(); } catch (e) { toast(e.message, 'error'); dvo.checked = !dvo.checked; } };
           const cr = $('#copyrate'); if (cr) cr.onchange = async () => { try { await api('PUT', '/node/settings', { copy_rate: Number(cr.value) }); toast('Copy speed saved'); } catch (e) { toast(e.message, 'error'); } };
-          const sts = $('#stsave'); if (sts) sts.onclick = async () => { sts.disabled = true; try { await api('POST', '/storage/save'); toast('Saving to your homeserver'); } catch (e) { toast(e.message, 'error'); } render(); };
-          // While changes are being saved, follow the status line here
-          if (stor && stor.saving && stor.saving.state === 'saving') { clearTimeout(state.savePoll); state.savePoll = setTimeout(() => { if (state.view === 'settings' && state.settingsTab === 'accounts') render(); }, 3000); }
           // The first sync after a sign-in runs in the background: follow it here
           if (pk && pk.sync && pk.sync.running) { clearTimeout(state.syncPoll); state.syncPoll = setTimeout(() => { if (state.view === 'settings' && state.settingsTab === 'accounts') render(); }, 2000); }
-          $('#scan').onclick = async () => { try { await api('POST', '/library/scan', {}); toast('Scan started'); watchScan({ scanning: true }); } catch (e) { toast(e.message, 'error'); } };
           $$('[data-zone-del]', main).forEach((b) => b.onclick = async () => { try { await api('DELETE', `/zones/${encodeURIComponent(b.dataset.zoneDel)}`); toast('Group removed'); if (state.zone === b.dataset.zoneDel) state.zone = BROWSER; render(); } catch (e) { toast(e.message, 'error'); } });
           // What the outputs picked become, and which can't join them (no sample rate in common)
           const groupBox = $('#groupouts');
@@ -4641,18 +4843,6 @@
           }
           const saveContact = async () => { const c = $('#contact').value.trim(); if (!c) return; try { await api('PUT', '/node/settings', { contact: c }); state.discoveryOff = false; homeCache.clear(); toast('Contact saved; Discover is on'); render(); } catch (e) { toast(e.message, 'error'); } };
           $('#contactsave').onclick = saveContact; $('#contact').onkeydown = (e) => { if (e.key === 'Enter') saveContact(); };
-          const addFolder = async () => { const p = $('#folderadd').value.trim(); if (!p) return; try { const r = await api('POST', '/library/folders', { path: p }); toast(r.scan_started ? 'Folder added; scanning' : 'Folder added; scanned after the current scan'); watchScan({ scanning: true }); render(); } catch (e) { toast(e.message, 'error'); } };
-          $$('[data-dr-login]').forEach((b) => b.onclick = async () => { try { const r = await api('POST', `/library/drives/${b.dataset.drLogin}/login`); location.href = r.url; } catch (e) { toast(e.message, 'error'); } });
-          $$('[data-dr-add]').forEach((b) => b.onclick = async () => { const r = await driveFolderDialog(b.dataset.drAdd, b.dataset.drName); if (r) { toast(`${r.name} added; scanning`); render(); } });
-          $$('[data-dr-out]').forEach((b) => b.onclick = async () => { try { await api('DELETE', `/library/drives/${b.dataset.drOut}/account`); render(); } catch (e) { toast(e.message, 'error'); } });
-          $$('[data-dr-scan]').forEach((b) => b.onclick = async () => { try { await api('POST', `/library/drives/roots/${b.dataset.drScan}/scan`); toast('Reading the folder again'); } catch (e) { toast(e.message, 'error'); } });
-          $$('[data-dr-del]').forEach((b) => b.onclick = async () => { if (!confirm('Remove this folder and its songs from the library? The files on the drive stay.')) return; try { const r = await api('DELETE', `/library/drives/roots/${b.dataset.drDel}`); toast(`Removed, with ${countOf(r.tracks, 'songs')}`); render(); } catch (e) { toast(e.message, 'error'); } });
-          $('#wdopen').onclick = async () => { const sh = await webdavDialog(); if (sh) { toast(`${sh.name} added; scanning`); render(); } };
-          $$('[data-wd-scan]').forEach((b) => b.onclick = async () => { try { await api('POST', `/library/webdav/${b.dataset.wdScan}/scan`); toast('Reading the share again'); } catch (e) { toast(e.message, 'error'); } });
-          $$('[data-wd-del]').forEach((b) => b.onclick = async () => { if (!confirm('Remove this share and its songs from the library? The files on the share stay.')) return; try { const r = await api('DELETE', `/library/webdav/${b.dataset.wdDel}`); toast(`Removed, with ${countOf(r.tracks, 'songs')}`); render(); } catch (e) { toast(e.message, 'error'); } });
-          $('#folderbtn').onclick = addFolder; $('#folderadd').onkeydown = (e) => { if (e.key === 'Enter') addFolder(); };
-          $$('[data-folder-del]', main).forEach((b) => b.onclick = async () => { if (!b.dataset.armed) { b.dataset.armed = '1'; b.textContent = 'Really remove?'; setTimeout(() => { if (b.isConnected) { delete b.dataset.armed; b.textContent = 'Remove'; } }, 3000); return; } try { const r = await api('DELETE', '/library/folders?path=' + encodeURIComponent(b.dataset.folderDel)); toast(`Folder removed · ${countOf(r.removed_tracks, 'tracks')} gone`); render(); } catch (e) { toast(e.message, 'error'); } });
-          renderIdentify();
           api('GET', '/home/location').then((l) => { const c = $('#loccur'); if (c) c.textContent = l ? `Now: ${l.label || `${l.lat.toFixed(2)}, ${l.lon.toFixed(2)}`}` : 'Not set'; }).catch(() => {});
           $('#locsave').onclick = async () => { const city = $('#loccity').value.trim(); if (!city) return; try { const l = await api('PUT', '/home/location', { city }); toast(`Concerts near ${l.label}`); render(); } catch (e) { toast(e.message, 'error'); } };
           $('#locclear').onclick = async () => { try { await api('PUT', '/home/location', {}); toast('City cleared'); render(); } catch (e) { toast(e.message, 'error'); } };
@@ -4664,12 +4854,6 @@
             const address = $('#rendaddr').value.trim(); if (!address) return; ra.disabled = true;
             try { const outs = await api('POST', '/outputs/upnp', { address }); toast(`Renderer added · ${outs.length} outputs`); $('#rendaddr').value = ''; render(); } catch (e) { toast(e.message, 'error'); }
             ra.disabled = false;
-          };
-          const bt = $('#bulktag'); if (bt) bt.onclick = async () => {
-            const label = $('#bulklabel').value.trim(); if (!label) return; bt.disabled = true;
-            try { const r = await api('POST', '/tags/bulk', { label }); $('#bulkout').textContent = `#${r.label}: ${countOf(r.tagged, 'tracks')} tagged, ${r.already} already had it, ${r.skipped_no_identity} skipped (no MusicBrainz id or ISRC). Sync with Pubky to publish.`; }
-            catch (e) { toast(e.message, 'error'); }
-            bt.disabled = false;
           };
           const sc = $('#netscan'); if (sc) sc.onclick = async () => {
             const box = $('#netscanout'); sc.disabled = true; box.innerHTML = '<p class="muted small">Asking the network (about 5 s)…</p>';
@@ -4695,42 +4879,8 @@
               $('#tokendone').onclick = async () => { try { await navigator.clipboard.writeText(r.token); } catch { /* copied by hand */ } location.reload(); };
             } catch (e) { toast(e.message, 'error'); tn.disabled = false; }
           };
-          const pkf = $('#pkfiles'); if (pkf) {
-            try {
-              drawHomeFiles(pkf, await api('GET', '/pubky/files'));
-            } catch (e) { pkf.textContent = 'Homeserver files: ' + e.message; }
-          }
-          const ca = $('#pkcopyall'); if (ca) ca.onclick = () => startUpload({ all: true });
-          const mi = $('#pkmirror'); if (mi) mi.onclick = async () => { mi.disabled = true; await bringFiles(); mi.disabled = false; };
           const jz = $('#jukeboxzone'); if (jz) jz.onchange = async () => { try { await api('PUT', '/node/settings', { jukebox_zone: jz.value }); toast(jz.value ? 'Jukebox zone saved' : 'Jukebox follows the first zone'); } catch (e) { toast(e.message, 'error'); } };
           $$('[data-theme-pick]', main).forEach((b) => b.onclick = () => { setTheme(b.dataset.themePick); $$('[data-theme-pick]', main).forEach((x) => { const on = x === b; x.classList.toggle('on', on); x.setAttribute('aria-checked', String(on)); }); }); bindLayoutPick();
-          // Move from Roon: a dry run per file, then the import of what matched (roon_import.rs).
-          const roonRun = async (dry) => {
-            const files = [...($('#roonfiles').files || [])]; const out = $('#roonout');
-            if (!files.length) { toast('Choose the Roon export files first', 'error'); return; }
-            const opts = `favourites=${$('#roonfav').checked}&playlist=${$('#roonpl').checked}&tags=${$('#roontags').checked}&dry_run=${dry}`;
-            out.innerHTML = '<div class="skeleton" style="height:60px"></div>';
-            const parts = []; let matched = 0;
-            for (const f of files) {
-              try {
-                const res = await fetch(`/v1/import/roon?file=${encodeURIComponent(f.name)}&${opts}`, { method: 'POST', headers: { 'content-type': 'application/octet-stream', ...(state.token ? { authorization: 'Bearer ' + state.token } : {}) }, body: await f.arrayBuffer() });
-                const r = await res.json(); if (!res.ok) throw new Error(r.error || res.status);
-                matched += r.matched;
-                const kind = { tracks: 'Tracks', albums: 'Albums', playlist: `Playlist “${r.name || f.name}”` }[r.kind] || r.kind;
-                const did = [r.favourites ? `${r.favourites} favourite${r.favourites === 1 ? '' : 's'}${dry ? ' to add' : ' added'}` : '', r.tags_added ? `${r.tags_added} tag${r.tags_added === 1 ? '' : 's'}${dry ? ' to put on Pubky' : ' put on Pubky'}` : '', r.playlist ? `playlist made with ${countOf(r.playlist.imported, 'songs')}` : '', r.not_identified ? `${r.not_identified} need identifying first` : ''].filter(Boolean).join(' · ');
-                parts.push(`<div class="roonfile"><div class="name">${esc(f.name)} <span class="muted small">${esc(kind)}</span></div><p class="small">${r.matched} of ${r.rows} matched this library${did ? ' · ' + esc(did) : ''}</p>`
-                  + (r.tags_found.length ? `<p class="muted small">Roon tags: ${r.tags_found.slice(0, 12).map(([l, c]) => `${esc(l)} (${c})`).join(', ')}${r.tags_found.length > 12 ? '…' : ''}</p>` : '')
-                  + (r.misses.length ? `<details class="small"><summary>${r.unmatched + r.not_identified} not moved, and why</summary><ul class="misses">${r.misses.map((m) => `<li><strong>${esc(m.what)}</strong>: ${esc(m.reason)}</li>`).join('')}</ul></details>` : '') + '</div>');
-              } catch (e) { parts.push(`<div class="roonfile"><div class="name">${esc(f.name)}</div><p class="small joberr">${esc(e.message)}</p></div>`); }
-            }
-            out.innerHTML = (dry ? '<p class="muted small">Checked: nothing changed yet.</p>' : '<p class="small">Imported.</p>') + parts.join('');
-            $('#roongo').disabled = !dry || !matched;
-            if (dry && !matched) out.insertAdjacentHTML('afterbegin', '<p class="small">Nothing in these files matched this library yet: scan your music folders first (Library folders below), then check again.</p>');
-            if (!dry) { state.playlists = await api('GET', '/playlists').catch(() => state.playlists); }
-          };
-          $('#roonfiles').onchange = () => { $('#roongo').disabled = true; $('#roonout').innerHTML = ''; };
-          $('#rooncheck').onclick = () => roonRun(true);
-          $('#roongo').onclick = () => roonRun(false);
           const loadLf = () => signinChooser(lastfmSigninCfg($('#lfbody')));
           loadLf();
           const loadLb = async () => {

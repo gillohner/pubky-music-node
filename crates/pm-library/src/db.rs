@@ -28,6 +28,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (12, include_str!("migrations/0012_fts_rowid.sql")),
     (13, include_str!("migrations/0013_file_hashes.sql")),
     (14, include_str!("migrations/0014_loudness.sql")),
+    (15, include_str!("migrations/0015_library_edits.sql")),
 ];
 
 pub struct Library {
@@ -639,6 +640,248 @@ impl Library {
             .query_map(params![arg], row_to_track_raw)?
             .collect::<std::result::Result<_, _>>()?;
         raws.into_iter().map(|raw| finish_track(&conn, raw)).collect()
+    }
+
+    /// The owner's edit of a file's tags, if any.
+    pub fn track_override(&self, path: &Path) -> Result<Option<TrackOverride>> {
+        Ok(self
+            .lock()
+            .query_row(
+                "SELECT title, artist, album, album_artist FROM track_overrides WHERE path = ?1",
+                params![path.to_string_lossy()],
+                |r| {
+                    Ok(TrackOverride {
+                        title: r.get(0)?,
+                        artist: r.get(1)?,
+                        album: r.get(2)?,
+                        album_artist: r.get(3)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    /// Edit a song's tags on the node (the file is not touched): the edit is kept for the file,
+    /// applied now and whenever the file is read again. Fields left `None` keep the file's value.
+    /// An edit with nothing in it undoes the song's edit.
+    pub fn edit_track(&self, id: TrackId, o: &TrackOverride) -> Result<Option<Track>> {
+        let Some(mut t) = self.get_track(id)? else {
+            return Ok(None);
+        };
+        if o.is_empty() {
+            return self.undo_edit(id);
+        }
+        let path = t.file.path.to_string_lossy().to_string();
+        {
+            let conn = self.lock();
+            // What the file says, kept from the first edit on (a rescan refreshes it)
+            let orig: Option<(String, String, Option<String>, Option<String>)> = conn
+                .query_row(
+                    "SELECT orig_title, orig_artists, orig_album, orig_album_artist FROM track_overrides WHERE path = ?1",
+                    params![path],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )
+                .optional()?;
+            let (ot, oa, oal, oaa) = orig.unwrap_or_else(|| originals_of(&t));
+            conn.execute(
+                "INSERT INTO track_overrides(path, title, artist, album, album_artist, orig_title, orig_artists, orig_album, orig_album_artist, updated_at)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
+                 ON CONFLICT(path) DO UPDATE SET title=excluded.title, artist=excluded.artist, album=excluded.album,
+                   album_artist=excluded.album_artist, updated_at=excluded.updated_at",
+                params![path, o.title, o.artist, o.album, o.album_artist, ot, oa, oal, oaa, now_unix()],
+            )?;
+        }
+        o.apply(&mut t);
+        self.upsert_track(&t)?;
+        self.prune_empty_albums()?;
+        self.get_track(id)
+    }
+
+    /// Undo a song's edit: back to what its file says.
+    pub fn undo_edit(&self, id: TrackId) -> Result<Option<Track>> {
+        let Some(mut t) = self.get_track(id)? else {
+            return Ok(None);
+        };
+        let path = t.file.path.to_string_lossy().to_string();
+        let orig: Option<(String, String, Option<String>, Option<String>)> = {
+            let conn = self.lock();
+            let o = conn
+                .query_row(
+                    "SELECT orig_title, orig_artists, orig_album, orig_album_artist FROM track_overrides WHERE path = ?1",
+                    params![path],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )
+                .optional()?;
+            conn.execute("DELETE FROM track_overrides WHERE path = ?1", params![path])?;
+            o
+        };
+        if let Some((title, artists, album, album_artist)) = orig {
+            t.title = title;
+            t.artists = serde_json::from_str::<Vec<String>>(&artists)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|name| pm_model::Artist {
+                    id: None,
+                    name,
+                    mbid: None,
+                })
+                .collect();
+            match (album, t.album.as_mut()) {
+                (Some(title), Some(a)) => {
+                    a.id = None;
+                    a.title = title;
+                    a.album_artist = album_artist;
+                }
+                (None, _) => t.album = None,
+                (Some(_), None) => {}
+            }
+            self.upsert_track(&t)?;
+            self.prune_empty_albums()?;
+        }
+        self.get_track(id)
+    }
+
+    /// Keep what a file says under its edit (a rescan read the file again), and give back the
+    /// edit to apply on top.
+    pub fn refresh_override(&self, track: &Track) -> Result<Option<TrackOverride>> {
+        let path = track.file.path.to_string_lossy().to_string();
+        let Some(o) = self.track_override(&track.file.path)? else {
+            return Ok(None);
+        };
+        let (ot, oa, oal, oaa) = originals_of(track);
+        self.lock().execute(
+            "UPDATE track_overrides SET orig_title=?2, orig_artists=?3, orig_album=?4, orig_album_artist=?5 WHERE path=?1",
+            params![path, ot, oa, oal, oaa],
+        )?;
+        Ok(Some(o))
+    }
+
+    /// Rename an album on the node (its cover and id stay); every song on it keeps the new name
+    /// across rescans.
+    pub fn edit_album(
+        &self,
+        album_id: i64,
+        title: Option<&str>,
+        album_artist: Option<Option<&str>>,
+    ) -> Result<bool> {
+        let ids: Vec<i64> = {
+            let conn = self.lock();
+            let n = conn.execute(
+                "UPDATE albums SET title = COALESCE(?2, title), album_artist = CASE WHEN ?3 THEN ?4 ELSE album_artist END WHERE id = ?1",
+                params![album_id, title, album_artist.is_some(), album_artist.flatten()],
+            )?;
+            if n == 0 {
+                return Ok(false);
+            }
+            let mut stmt = conn.prepare("SELECT id FROM tracks WHERE album_id = ?1")?;
+            let ids = stmt
+                .query_map(params![album_id], |r| r.get(0))?
+                .collect::<std::result::Result<_, _>>()?;
+            ids
+        };
+        for id in ids {
+            let Some(t) = self.get_track(TrackId(id))? else {
+                continue;
+            };
+            let mut o = self.track_override(&t.file.path)?.unwrap_or_default();
+            if let Some(a) = &t.album {
+                o.album = Some(a.title.clone());
+                o.album_artist = a.album_artist.clone();
+            }
+            let path = t.file.path.to_string_lossy().to_string();
+            let conn = self.lock();
+            let orig: Option<String> = conn
+                .query_row(
+                    "SELECT path FROM track_overrides WHERE path = ?1",
+                    params![path],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if orig.is_none() {
+                // The file's own album name is what the album was called before this edit
+                let (ot, oa, _, _) = originals_of(&t);
+                conn.execute(
+                    "INSERT INTO track_overrides(path, title, artist, album, album_artist, orig_title, orig_artists, orig_album, orig_album_artist, updated_at)
+                     VALUES (?1,NULL,NULL,?2,?3,?4,?5,NULL,NULL,?6)",
+                    params![path, o.album, o.album_artist, ot, oa, now_unix()],
+                )?;
+            } else {
+                conn.execute(
+                    "UPDATE track_overrides SET album=?2, album_artist=?3, updated_at=?4 WHERE path=?1",
+                    params![path, o.album, o.album_artist, now_unix()],
+                )?;
+            }
+        }
+        Ok(true)
+    }
+
+    /// Take a song out of the library: its file stays where it is, scans skip it from now on.
+    /// Its rows go as a removed folder's do (plays and empty albums with it).
+    pub fn hide_track(&self, id: TrackId) -> Result<bool> {
+        let path: Option<String> = {
+            let conn = self.lock();
+            let path = conn
+                .query_row("SELECT path FROM files WHERE track_id = ?1", params![id.0], |r| {
+                    r.get(0)
+                })
+                .optional()?;
+            if let Some(p) = &path {
+                conn.execute(
+                    "INSERT INTO hidden_files(path, hidden_at) VALUES (?1, ?2) ON CONFLICT(path) DO NOTHING",
+                    params![p, now_unix()],
+                )?;
+            }
+            path
+        };
+        let Some(path) = path else { return Ok(false) };
+        self.remove_folder(Path::new(&path))?;
+        Ok(true)
+    }
+
+    /// Whether a file was taken out of the library.
+    pub fn is_hidden(&self, path: &Path) -> Result<bool> {
+        Ok(self
+            .lock()
+            .query_row(
+                "SELECT 1 FROM hidden_files WHERE path = ?1",
+                params![path.to_string_lossy()],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    }
+
+    /// The files taken out of the library, newest first: `(path, hidden_at)`.
+    pub fn hidden_files(&self) -> Result<Vec<(String, i64)>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare("SELECT path, hidden_at FROM hidden_files ORDER BY hidden_at DESC")?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
+    }
+
+    /// Put a file back: the next scan reads it again.
+    pub fn unhide(&self, path: &str) -> Result<bool> {
+        Ok(self
+            .lock()
+            .execute("DELETE FROM hidden_files WHERE path = ?1", params![path])?
+            > 0)
+    }
+
+    /// Library files by their file name (the last part of the path), for joining the
+    /// homeserver's private files to the songs they are: `name -> track id`.
+    pub fn track_ids_by_file_name(&self) -> Result<std::collections::HashMap<String, TrackId>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare("SELECT path, track_id FROM files WHERE missing = 0")?;
+        let mut out = std::collections::HashMap::new();
+        for row in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))? {
+            let (path, id) = row?;
+            if let Some(name) = Path::new(&path).file_name() {
+                out.insert(name.to_string_lossy().to_string(), TrackId(id));
+            }
+        }
+        Ok(out)
     }
 
     pub fn remove_track(&self, id: TrackId) -> Result<bool> {
@@ -2308,6 +2551,84 @@ impl Library {
     }
 }
 
+/// The owner's edit of a song's tags (`None`: the file's value stays).
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TrackOverride {
+    #[serde(default)]
+    pub title: Option<String>,
+    /// One credit, as typed ("A, B" names two artists, as in tags).
+    #[serde(default)]
+    pub artist: Option<String>,
+    #[serde(default)]
+    pub album: Option<String>,
+    #[serde(default)]
+    pub album_artist: Option<String>,
+}
+
+impl TrackOverride {
+    /// Blank fields count as not given.
+    pub fn cleaned(self) -> Self {
+        let c = |v: Option<String>| v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+        Self {
+            title: c(self.title),
+            artist: c(self.artist),
+            album: c(self.album),
+            album_artist: c(self.album_artist),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.title.is_none() && self.artist.is_none() && self.album.is_none() && self.album_artist.is_none()
+    }
+
+    /// Put the edit on a track read from its file.
+    pub fn apply(&self, t: &mut Track) {
+        if let Some(v) = &self.title {
+            t.title = v.clone();
+        }
+        if let Some(v) = &self.artist {
+            t.artists = crate::credits::split_all(std::slice::from_ref(v))
+                .into_iter()
+                .map(|name| pm_model::Artist {
+                    id: None,
+                    name,
+                    mbid: None,
+                })
+                .collect();
+        }
+        if self.album.is_some() || self.album_artist.is_some() {
+            let a = t.album.get_or_insert_with(|| pm_model::Album {
+                id: None,
+                title: String::new(),
+                album_artist: None,
+                release_mbid: None,
+                release_group_mbid: None,
+                year: None,
+                upc: None,
+                total_discs: None,
+            });
+            a.id = None;
+            if let Some(v) = &self.album {
+                a.title = v.clone();
+            }
+            if let Some(v) = &self.album_artist {
+                a.album_artist = Some(v.clone());
+            }
+        }
+    }
+}
+
+/// What a track's file says, as kept under an edit: title, artist names (JSON), album, album artist.
+fn originals_of(t: &Track) -> (String, String, Option<String>, Option<String>) {
+    let names: Vec<&str> = t.artists.iter().map(|a| a.name.as_str()).collect();
+    (
+        t.title.clone(),
+        serde_json::to_string(&names).unwrap_or_else(|_| "[]".into()),
+        t.album.as_ref().map(|a| a.title.clone()),
+        t.album.as_ref().and_then(|a| a.album_artist.clone()),
+    )
+}
+
 fn like_escape(s: &str) -> String {
     s.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
 }
@@ -2883,7 +3204,7 @@ mod tests {
     #[test]
     fn migrate_and_roundtrip() {
         let lib = Library::open_in_memory().unwrap();
-        assert_eq!(lib.schema_version().unwrap(), 14);
+        assert_eq!(lib.schema_version().unwrap(), 15);
         let t = sample_track("/music/a.flac", "Get Lucky");
         let id = lib.upsert_track(&t).unwrap();
         let back = lib.get_track(id).unwrap().unwrap();
@@ -3362,5 +3683,84 @@ mod identify_tests {
         assert_eq!(k1, Library::file_key(&dir.path().join("y.bin")).unwrap());
         std::fs::write(dir.path().join("y.bin"), vec![8u8; 3 << 20]).unwrap();
         assert_ne!(k1, Library::file_key(&dir.path().join("y.bin")).unwrap());
+    }
+
+    /// The owner's edits stay on the node: applied at once, kept when the file is read again,
+    /// undone without a rescan; an album renamed keeps its id; a song taken out stays out.
+    #[test]
+    fn edits_and_removals_stay_on_the_node() {
+        let lib = Library::open_in_memory().unwrap();
+        let id = lib
+            .upsert_track(&sample_track("/m/lucky.flac", "Get Lucky"))
+            .unwrap();
+        let o = TrackOverride {
+            title: Some("Get Lucky (radio edit)".into()),
+            artist: Some("Daft Punk, Pharrell Williams".into()),
+            ..Default::default()
+        };
+        let t = lib.edit_track(id, &o).unwrap().unwrap();
+        assert_eq!(t.title, "Get Lucky (radio edit)");
+        let names: Vec<&str> = t.artists.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(names, vec!["Daft Punk", "Pharrell Williams"]);
+        assert_eq!(
+            t.album.as_ref().unwrap().title,
+            "Random Access Memories",
+            "album untouched"
+        );
+        // The file is read again (a rescan): the edit stays on top
+        let mut again = sample_track("/m/lucky.flac", "Get Lucky");
+        again.id = Some(id);
+        lib.refresh_override(&again).unwrap().unwrap().apply(&mut again);
+        lib.upsert_track(&again).unwrap();
+        assert_eq!(
+            lib.get_track(id).unwrap().unwrap().title,
+            "Get Lucky (radio edit)"
+        );
+        // Undo: back to what the file says
+        let t = lib.undo_edit(id).unwrap().unwrap();
+        assert_eq!(t.title, "Get Lucky");
+        assert_eq!(t.artists.len(), 1);
+        assert!(lib.track_override(Path::new("/m/lucky.flac")).unwrap().is_none());
+        // An empty edit undoes too
+        lib.edit_track(
+            id,
+            &TrackOverride {
+                title: Some("X".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let t = lib.edit_track(id, &TrackOverride::default()).unwrap().unwrap();
+        assert_eq!(t.title, "Get Lucky");
+        // Rename the album: same id, every song on it keeps the name
+        let album = t.album.unwrap().id.unwrap();
+        assert!(lib.edit_album(album, Some("RAM"), None).unwrap());
+        let t = lib.get_track(id).unwrap().unwrap();
+        assert_eq!(t.album.as_ref().unwrap().id, Some(album));
+        assert_eq!(t.album.as_ref().unwrap().title, "RAM");
+        assert_eq!(
+            lib.track_override(Path::new("/m/lucky.flac"))
+                .unwrap()
+                .unwrap()
+                .album
+                .as_deref(),
+            Some("RAM")
+        );
+        assert!(!lib.edit_album(999_999, Some("x"), None).unwrap());
+        // Take it out: the row goes missing, the file is listed as hidden, scans skip it
+        assert!(lib.hide_track(id).unwrap());
+        assert!(lib.is_hidden(Path::new("/m/lucky.flac")).unwrap());
+        assert!(lib.get_track(id).unwrap().is_none());
+        assert_eq!(lib.stats().unwrap().files, 0);
+        assert_eq!(lib.hidden_files().unwrap()[0].0, "/m/lucky.flac");
+        assert!(lib.unhide("/m/lucky.flac").unwrap());
+        assert!(!lib.is_hidden(Path::new("/m/lucky.flac")).unwrap());
+        // File names join homeserver files to songs
+        lib.upsert_track(&sample_track("/hs/0123456789abcdef-song.flac", "Song"))
+            .unwrap();
+        assert!(lib
+            .track_ids_by_file_name()
+            .unwrap()
+            .contains_key("0123456789abcdef-song.flac"));
     }
 }
