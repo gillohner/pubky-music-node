@@ -4,6 +4,8 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+- **Who's listening on this node, and listening along.** `GET /v1/presence` shows who on the node listens to what, as each person chooses (`PUT /v1/me/presence`: everyone, the people they follow on Pubky, or hidden, the default). Listening along (`POST /v1/presence/along`) joins your zone's speakers to theirs as one synced group, so you hear their music at the same moment, quality and DSP; leaving moves it back to their zone. Nothing is published.
+
 ### 2026-10-30
 
 - **A Linn DS that was stopped no longer loses the new stream to its old requests.** While stopped, a Linn keeps asking for its last stream every 15 s, and the node held each request until a stream came: when play started, that old request could take the new stream and drop it ("listener went away", 1 start in 5 on the owner's Klimax). The URL the node gives a UPnP renderer now names its stream (`g=`): a request for an older one, and any request that was already waiting when a new stream opened, is answered at once (410), and the Linn's fetch of the new URL gets the stream from its first byte. An ended stream with nothing left is no longer handed out either.

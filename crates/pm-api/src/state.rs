@@ -218,6 +218,8 @@ pub struct NodeState {
     pub audiobookshelf: crate::audiobookshelf::Shared,
     /// MusicBrainz / Wikidata / Wikipedia / Commons origins for artist info.
     pub info_bases: std::sync::RwLock<crate::artist_info::InfoBases>,
+    /// Who on this node listens where, and the listen-along groups (presence.rs).
+    pub presence: crate::presence::Presence,
     /// Shared async HTTP client for upstream lookups, rebuilt when the contact
     /// (and so the User-Agent) changes: `(contact, client)`.
     http: Mutex<Option<(String, reqwest::Client)>>,
@@ -439,6 +441,7 @@ impl NodeState {
             nominatim_base: std::sync::RwLock::new("https://nominatim.openstreetmap.org".into()),
             identify: Mutex::new(Default::default()),
             pinakes_reader: Default::default(),
+            presence: Default::default(),
             tidal,
             http: Mutex::new(None),
             scanning: Mutex::new(false),

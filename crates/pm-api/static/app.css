@@ -801,6 +801,11 @@ a.btn { text-decoration: none; }
 /* A running files job: a small chip in the player bar (details in #jobpop) */
 .jobchip { display: inline-flex; align-items: center; gap: 6px; position: relative; overflow: hidden; border: 1px solid var(--line); background: var(--surface-2); border-radius: 999px; padding: 5px 10px 7px; font-size: 12px; cursor: pointer; color: var(--fg-2); white-space: nowrap; font-variant-numeric: tabular-nums; }
 .jobchip[hidden] { display: none; }
+/* Listening along with someone on this node: who, and Leave */
+.along-chip { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line); background: var(--surface-2); border-radius: 999px; padding: 3px 4px 3px 10px; font-size: 12px; color: var(--fg-2); white-space: nowrap; max-width: 220px; }
+.along-chip[hidden] { display: none; }
+.along-text { overflow: hidden; text-overflow: ellipsis; }
+.along-leave { padding: 2px 8px; cursor: pointer; }
 .jobchip:hover { border-color: var(--line-strong); }
 .jobchip .ic { width: 15px; height: 15px; }
 .jobchip .jc-text { line-height: 1; }

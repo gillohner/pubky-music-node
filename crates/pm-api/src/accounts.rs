@@ -177,6 +177,7 @@ const LISTENER_READS: &[&str] = &[
     "/podcasts/search",
     "/zones",
     "/devices",
+    "/presence",
 ];
 
 /// Inside [`LISTENER_READS`], still the owner's: identification candidates and suggestions.
@@ -191,7 +192,14 @@ fn under(path: &str, prefixes: &[&str]) -> bool {
 /// Whether a listener may use this zone: the owner's list, or every zone when none is set.
 fn zone_refusal(s: &NodeState, zone: &str) -> Option<&'static str> {
     match listener_zones(s) {
-        Some(allowed) if !allowed.iter().any(|z| z == zone) => {
+        // A listen-along group is open when every zone it plays for is (presence.rs)
+        Some(allowed)
+            if !allowed.iter().any(|z| z == zone)
+                && !s
+                    .presence
+                    .sources(zone)
+                    .is_some_and(|zs| zs.iter().all(|z| allowed.contains(z))) =>
+        {
             Some("the owner has not opened that zone to listeners")
         }
         _ => None,
@@ -239,6 +247,10 @@ pub fn listener_refusal(s: &NodeState, method: &Method, path: &str) -> Option<&'
     }
     // Their own phones and laptops and what those keep offline (devices.rs checks the owner)
     if path.starts_with("/devices/") {
+        return None;
+    }
+    // Listening along (presence.rs checks the zones)
+    if path == "/presence/along" {
         return None;
     }
     Some("listeners' own playlists, bookmarks and history are not built yet; this change would land in the owner's")

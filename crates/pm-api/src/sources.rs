@@ -106,6 +106,30 @@ impl NodeSources {
             .unwrap_or_else(|| self.default_cfg.clone())
     }
 
+    /// Play `to` with `from`'s settings until [`Self::forget_dsp`], without saving them: a listen-
+    /// along group sounds like the zone it came from (presence.rs).
+    pub fn carry_dsp(&self, from: &OutputId, to: &OutputId) {
+        let cfg = self.dsp_for(from);
+        self.dsp.write().expect("dsp lock").insert(to.clone(), cfg);
+    }
+
+    /// Drop settings [`Self::carry_dsp`] gave `output`: back to its saved ones, if any.
+    pub fn forget_dsp(&self, output: &OutputId) {
+        let saved = self
+            .library
+            .lock()
+            .expect("library poisoned")
+            .get_setting(&format!("{DSP_KEY_PREFIX}{}", output.0))
+            .ok()
+            .flatten()
+            .and_then(|j| serde_json::from_str::<PipelineConfig>(&j).ok());
+        let mut map = self.dsp.write().expect("dsp lock");
+        match saved {
+            Some(c) => map.insert(output.clone(), c),
+            None => map.remove(output),
+        };
+    }
+
     /// Set (and persist) the settings for `output`; takes effect at the next track start.
     pub fn set_dsp(
         &self,
