@@ -415,7 +415,7 @@ jobs:
         run: |
           mkdir -p /tmp/uitest && cd /tmp/uitest && npm init -y >/dev/null && npm install --no-audit --no-fund jsdom@24 >/dev/null
           node $GITHUB_WORKSPACE/tools/ui-smoke.js ci-token http://127.0.0.1:7788 $GITHUB_WORKSPACE
-      - name: no developer-console link in the docs outside "Advanced: use your own app"
+      - name: 'no developer-console link in the docs outside "Advanced: use your own app"'
         run: python3 -I tools/console-links.py
       - name: no client secret, private key or keystore in the repository or the binary
         run: python3 -I tools/secret-scan.py --binary target/debug/pm-node
