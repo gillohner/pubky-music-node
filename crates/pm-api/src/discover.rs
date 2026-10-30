@@ -1449,6 +1449,7 @@ async fn expand_link(
             album,
             duration_ms: duration_secs.map(|d| d * 1000),
             image: it.image.clone(),
+            limit: None,
         }]);
     }
     if l.kind == "artist" {
@@ -1468,6 +1469,7 @@ async fn expand_link(
                     album: None,
                     duration_ms: h.duration_ms,
                     image: h.image,
+                    limit: None,
                 })
             })
             .collect());
@@ -1484,6 +1486,7 @@ async fn expand_link(
             album: Some(album.title.clone()),
             duration_ms: t.duration_ms,
             image: album.image.clone().or_else(|| it.image.clone()),
+            limit: None,
         })
         .collect())
 }
@@ -1664,6 +1667,14 @@ fn bare_item(u: &str) -> DiscoverItem {
         plays_from: None,
         connect: Vec::new(),
     }
+}
+
+/// Items for Pinakes music cards, each with where it plays from here (smart_network.rs).
+pub(crate) fn items_for(s: &NodeState, cards: Vec<pm_pubky::pinakes::Card>) -> Vec<DiscoverItem> {
+    let items = pm_pubky::discovery::items_from_cards(cards);
+    let acc = service_access(s);
+    let lib = s.library.lock().expect("library poisoned");
+    items.iter().map(|d| item(&acc, &lib, d)).collect()
 }
 
 fn page(

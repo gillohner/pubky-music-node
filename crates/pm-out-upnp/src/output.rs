@@ -121,6 +121,12 @@ impl UpnpOutput {
     }
 }
 
+/// `url` naming stream `generation` of its pull output (`g`, read by the pull route).
+fn with_generation(url: &str, generation: u64) -> String {
+    let sep = if url.contains('?') { '&' } else { '?' };
+    format!("{url}{sep}g={generation}")
+}
+
 /// A renderer on Linn's OpenHome pipeline (Linn's own players). Its WAV codec reads the header's
 /// sizes literally, so it needs OpenHome's continuous-stream header.
 pub fn is_openhome(r: &Renderer) -> bool {
@@ -198,7 +204,9 @@ impl Output for UpnpOutput {
             return Err(SinkError::UnsupportedFormat(self.id(), fmt));
         }
         let inner = self.pull.open(fmt).await?;
-        let url = self.url();
+        // The URL names this stream: the renderer's polls of an older one (a stopped Linn asks
+        // for its last URI every 15 s) are answered, never given this stream
+        let url = with_generation(&self.url(), self.pull.generation());
         let protocol_info = self.kind.protocol_info(fmt.rate_hz, fmt.channels);
         let meta = didl(
             &self.meta.lock().expect("meta").clone().unwrap_or_default(),
@@ -542,7 +550,10 @@ mod tests {
             actions,
             vec![
                 "Stop".to_string(),
-                "SetAVTransportURI http://node.local:7788/v1/outputs/pull/fake/stream.wav".into(),
+                format!(
+                    "SetAVTransportURI http://node.local:7788/v1/outputs/pull/fake/stream.wav?g={}",
+                    pull.generation()
+                ),
                 "Play".into(),
                 "Stop".into()
             ]

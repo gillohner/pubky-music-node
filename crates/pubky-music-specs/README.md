@@ -12,42 +12,79 @@ microseconds; durations (`*_ms`) are milliseconds. Unknown members are kept on a
 | --- | --- |
 | `review` | `{rating: 1–10, text?}` |
 | `listen` | one play: `{played_at, duration_ms?, source?}` |
-| `listening` | now playing: `{started_at, expires_at, name?, duration_ms?, source?}` |
-| `session` | a listening session others join: `{started_at, expires_at?, host: "pubky://<key>", name?, source?}` |
+| `listening` | someone listening now: `{started_at, expires_at?, paused_at?, ended_at?, name?, duration_ms?, source?}` |
 
-`listening` and `session` are ordinary kinds: a reader stops showing one once its `expires_at` has
-passed, at most 24 hours after `started_at`.
+The `session` kind of the earlier drafts is retired: an old one reads as an unknown kind.
+
+## Listening together
+
+One `listening` post per listening session; each song change, pause or resume is a new version of
+the same post, never a post per song. `embed` is the song playing now.
+
+- `started_at` is when the song would have started for the position it is at: the time the
+  version is written minus the position then. The position is now − `started_at`, or
+  `paused_at` − `started_at` while paused (`position_ms(now)`).
+- **Pause:** a version with `paused_at` = now; `started_at` stays. **Resume or seek:** a version
+  with `started_at` = now − the position, and no `paused_at`. So everyone listening along stays
+  where the person is, not where the clock would put them.
+- `ended_at` is set when the person stops. `expires_at`, optional, is when a reader stops showing
+  it without a newer version, at most 24 hours after `started_at`; a writer keeps it a little past the
+  song's end, and past the pause while paused (a paused post is renewed, or written without one).
+  Without it a reader stops 24 hours after `started_at` (`is_live(now)`), which every version moves.
+- **Listen along:** play the same song from your own source at `position_ms(now)` and follow each
+  new version. Comments are social posts with `parent` = the listening post; reactions are social
+  tags on it. Suggesting a song is a comment that embeds it.
 
 ## Names
 
-A `listening` or a `session` may have a `name`: trimmed, 1 to 100 code points (`LIVE_NAME_MAX_LENGTH`).
-Absent is the one spelling of no name; a blank one is refused.
+A `listening` may have a `name`: trimmed, 1 to 100 code points (`LIVE_NAME_MAX_LENGTH`). Absent is
+the one spelling of no name; a blank one is refused.
 
-- A client that publishes one without a name from the person writes the generic name:
-  `generic_session_name(display name)` is `"<display name>'s listening session"`,
-  `generic_listening_name(display name)` is `"<display name> is listening"`.
-- A reader shows the same generic name when `name` is absent (`name_or_generic`), so a post reads
-  the same whichever client wrote it.
+- A reader shows `generic_listening_name(display name)`, `"<display name> is listening"`, when
+  `name` is absent (`name_or_generic`); a client may write the same.
 - The generic name is always a valid name: a blank display name reads as `Someone`, and a long one
   is shortened to fit.
 
 ```rust
-use pubky_music_specs::{generic_session_name, session};
+use pubky_music_specs::{listening, listening_post, MusicListeningContent};
 
-let post = session(
-    started_at,
-    None,
-    format!("pubky://{host}"),
-    Some(generic_session_name("Alice")), // "Alice's listening session"
-    None,
-    song_url,
-);
+// The song that just started; renewed a little past its end
+let post = listening(started_at, Some(started_at + 3_600_000_000), None, Some(duration_ms), None, song_url);
+// Paused: a new version of the same post
+let paused = MusicListeningContent { paused_at: Some(now), ..content };
+let post = listening_post(&paused, song_url);
 ```
+
+## Feeds
+
+A music feed is a saved query for music, at `/{priv,pub}/music/v1/feeds/{id}.json`, modelled on
+the social v1 feed. It is not a post: it embeds no music.
+
+| Field | |
+| --- | --- |
+| `name`, `icon?`, `created_at` | as on a social feed (1–100 characters; a Lucide icon name; Unix µs) |
+| `feed.tags`, `feed.match` | 1–5 canonical tags (folded, unique, sorted) or `null`; `any` (default) or `all` of them |
+| `feed.reach` | whose tags count: the social feed's `me`, `following`, `followers`, `friends`, `wot`, `all` |
+| `feed.sort` | `recent`, `popularity`, `random` |
+| `feed.content` | `songs`, `albums`, `artists`, `playlists`, `sessions` |
+| `feed.layout` | the social feed's layouts |
+| `feed.rules` | up to 50 `{field, op, value, to?}`: `genre`, `artist`, `album`, `year`, `format`, `tag`, `plays`, `last_played`, `bookmarked`; `is`, `contains`, `between`, `at_least`, `at_most`, `within_days`, `not_within_days` |
+| `feed.rules_match` | `any` when an item meets any of the rules; left out (the default) when it meets all of them |
+| `feed.leave_out` | `artists`, `genres`, `uris` (canonical), `played_within_days` |
+| `feed.limit` | `songs` (1–1000) and/or `minutes` (1–1440) |
+| `feed.seeds` | up to 500 canonical URIs to start from |
+
+Unlike the social feed, its id is a timestamp id, not a hash of the config: a music feed is edited
+in place (a smart playlist's rules change). It is private by default; the public copy is the same
+bytes at the `/pub/` path. A reader keeps a value it doesn't know (a later reach, sort or rule field)
+and leaves that part out; `MusicFeed::validate(id, strict: true)` is what a writer checks.
 
 ## Test vectors
 
-`tests/vectors/live-v1.json` holds `listening` and `session` contents: the valid ones with what a
-reader shows, the ones refused, and the generic names. `cargo test -p pubky-music-specs` checks
+`tests/vectors/live-v1.json` holds `listening` contents: the valid ones with what a reader shows
+and the position at a given time, the ones refused (a retired `session` among them), and the
+generic names. `tests/vectors/feed-v1.json` holds music feeds: valid ones, ones only a reader keeps,
+refused ones, and the canonical tag form. `cargo test -p pubky-music-specs` checks
 this crate against them; another implementation can check itself the same way.
 
 [pubky-social-specs]: https://github.com/pubky/pubky-social-specs

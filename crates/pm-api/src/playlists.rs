@@ -345,16 +345,45 @@ fn save_edit(
 
 pub(crate) async fn list(State(s): State<Arc<NodeState>>) -> ApiResult<Vec<PlaylistSummary>> {
     let lib = s.library.lock().expect("library poisoned");
+    Ok(Json(summaries(&lib)?))
+}
+
+/// Every playlist of the node's, as the list shows them (search lists them too).
+pub(crate) fn summaries(lib: &Library) -> Result<Vec<PlaylistSummary>, ApiError> {
+    summaries_where(lib, |_| true, usize::MAX)
+}
+
+/// The playlists whose name contains `needle` (lowercase), at most `max`: the name is checked
+/// before the song counts and covers are read (search asks on every keystroke).
+pub(crate) fn summaries_named(
+    lib: &Library,
+    needle: &str,
+    max: usize,
+) -> Result<Vec<PlaylistSummary>, ApiError> {
+    summaries_where(lib, |name| name.to_lowercase().contains(needle), max)
+}
+
+fn summaries_where(
+    lib: &Library,
+    keep: impl Fn(&str) -> bool,
+    max: usize,
+) -> Result<Vec<PlaylistSummary>, ApiError> {
     let mut out = Vec::new();
     for row in lib.list_music_posts(Some(TYPE_PLAYLIST))? {
-        if let Ok((row, p)) = load(&lib, &row.id) {
+        if out.len() >= max {
+            break;
+        }
+        if let Ok((row, p)) = load(lib, &row.id) {
             let mut sm = summary(&row, &p);
-            sm.items += local_ids(&lib, &row.id).len();
-            sm.covers = covers(&lib, &row.id, &p);
+            if !keep(&sm.name) {
+                continue;
+            }
+            sm.items += local_ids(lib, &row.id).len();
+            sm.covers = covers(lib, &row.id, &p);
             out.push(sm);
         }
     }
-    Ok(Json(out))
+    Ok(out)
 }
 
 pub(crate) async fn create(
@@ -780,6 +809,7 @@ pub(crate) fn local_queue_item(t: &Track) -> pm_zones::QueueItem {
         album: t.album.as_ref().map(|a| a.title.clone()),
         duration_ms: t.duration_ms,
         image: None,
+        limit: None,
     }
 }
 

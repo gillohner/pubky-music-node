@@ -28,13 +28,13 @@ pub const TIME_MIN_MICROS: i64 = 946_684_800_000_000;
 pub const MILLIS_BEFORE: i64 = 32_503_680_000_000;
 /// 2000-01-01 in Unix milliseconds: the earliest millisecond time read. It catches seconds.
 const TIME_MIN_MILLIS: i64 = 946_684_800_000;
-/// The longest a `listening` or a `session` announces itself for: 24 hours.
+/// The longest a `listening` announces itself for after its song started: 24 hours.
 pub const LIVE_WINDOW_MAX_MICROS: i64 = 24 * 60 * 60 * 1_000_000;
-/// A `listening`'s or a `session`'s `name`, in code points (a social collection name's length).
+/// A `listening`'s `name`, in code points (a social collection name's length).
 pub const LIVE_NAME_MAX_LENGTH: usize = 100;
 /// The services everyone spells the same way (an open vocabulary: other well-formed names are
 /// fine, and a reader that does not know one treats the source as unknown). Hyphenated, never
-/// underscored: Pinakes maps its `apple_music` to `apple-music`.
+/// underscored: a spelling with underscores folds to hyphens (`apple_music` is `apple-music`).
 pub const SERVICE_NAMES: &[&str] = &[
     "library",
     "roon",
@@ -123,48 +123,43 @@ impl MusicSource {
     }
 }
 
-/// The content of a `listening` (now playing):
-/// `{"started_at": µs, "expires_at": µs, "name"?: "…", "duration_ms"?: ms, "source"?: {service, uri?}}`.
-/// `embed` is the music playing now.
+/// The content of a `listening`: one person listening, now (listening together, owner decision
+/// 2026-10-29). One post per listening session; each song change, pause or resume is a new
+/// version of the same post, never a post per song. `embed` is the song playing now.
+/// `{"started_at": µs, "expires_at"?: µs, "paused_at"?: µs, "ended_at"?: µs, "name"?: "…",
+/// "duration_ms"?: ms, "source"?: {service, uri?}}`.
+///
+/// Others listen along from their own source: the same song at [`MusicListeningContent::position_ms`],
+/// following each new version. Comments are social posts with `parent` = the listening post;
+/// reactions are social tags on it.
 #[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq)]
 pub struct MusicListeningContent {
-    /// When it started, Unix microseconds.
+    /// When this song would have started for the position it is at, Unix microseconds: the time
+    /// the version was written minus the position then, so the position is now − `started_at`
+    /// while playing. A resume or a seek writes it anew (now − position) and clears `paused_at`;
+    /// a pause keeps it.
     pub started_at: i64,
-    /// When the announcement lapses (at most [`LIVE_WINDOW_MAX_MICROS`] after `started_at`).
-    pub expires_at: i64,
-    /// What it is called: trimmed, 1 to [`LIVE_NAME_MAX_LENGTH`] code points. A client with no
-    /// name from the person writes [`generic_listening_name`]; a reader shows that when it is
-    /// absent ([`MusicListeningContent::name_or_generic`]).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    /// The music's length, in milliseconds.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub duration_ms: Option<i64>,
-    /// Where it plays from.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source: Option<MusicSource>,
-    /// Unknown members, preserved on rewrite.
-    #[serde(flatten)]
-    pub extra: Map<String, Value>,
-}
-
-/// The content of a `session` (a listening session others can join):
-/// `{"started_at": µs, "expires_at"?: µs, "host": "pubky://<key>", "name"?: "…", "source"?: {service, uri?}}`.
-/// `embed` is the music playing now.
-#[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq)]
-pub struct MusicSessionContent {
-    /// When it started, Unix microseconds.
-    pub started_at: i64,
-    /// When it ends if nobody renews it (at most [`LIVE_WINDOW_MAX_MICROS`] after `started_at`).
+    /// When a reader stops showing it if no newer version comes, Unix microseconds (at most
+    /// [`LIVE_WINDOW_MAX_MICROS`] after `started_at`). A writer keeps it a little past the song's
+    /// end (and past the pause while paused), so a client that stops without saying so leaves
+    /// nothing showing for long. Absent: a reader stops [`LIVE_WINDOW_MAX_MICROS`] after
+    /// `started_at`, which every version moves.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<i64>,
-    /// Who hosts it: a Pubky user, `pubky://<key>`.
-    pub host: String,
+    /// Set while paused, Unix microseconds: the position is `paused_at` − `started_at`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paused_at: Option<i64>,
+    /// Set when the person stopped listening, Unix microseconds: readers stop showing it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_at: Option<i64>,
     /// What it is called: trimmed, 1 to [`LIVE_NAME_MAX_LENGTH`] code points. A client with no
-    /// name from the person writes [`generic_session_name`]; a reader shows that when it is absent
-    /// ([`MusicSessionContent::name_or_generic`]).
+    /// name from the person writes [`generic_listening_name`] or nothing; a reader shows that when
+    /// it is absent ([`MusicListeningContent::name_or_generic`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// The song's length, in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<i64>,
     /// Where it plays from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<MusicSource>,
@@ -180,26 +175,30 @@ impl MusicListeningContent {
             .clone()
             .unwrap_or_else(|| generic_listening_name(display_name))
     }
-}
 
-impl MusicSessionContent {
-    /// The name to show: `name`, or [`generic_session_name`] of the host's display name.
-    pub fn name_or_generic(&self, display_name: &str) -> String {
-        self.name
-            .clone()
-            .unwrap_or_else(|| generic_session_name(display_name))
+    /// Whether a reader shows it at `now` (Unix microseconds): not ended and not expired.
+    pub fn is_live(&self, now: i64) -> bool {
+        let expires = self
+            .expires_at
+            .unwrap_or(self.started_at.saturating_add(LIVE_WINDOW_MAX_MICROS));
+        self.ended_at.is_none_or(|e| now < e) && now < expires
+    }
+
+    /// Where in the song it is at `now` (Unix microseconds), in milliseconds: the paused position
+    /// while paused, never past `duration_ms`; `None` once it is not live.
+    pub fn position_ms(&self, now: i64) -> Option<i64> {
+        if !self.is_live(now) {
+            return None;
+        }
+        let at = self.paused_at.unwrap_or(now).max(self.started_at);
+        let pos = (at - self.started_at) / 1000;
+        Some(self.duration_ms.map_or(pos, |d| pos.min(d)))
     }
 }
 
-/// The generic name of a `session` hosted by `display_name`: `"<display name>'s listening
-/// session"`. A client that publishes a session the person did not name writes it, and a reader
-/// shows it for a session without a `name`, so both say the same.
-pub fn generic_session_name(display_name: &str) -> String {
-    generic_name(display_name, "'s listening session")
-}
-
-/// The generic name of a `listening` by `display_name`: `"<display name> is listening"`, written
-/// and read like [`generic_session_name`].
+/// The generic name of a `listening` by `display_name`: `"<display name> is listening"`. A client
+/// that publishes one the person did not name may write it, and a reader shows it for a
+/// `listening` without a `name`, so both say the same.
 pub fn generic_listening_name(display_name: &str) -> String {
     generic_name(display_name, " is listening")
 }
@@ -357,32 +356,31 @@ pub(crate) fn parse_listening(content: &str) -> Result<MusicListeningContent, St
     let l: MusicListeningContent = parse(content, "listening")?;
     check_extra(
         &l.extra,
-        &["started_at", "expires_at", "name", "duration_ms", "source"],
+        &[
+            "started_at",
+            "expires_at",
+            "paused_at",
+            "ended_at",
+            "name",
+            "duration_ms",
+            "source",
+        ],
     )?;
-    window(
-        time("started_at", l.started_at)?,
-        time("expires_at", l.expires_at)?,
-    )?;
+    let started = time("started_at", l.started_at)?;
+    if let Some(e) = l.expires_at {
+        window(started, time("expires_at", e)?)?;
+    }
+    for (field, t) in [("paused_at", l.paused_at), ("ended_at", l.ended_at)] {
+        if let Some(t) = t {
+            if time(field, t)? < started {
+                return Err(format!("Validation Error: {field} must not be before started_at"));
+            }
+        }
+    }
     name(l.name.as_deref())?;
     duration(l.duration_ms)?;
     source(l.source.as_ref())?;
     Ok(l)
-}
-
-pub(crate) fn parse_session(content: &str) -> Result<MusicSessionContent, String> {
-    let s: MusicSessionContent = parse(content, "session")?;
-    check_extra(&s.extra, &["started_at", "expires_at", "host", "name", "source"])?;
-    name(s.name.as_deref())?;
-    let started = time("started_at", s.started_at)?;
-    if let Some(e) = s.expires_at {
-        window(started, time("expires_at", e)?)?;
-    }
-    // A user reference: the host's key and nothing after it (the gate checks the key)
-    if !s.host.starts_with("pubky://") || s.host["pubky://".len()..].contains('/') {
-        return Err("Validation Error: host must be a Pubky user, pubky://<key>".into());
-    }
-    source(s.source.as_ref())?;
-    Ok(s)
 }
 
 /// What the reference gate should check, read leniently: an unparsable content is the kind's
@@ -390,12 +388,6 @@ pub(crate) fn parse_session(content: &str) -> Result<MusicSessionContent, String
 pub(crate) fn listen_source_uri(content: &str) -> Option<String> {
     let value: Value = serde_json::from_str(content).ok()?;
     Some(value.get("source")?.get("uri")?.as_str()?.to_string())
-}
-
-/// A session's `host`, read the same way.
-pub(crate) fn session_host(content: &str) -> Option<String> {
-    let value: Value = serde_json::from_str(content).ok()?;
-    Some(value.get("host")?.as_str()?.to_string())
 }
 
 /// `extra` must not shadow a known field, and every integer in it must be JSON-safe.

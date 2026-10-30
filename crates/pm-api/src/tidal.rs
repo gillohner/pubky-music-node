@@ -184,7 +184,7 @@ fn login_base(s: &NodeState) -> String {
 /// address, else the origin of this request (reverse proxies set
 /// `X-Forwarded-Proto` / `X-Forwarded-Host`; plain access has `Host`). A `public_url` the node
 /// guessed for speakers (its LAN address) is not what a browser on `localhost`, behind a proxy
-/// or at `umbrel.local` used, and sign-in providers check the redirect exactly.
+/// or a `.local` name used, and sign-in providers check the redirect exactly.
 pub(crate) fn external_base(s: &NodeState, headers: &axum::http::HeaderMap) -> String {
     let configured = s.public_url.trim_end_matches('/');
     let unusable = s.public_url_guessed()

@@ -88,6 +88,31 @@ pub struct Rules {
     /// At most this many songs (default 100, up to 1000).
     #[serde(default = "hundred")]
     pub limit: usize,
+    /// Whose tags count (TASK-pinakes-social-ux.md E2): `me` (the default: the library alone),
+    /// `following`, `friends` or `all`, with `tags` and `match` (smart_network.rs).
+    #[serde(default = "me", skip_serializing_if = "is_me")]
+    pub reach: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    /// `any` (default) or `all` of `tags`.
+    #[serde(default = "any", rename = "match", skip_serializing_if = "is_any")]
+    pub tags_match: String,
+    /// How many network items a preview lists (30 by default, up to 100).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_limit: Option<usize>,
+}
+
+fn me() -> String {
+    "me".into()
+}
+fn is_me(r: &str) -> bool {
+    r == "me"
+}
+fn any() -> String {
+    "any".into()
+}
+fn is_any(m: &str) -> bool {
+    m == "any"
 }
 
 fn all() -> String {
@@ -106,6 +131,9 @@ pub struct SmartPlaylist {
     pub name: String,
     #[serde(flatten)]
     pub rules: Rules,
+    /// Its music feed on the homeserver, for one with tags from the network.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feed: Option<crate::smart_network::FeedRef>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -113,6 +141,13 @@ pub struct SmartResult {
     /// How many songs match before the limit.
     pub matched: usize,
     pub tracks: Vec<Track>,
+    /// Music people in the reach tagged (`reach` other than `me`): playable here first, then
+    /// cards.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub network: Vec<crate::smart_network::NetworkItem>,
+    /// Why `network` is empty when it was asked for, in plain words.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub network_note: Option<String>,
 }
 
 /// What each rule looks at, gathered once per evaluation.
@@ -190,7 +225,8 @@ fn matches(rule: &Rule, t: &Track, f: &Facts) -> bool {
 }
 
 fn check(r: &Rules) -> Result<(), ApiError> {
-    if r.rules.is_empty() && r.seeds.is_empty() {
+    crate::smart_network::check(r)?;
+    if r.rules.is_empty() && r.seeds.is_empty() && r.reach == "me" {
         return Err(ApiError::bad_request(
             "A smart playlist needs at least one rule or a seed",
         ));
@@ -213,10 +249,9 @@ fn check(r: &Rules) -> Result<(), ApiError> {
 }
 
 /// The songs these rules pick right now.
-pub fn evaluate(s: &NodeState, r: &Rules) -> Result<SmartResult, ApiError> {
-    let lib = s.library.lock().expect("library poisoned");
-    let marked = crate::bookmarks::collect(&lib)?;
-    let facts = Facts {
+fn facts(lib: &pm_library::Library) -> Result<Facts, ApiError> {
+    let marked = crate::bookmarks::collect(lib)?;
+    Ok(Facts {
         bookmarks: marked.tracks.iter().filter_map(|t| t.id.map(|i| i.0)).collect(),
         plays: lib.play_stats()?,
         tags: {
@@ -227,16 +262,36 @@ pub fn evaluate(s: &NodeState, r: &Rules) -> Result<SmartResult, ApiError> {
             m
         },
         now: pm_library::db::now_unix(),
-    };
-    let any = r.matches == "any";
+    })
+}
+
+/// Whether `t` meets the rules (`any` or `all` of them) and isn't left out.
+fn keeps(r: &Rules, t: &Track, facts: &Facts) -> bool {
+    let rules_ok = r.rules.is_empty()
+        || if r.matches == "any" {
+            r.rules.iter().any(|rule| matches(rule, t, facts))
+        } else {
+            r.rules.iter().all(|rule| matches(rule, t, facts))
+        };
+    rules_ok && !excluded(&r.exclude, t, facts)
+}
+
+pub fn evaluate(s: &NodeState, r: &Rules) -> Result<SmartResult, ApiError> {
+    evaluate_within(s, r, None)
+}
+
+/// [`evaluate`], keeping only the songs whose canonical URL is in `only` (the ones a network
+/// reach tagged) when it is given.
+fn evaluate_within(
+    s: &NodeState,
+    r: &Rules,
+    only: Option<&HashSet<String>>,
+) -> Result<SmartResult, ApiError> {
+    let lib = s.library.lock().expect("library poisoned");
+    let facts = facts(&lib)?;
     let keep = |t: &Track| -> bool {
-        let rules_ok = r.rules.is_empty()
-            || if any {
-                r.rules.iter().any(|rule| matches(rule, t, &facts))
-            } else {
-                r.rules.iter().all(|rule| matches(rule, t, &facts))
-            };
-        rules_ok && !excluded(&r.exclude, t, &facts)
+        only.is_none_or(|o| t.publishable_uri().is_some_and(|u| o.contains(&u.to_url())))
+            && keeps(r, t, &facts)
     };
     let mut picked: Vec<Track> = Vec::new();
     if r.seeds.is_empty() {
@@ -309,6 +364,8 @@ pub fn evaluate(s: &NodeState, r: &Rules) -> Result<SmartResult, ApiError> {
     Ok(SmartResult {
         matched,
         tracks: picked,
+        network: Vec::new(),
+        network_note: None,
     })
 }
 
@@ -421,13 +478,31 @@ pub(crate) async fn create(
     if name.is_empty() {
         return Err(ApiError::bad_request("Give it a name"));
     }
-    let p = SmartPlaylist {
+    let mut p = SmartPlaylist {
         id: crate::tidal::random_urlsafe(9),
         name,
         rules: b.rules,
+        feed: None,
     };
+    sync_feed(&s, &mut p).await?;
     store(&s, &p)?;
     Ok(Json(p))
+}
+
+/// With tags from the network the smart playlist is also a music feed on the homeserver; back to
+/// `me` its feed goes.
+async fn sync_feed(s: &Arc<NodeState>, p: &mut SmartPlaylist) -> Result<(), ApiError> {
+    if p.rules.reach != "me" {
+        let f = crate::smart_network::save_feed(s, p)
+            .await
+            .map_err(|e| ApiError::new(axum::http::StatusCode::BAD_GATEWAY, e))?;
+        p.feed = Some(f);
+    } else if let Some(f) = p.feed.take() {
+        if let Err(e) = crate::smart_network::delete_feed(s, &f).await {
+            tracing::warn!(error = %e, "removing a smart playlist's music feed");
+        }
+    }
+    Ok(())
 }
 
 /// `PUT /v1/smart/{id}`.
@@ -440,6 +515,7 @@ pub(crate) async fn update(
     let mut p = load(&s, &id)?;
     p.name = b.name.trim().chars().take(100).collect();
     p.rules = b.rules;
+    sync_feed(&s, &mut p).await?;
     store(&s, &p)?;
     Ok(Json(p))
 }
@@ -449,7 +525,12 @@ pub(crate) async fn delete(
     State(s): State<Arc<NodeState>>,
     Path(id): Path<String>,
 ) -> ApiResult<serde_json::Value> {
-    load(&s, &id)?;
+    let p = load(&s, &id)?;
+    if let Some(f) = &p.feed {
+        if let Err(e) = crate::smart_network::delete_feed(&s, f).await {
+            tracing::warn!(error = %e, "removing a smart playlist's music feed");
+        }
+    }
     s.library
         .lock()
         .expect("library poisoned")
@@ -463,16 +544,86 @@ pub(crate) async fn tracks(
     Path(id): Path<String>,
 ) -> ApiResult<serde_json::Value> {
     let p = load(&s, &id)?;
-    let r = evaluate(&s, &p.rules)?;
+    let r = with_network(&s, &p.rules).await?;
     Ok(Json(
-        serde_json::json!({ "playlist": p, "matched": r.matched, "tracks": r.tracks }),
+        serde_json::json!({ "playlist": p, "matched": r.matched, "tracks": r.tracks, "network": r.network, "network_note": r.network_note }),
     ))
 }
 
 /// `POST /v1/smart/preview {rules, matches, sort, limit}`: what the rules pick, while editing.
 pub(crate) async fn preview(State(s): State<Arc<NodeState>>, Json(r): Json<Rules>) -> ApiResult<SmartResult> {
     check(&r)?;
-    Ok(Json(evaluate(&s, &r)?))
+    Ok(Json(with_network(&s, &r).await?))
+}
+
+/// The library's songs, and with a network reach what people in it tagged: one query, as the
+/// feed the playlist writes says (tagged by the reach **and** meeting the rules). With tags, the
+/// library's songs are the ones the reach tagged; what the network found meets the rules too:
+/// a song in the library on everything the library knows, another on what it says itself (its
+/// artist), so a rule nothing can check for it leaves it out.
+async fn with_network(s: &Arc<NodeState>, r: &Rules) -> Result<SmartResult, ApiError> {
+    let (network, network_note) = match crate::smart_network::network(s, r).await {
+        Ok(items) => (items, None),
+        Err(note) => (Vec::new(), Some(note)),
+    };
+    let tagged: Option<HashSet<String>> =
+        (!r.tags.is_empty()).then(|| network.iter().map(|i| i.uri.clone()).collect());
+    let mut out = if r.rules.is_empty() && r.seeds.is_empty() && tagged.is_none() {
+        SmartResult {
+            matched: 0,
+            tracks: Vec::new(),
+            network: Vec::new(),
+            network_note: None,
+        }
+    } else {
+        evaluate_within(s, r, tagged.as_ref())?
+    };
+    out.network = network;
+    out.network_note = network_note;
+    if !r.rules.is_empty() || !r.exclude.is_empty() {
+        let lib = s.library.lock().expect("library poisoned");
+        let facts = facts(&lib)?;
+        out.network.retain(|it| {
+            let in_library = pm_model::MusicUri::parse(&it.uri)
+                .ok()
+                .and_then(|u| lib.tracks_by_canonical(&u).ok())
+                .and_then(|ts| ts.into_iter().next());
+            match in_library {
+                Some(t) => keeps(r, &t, &facts),
+                None => network_keeps(r, it),
+            }
+        });
+    }
+    Ok(out)
+}
+
+/// The rules on a network item the library hasn't got: only what it says itself (its artist)
+/// can be checked; any other rule fails, so it is left out rather than guessed in.
+fn network_keeps(r: &Rules, it: &crate::smart_network::NetworkItem) -> bool {
+    let one = |rule: &Rule| match rule.field.as_str() {
+        "artist" => {
+            let want = text(&rule.value);
+            !want.is_empty()
+                && it
+                    .artist
+                    .as_deref()
+                    .is_some_and(|a| a.to_lowercase().contains(&want))
+        }
+        _ => false,
+    };
+    let rules_ok = r.rules.is_empty()
+        || if r.matches == "any" {
+            r.rules.iter().any(one)
+        } else {
+            r.rules.iter().all(one)
+        };
+    let artist_out = it.artist.as_deref().is_some_and(|a| {
+        r.exclude
+            .artists
+            .iter()
+            .any(|x| a.to_lowercase() == x.trim().to_lowercase())
+    });
+    rules_ok && !artist_out
 }
 
 #[cfg(test)]

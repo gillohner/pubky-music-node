@@ -1,48 +1,8 @@
 {
-  "description": "pubky-music-specs `listening` and `session` contents (music v1). Each post is the v1 envelope with this kind and content, `embed` a music URL, no parent, attachments or lock, validated under /pub. `valid` cases give what a reader shows for the person `display_name`: the `name`, or the generic name when it is absent. `invalid` cases are refused with an error naming `error`. `generic_names` are what a client writes when the person gave no name, and what a reader shows. Times are Unix microseconds.",
+  "description": "pubky-music-specs `listening` contents (music v1, listening together, 2026-10-29). Each post is the v1 envelope with this kind and content, `embed` the song playing now, no parent, attachments or lock, validated under /pub. One post per listening session, a new version per song, pause or resume: `started_at` is when this song started, `paused_at` is set while paused, `ended_at` when the person stopped, `expires_at` (optional) when readers stop showing it. `valid` cases give what a reader shows for the person `display_name` (the `name`, or the generic name when it is absent) and, with `now`, the position a listener along plays from (`position_ms`, null once it isn't live). `invalid` cases are refused with an error naming `error`; `session`, from earlier drafts, is retired and refused as an unknown kind. `generic_names` are what a client may write when the person gave no name, and what a reader shows. Times are Unix microseconds.",
   "author": "operrr8wsbpr3ue9d4qj41ge1kcc6r7fdiy6o3ugjrrhi4y77rdo",
   "embed": "https://musicbrainz.org/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69",
   "valid": [
-    {
-      "kind": "session",
-      "display_name": "Alice",
-      "content": {
-        "started_at": 1792540800000000,
-        "expires_at": 1792544400000000,
-        "host": "pubky://operrr8wsbpr3ue9d4qj41ge1kcc6r7fdiy6o3ugjrrhi4y77rdo",
-        "name": "Friday night"
-      },
-      "shown_as": "Friday night"
-    },
-    {
-      "kind": "session",
-      "display_name": "Alice",
-      "content": {
-        "started_at": 1792540800000000,
-        "host": "pubky://operrr8wsbpr3ue9d4qj41ge1kcc6r7fdiy6o3ugjrrhi4y77rdo"
-      },
-      "shown_as": "Alice's listening session"
-    },
-    {
-      "kind": "session",
-      "display_name": "Alice",
-      "content": {
-        "started_at": 1792540800000000,
-        "host": "pubky://operrr8wsbpr3ue9d4qj41ge1kcc6r7fdiy6o3ugjrrhi4y77rdo",
-        "name": "Alice's listening session"
-      },
-      "shown_as": "Alice's listening session"
-    },
-    {
-      "kind": "session",
-      "display_name": "Alice",
-      "content": {
-        "started_at": 1792540800000000,
-        "host": "pubky://operrr8wsbpr3ue9d4qj41ge1kcc6r7fdiy6o3ugjrrhi4y77rdo",
-        "name": "ääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääää"
-      },
-      "shown_as": "ääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääääää"
-    },
     {
       "kind": "listening",
       "display_name": "Bob",
@@ -75,45 +35,81 @@
         "expires_at": 1792541013000000
       },
       "shown_as": "Someone is listening"
+    },
+    {
+      "kind": "listening",
+      "display_name": "Alice",
+      "content": {
+        "started_at": 1792540800000000,
+        "expires_at": 1792544400000000,
+        "duration_ms": 200000,
+        "name": "Friday vinyl night"
+      },
+      "shown_as": "Friday vinyl night",
+      "now": 1792540830000000,
+      "position_ms": 30000
+    },
+    {
+      "kind": "listening",
+      "display_name": "Alice",
+      "content": {
+        "started_at": 1792540800000000,
+        "expires_at": 1792544400000000,
+        "duration_ms": 200000,
+        "paused_at": 1792540842000000
+      },
+      "shown_as": "Alice is listening",
+      "now": 1792540900000000,
+      "position_ms": 42000
+    },
+    {
+      "kind": "listening",
+      "display_name": "Alice",
+      "content": {
+        "started_at": 1792540800000000,
+        "duration_ms": 200000,
+        "ended_at": 1792540860000000
+      },
+      "shown_as": "Alice is listening",
+      "now": 1792540861000000,
+      "position_ms": null
+    },
+    {
+      "kind": "listening",
+      "display_name": "Bob",
+      "content": {
+        "started_at": 1792540800000000
+      },
+      "shown_as": "Bob is listening",
+      "now": 1792540805000000,
+      "position_ms": 5000
+    },
+    {
+      "kind": "listening",
+      "display_name": "Alice",
+      "content": {
+        "started_at": 1792540800000000
+      },
+      "shown_as": "Alice is listening",
+      "now": 1792627200000000,
+      "position_ms": null,
+      "about": "no expiry: not live a day after started_at"
+    },
+    {
+      "kind": "listening",
+      "display_name": "Alice",
+      "content": {
+        "started_at": 1792540858000000,
+        "expires_at": 1792544500000000,
+        "duration_ms": 200000
+      },
+      "shown_as": "Alice is listening",
+      "now": 1792540910000000,
+      "position_ms": 52000,
+      "about": "resumed after a pause at 42 s: started_at is the resume time minus 42 s, so listeners go on from 42 s"
     }
   ],
   "invalid": [
-    {
-      "kind": "session",
-      "content": {
-        "started_at": 1792540800000000,
-        "host": "pubky://operrr8wsbpr3ue9d4qj41ge1kcc6r7fdiy6o3ugjrrhi4y77rdo",
-        "name": ""
-      },
-      "error": "name"
-    },
-    {
-      "kind": "session",
-      "content": {
-        "started_at": 1792540800000000,
-        "host": "pubky://operrr8wsbpr3ue9d4qj41ge1kcc6r7fdiy6o3ugjrrhi4y77rdo",
-        "name": "   "
-      },
-      "error": "name"
-    },
-    {
-      "kind": "session",
-      "content": {
-        "started_at": 1792540800000000,
-        "host": "pubky://operrr8wsbpr3ue9d4qj41ge1kcc6r7fdiy6o3ugjrrhi4y77rdo",
-        "name": " Friday night"
-      },
-      "error": "name"
-    },
-    {
-      "kind": "session",
-      "content": {
-        "started_at": 1792540800000000,
-        "host": "pubky://operrr8wsbpr3ue9d4qj41ge1kcc6r7fdiy6o3ugjrrhi4y77rdo",
-        "name": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-      },
-      "error": "name"
-    },
     {
       "kind": "listening",
       "content": {
@@ -131,32 +127,59 @@
         "name": 7
       },
       "error": "content"
+    },
+    {
+      "kind": "listening",
+      "content": {
+        "started_at": 1792540800000000,
+        "paused_at": 1792540799999999
+      },
+      "error": "before started_at"
+    },
+    {
+      "kind": "listening",
+      "content": {
+        "started_at": 1792540800000000,
+        "ended_at": 1792540799999999
+      },
+      "error": "before started_at"
+    },
+    {
+      "kind": "listening",
+      "content": {
+        "started_at": 1792540800000000,
+        "expires_at": 1792540800000000
+      },
+      "error": "expires_at"
+    },
+    {
+      "kind": "session",
+      "content": {
+        "started_at": 1792540800000000,
+        "host": "pubky://operrr8wsbpr3ue9d4qj41ge1kcc6r7fdiy6o3ugjrrhi4y77rdo"
+      },
+      "error": "unknown"
     }
   ],
   "generic_names": [
     {
       "display_name": "Alice",
-      "session": "Alice's listening session",
       "listening": "Alice is listening"
     },
     {
       "display_name": "  Alice  ",
-      "session": "Alice's listening session",
       "listening": "Alice is listening"
     },
     {
       "display_name": "",
-      "session": "Someone's listening session",
       "listening": "Someone is listening"
     },
     {
       "display_name": "  ",
-      "session": "Someone's listening session",
       "listening": "Someone is listening"
     },
     {
       "display_name": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-      "session": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx's listening session",
       "listening": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx is listening"
     }
   ]

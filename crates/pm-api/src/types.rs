@@ -378,6 +378,10 @@ pub struct Tags {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub uri: Option<String>,
     pub tags: Vec<TagEntry>,
+    /// The item has no identity yet (an album or artist without a MusicBrainz id): it can't
+    /// take tags until it is matched. An unmatched song still takes tags that wait for a match.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub needs_match: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -421,6 +425,9 @@ pub struct Reviews {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub uri: Option<String>,
     pub reviews: Vec<ReviewEntry>,
+    /// The item has no identity yet: it can't be reviewed until it is matched.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub needs_match: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -569,11 +576,24 @@ pub struct ErrorBody {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ApiEvent {
-    Snapshot { zones: Vec<ZoneState> },
-    Zone { state: ZoneState },
-    ZoneEvent { zone: ZoneId, event: ZoneEvent },
-    ZoneRemoved { zone: ZoneId },
+    Snapshot {
+        zones: Vec<ZoneState>,
+    },
+    Zone {
+        state: ZoneState,
+    },
+    ZoneEvent {
+        zone: ZoneId,
+        event: ZoneEvent,
+    },
+    ZoneRemoved {
+        zone: ZoneId,
+    },
     LibraryChanged,
+    /// The homeserver refused the owner's listening post: "Share what I'm listening to" is off.
+    ListeningStopped {
+        error: String,
+    },
 }
 
 // ---- playlists (ADR 0006) ----
@@ -1500,6 +1520,10 @@ pub struct ItemPage {
     /// The picture's credit when it is from Wikimedia Commons.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_credit: Option<ImageCredit>,
+    /// What open sources say (About, its links, the picture) is being fetched: ask for the page
+    /// again in a few seconds.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub about_pending: bool,
     /// Sidebar section the page belongs to (`albums`, `artists`, `discover`).
     pub section: String,
     /// A library artist's or album's MusicBrainz id (an album's release group) and where it came
@@ -1963,6 +1987,10 @@ pub struct SharedPlaylist {
     pub summary: SharedPlaylistSummary,
     /// Where each song plays from on this node.
     pub play_from: PlaylistPlayFrom,
+    /// Every item with its kind, in the same order: a web page or a post shows as its card, not
+    /// as a song that doesn't play.
+    #[serde(default)]
+    pub entries: Vec<CollectionEntry>,
 }
 
 /// `GET /v1/sources/jamendo/status`.

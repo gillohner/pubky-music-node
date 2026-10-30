@@ -113,6 +113,38 @@ pub async fn card(s: &std::sync::Arc<NodeState>, uri: &str) -> Card {
     resolve(s, &uri).await
 }
 
+/// A link's card without waiting for Pinakes to read it: the cache, else what Pinakes already
+/// has (by-uri); a link it hasn't read yet is read in the background and answers
+/// [`Card::Reading`] now (the page asks again). `GET /v1/cards` uses it, so a playlist of unread
+/// links never holds the browser's connections while the reads wait their turn.
+pub async fn card_now(s: &std::sync::Arc<NodeState>, uri: &str) -> Card {
+    let uri = uri.trim().to_string();
+    if crate::activity::is_search_link(&uri) {
+        return Card::Unknown;
+    }
+    if let Some(c) = s.pinakes_reader.cached(&uri) {
+        return c;
+    }
+    let Some(d) = s.discovery() else {
+        return Card::Unknown;
+    };
+    match d.resource_for(&uri).await {
+        Ok(Some(r)) => {
+            let c = Card::Found(Box::new(r));
+            s.pinakes_reader.remember(&uri, &c);
+            c
+        }
+        Ok(None) => {
+            resolve_later(s, vec![uri]);
+            Card::Reading(None)
+        }
+        Err(e) => {
+            tracing::debug!(%uri, "pinakes by-uri: {e}");
+            Card::Unknown
+        }
+    }
+}
+
 /// Ask Pinakes to read `uri`, once at a time per link. Never an import's search link: its
 /// words are a private playlist's.
 pub async fn resolve(s: &std::sync::Arc<NodeState>, uri: &str) -> Card {
@@ -235,7 +267,7 @@ pub(crate) async fn get_card(
             site: c.and_then(|c| c.site),
         }
     };
-    Ok(axum::Json(match card(&s, &uri).await {
+    Ok(axum::Json(match card_now(&s, &uri).await {
         Card::Found(r) => view("found", Some(r)),
         Card::Reading(r) => view("reading", r),
         Card::Unknown => view("unknown", None),

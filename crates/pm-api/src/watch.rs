@@ -1,6 +1,6 @@
 //! Automatic library pickup: watch the configured folders and rescan after
 //! a quiet period, so anything another app drops into a shared folder (a
-//! download client on Umbrel, a NAS sync) shows up without a manual scan.
+//! download client, a NAS sync) shows up without a manual scan.
 //!
 //! The debounce matters: a file being written changes size repeatedly; a
 //! scan in the middle would index half a file or fail to probe it. Waiting

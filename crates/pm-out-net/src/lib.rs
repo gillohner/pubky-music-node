@@ -3,8 +3,12 @@
 //!
 //! [`NetOutput::connect`] asks an endpoint for its outputs (one `NetOutput`
 //! per remote output, caps copied verbatim); `open` starts a dedicated TCP
-//! session whose `write` sends a block and waits for the endpoint's `Ack`,
-//! so the remote DAC paces the zone exactly like a local one. Endpoints are
+//! session whose `write` sends a block without waiting for the endpoint's
+//! `Ack` (its own thread collects them), as long as at most [`IN_FLIGHT`] of
+//! audio is not acknowledged yet; past that it waits, so the remote DAC paces
+//! the zone like a local one, a network round trip later. A group writes its
+//! members one after another: waiting for each member's round trip on every
+//! block would add them up, and starve the DACs on Wi-Fi. Endpoints are
 //! never discovered: the app registers its player's address and key with
 //! the node, and every connection shows that key.
 //!
@@ -20,10 +24,14 @@ use pm_zones::sink::check_block;
 use pm_zones::{AudioSink, BufferLevel, Output, OutputId, OutputInfo, SinkError};
 use std::io::{BufReader, BufWriter};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+/// Audio sent and not acknowledged yet, at most (at least one block is always sent).
+pub const IN_FLIGHT: Duration = Duration::from_millis(100);
+/// An endpoint that answers nothing for this long is gone.
+const ANSWER_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn io_err(e: StreamError) -> SinkError {
     SinkError::Device(e.to_string())
@@ -165,16 +173,60 @@ impl Output for NetOutput {
             Frame::Opened { buffer_frames } => buffer_frames,
             other => return Err(SinkError::Device(format!("unexpected {other:?} after Open"))),
         };
+        // The endpoint's answers, read on their own thread so a write need not wait for them
+        let Conn { mut r, w } = c;
+        let stream = w.get_ref().try_clone()?;
+        let shared = Arc::new(Answers {
+            state: Mutex::new(AckState {
+                level: BufferLevel {
+                    queued_frames: 0,
+                    capacity_frames: capacity,
+                },
+                at: None,
+                written: 0,
+                acks: 0,
+                replies: std::collections::VecDeque::new(),
+                closed: None,
+            }),
+            changed: Condvar::new(),
+        });
+        let reader = shared.clone();
+        std::thread::Builder::new()
+            .name("pm-net-acks".into())
+            .spawn(move || loop {
+                // Read to the end even after the sink went: closing with answers unread would
+                // reset the connection and lose the audio the endpoint has not read yet
+                let f = expect_control(&mut r);
+                let mut st = reader.state.lock().expect("answers");
+                match f {
+                    Ok(Frame::Ack {
+                        level,
+                        frames_written,
+                    }) => {
+                        // Stamped as it arrives: the level counts down from then
+                        st.level = level;
+                        st.at = Some(Instant::now());
+                        st.written = frames_written;
+                        st.acks += 1;
+                    }
+                    Ok(other) => st.replies.push_back(other),
+                    Err(e) => {
+                        st.closed = Some(e.to_string());
+                        reader.changed.notify_all();
+                        break;
+                    }
+                }
+                reader.changed.notify_all();
+            })
+            .map_err(|e| SinkError::Device(format!("cannot read the endpoint's answers: {e}")))?;
         Ok(Box::new(NetSink {
             id: self.id(),
-            conn: c,
+            w,
+            stream,
+            answers: shared,
+            parts: 0,
+            sent: std::collections::VecDeque::new(),
             fmt,
-            level: BufferLevel {
-                queued_frames: 0,
-                capacity_frames: capacity,
-            },
-            acked: None,
-            written: 0,
         }))
     }
 
@@ -198,25 +250,122 @@ impl Output for NetOutput {
     }
 }
 
-struct NetSink {
-    id: OutputId,
-    conn: Conn,
-    fmt: AudioFormat,
+/// What the endpoint has answered, kept by the sink's answer thread.
+struct AckState {
     /// The endpoint's level at its last `Ack`, and when that came.
     level: BufferLevel,
-    acked: Option<Instant>,
+    at: Option<Instant>,
+    /// What the endpoint's sink has written, at its last `Ack`.
     written: u64,
+    /// `Ack`s so far: one per audio part.
+    acks: u64,
+    /// Replies to control frames, in order.
+    replies: std::collections::VecDeque<Frame>,
+    /// The connection ended (why).
+    closed: Option<String>,
+}
+
+struct Answers {
+    state: Mutex<AckState>,
+    changed: Condvar,
+}
+
+struct NetSink {
+    id: OutputId,
+    w: BufWriter<TcpStream>,
+    /// The session's socket, to end it when the sink goes.
+    stream: TcpStream,
+    answers: Arc<Answers>,
+    /// Audio parts sent so far.
+    parts: u64,
+    /// Writes not fully acknowledged, oldest first.
+    sent: std::collections::VecDeque<Sent>,
+    fmt: AudioFormat,
+}
+
+/// One write on its way: its audio parts end at `end` (counting from the session's first), and
+/// it has `frames`, `per_part` in each of its parts but the last.
+struct Sent {
+    end: u64,
+    parts: u64,
+    frames: u64,
+    per_part: u64,
+}
+
+impl Sent {
+    /// Its frames the endpoint has not acknowledged after `acks` answers.
+    fn unacked(&self, acks: u64) -> u64 {
+        let done = acks.saturating_sub(self.end - self.parts).min(self.parts);
+        if done == self.parts {
+            0
+        } else {
+            self.frames - done * self.per_part
+        }
+    }
 }
 
 impl NetSink {
+    /// Audio sent that the endpoint has not acknowledged yet: it is written and held all the
+    /// same, a network away. Leaving it out would put the position ahead by that much (a zone
+    /// counts from `frames_written` when a track starts, a group from the leader's level).
+    fn unacked(&self, st: &AckState) -> u64 {
+        self.sent.iter().map(|s| s.unacked(st.acks)).sum()
+    }
+
+    fn window(&self) -> u64 {
+        let per_s = match self.fmt.kind {
+            SampleKind::Pcm => self.fmt.rate_hz as u64,
+            SampleKind::Dsd => self.fmt.rate_hz as u64 / 8,
+        };
+        per_s * IN_FLIGHT.as_millis() as u64 / 1000
+    }
+
+    /// Wait on the answers until `done` says so; an ended connection or [`ANSWER_TIMEOUT`]
+    /// without a word is an error.
+    fn wait<T>(&self, mut done: impl FnMut(&mut AckState) -> Option<T>) -> Result<T, SinkError> {
+        let mut st = self.answers.state.lock().expect("answers");
+        let deadline = Instant::now() + ANSWER_TIMEOUT;
+        loop {
+            if let Some(v) = done(&mut st) {
+                return Ok(v);
+            }
+            if let Some(why) = &st.closed {
+                return Err(SinkError::Device(format!("{}: {why}", self.id)));
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return Err(SinkError::Device(format!(
+                    "{}: the endpoint stopped answering",
+                    self.id
+                )));
+            }
+            st = self
+                .answers
+                .changed
+                .wait_timeout(st, deadline - now)
+                .expect("answers")
+                .0;
+        }
+    }
+
+    /// Send a control frame and wait for its reply (the `Ack`s of audio sent before it come
+    /// first).
     fn control(&mut self, send: Frame, expect: fn(&Frame) -> bool) -> Result<(), SinkError> {
-        write_frame(&mut self.conn.w, &send).map_err(io_err)?;
-        let reply = expect_control(&mut self.conn.r).map_err(io_err)?;
+        write_frame(&mut self.w, &send).map_err(io_err)?;
+        let reply = self.wait(|st| st.replies.pop_front())?;
         if expect(&reply) {
             Ok(())
         } else {
             Err(SinkError::Device(format!("{}: unexpected {reply:?}", self.id)))
         }
+    }
+
+    /// After a flush or drain the endpoint holds nothing.
+    fn emptied(&mut self) {
+        let mut st = self.answers.state.lock().expect("answers");
+        st.level.queued_frames = 0;
+        st.at = None;
+        self.sent.clear();
     }
 }
 
@@ -228,28 +377,35 @@ impl AudioSink for NetSink {
     fn write(&mut self, block: &AudioBlock) -> Result<(), SinkError> {
         check_block(self.fmt, block)?;
         // A block larger than a frame goes out in parts, each acknowledged
-        let parts = write_audio(&mut self.conn.w, block).map_err(io_err)?;
-        for _ in 0..parts {
-            match expect_control(&mut self.conn.r).map_err(io_err)? {
-                Frame::Ack {
-                    level,
-                    frames_written,
-                } => {
-                    self.level = level;
-                    self.acked = Some(Instant::now());
-                    self.written = frames_written;
-                }
-                other => return Err(SinkError::Device(format!("{}: unexpected {other:?}", self.id))),
+        let parts = write_audio(&mut self.w, block).map_err(io_err)? as u64;
+        self.parts += parts;
+        self.sent.push_back(Sent {
+            end: self.parts,
+            parts,
+            frames: block.frames() as u64,
+            per_part: pm_stream::frames_per_part(self.fmt),
+        });
+        // Wait only while too much is unacknowledged (one write is always on its way)
+        let window = self.window();
+        let mut sent = std::mem::take(&mut self.sent);
+        let r = self.wait(|st| {
+            while sent.front().is_some_and(|s| s.end <= st.acks) {
+                sent.pop_front();
             }
-        }
-        Ok(())
+            let in_flight: u64 = sent.iter().map(|s| s.unacked(st.acks)).sum();
+            (sent.len() <= 1 || in_flight <= window).then_some(())
+        });
+        self.sent = sent;
+        r
     }
 
     /// What the endpoint holds now: its level at the last `Ack`, less what its device has
-    /// played since. A group compares members at one instant, and a member whose `Ack` came
-    /// later (a slower network) would otherwise seem ahead by the difference.
+    /// played since, plus what is on its way. A group compares members at one instant, and a
+    /// member whose `Ack` came later (a slower network) would otherwise seem ahead by the
+    /// difference.
     fn buffer_level(&self) -> BufferLevel {
-        let played = self.acked.map_or(0, |at| {
+        let st = self.answers.state.lock().expect("answers");
+        let played = st.at.map_or(0, |at| {
             let per_s = match self.fmt.kind {
                 SampleKind::Pcm => self.fmt.rate_hz as u128,
                 SampleKind::Dsd => self.fmt.rate_hz as u128 / 8,
@@ -257,32 +413,53 @@ impl AudioSink for NetSink {
             (at.elapsed().as_micros() * per_s / 1_000_000) as u64
         });
         BufferLevel {
-            queued_frames: self.level.queued_frames.saturating_sub(played),
-            ..self.level
+            queued_frames: st.level.queued_frames.saturating_sub(played) + self.unacked(&st),
+            ..st.level
         }
     }
 
     fn flush(&mut self) -> Result<(), SinkError> {
         self.control(Frame::Flush, |f| matches!(f, Frame::Flushed))?;
-        self.level.queued_frames = 0;
-        self.acked = None;
+        self.emptied();
         Ok(())
     }
 
     fn drain(&mut self) -> Result<(), SinkError> {
         self.control(Frame::Drain, |f| matches!(f, Frame::Drained))?;
-        self.level.queued_frames = 0;
-        self.acked = None;
+        self.emptied();
         Ok(())
     }
 
     fn frames_written(&self) -> u64 {
-        self.written
+        let st = self.answers.state.lock().expect("answers");
+        st.written + self.unacked(&st)
     }
 }
 
 impl Drop for NetSink {
     fn drop(&mut self) {
-        let _ = write_frame(&mut self.conn.w, &Frame::Close);
+        let _ = write_frame(&mut self.w, &Frame::Close);
+        // The endpoint plays what it has, then closes; the answer thread reads to the end
+        let _ = self.stream.shutdown(std::net::Shutdown::Write);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Sent;
+
+    /// A block sent in three parts (parts 5 to 7) counts down part by part as they are answered.
+    #[test]
+    fn a_write_in_parts_is_acknowledged_part_by_part() {
+        let s = Sent {
+            end: 7,
+            parts: 3,
+            frames: 250,
+            per_part: 100,
+        };
+        assert_eq!(
+            [3, 4, 5, 6, 7, 8].map(|acks| s.unacked(acks)),
+            [250, 250, 150, 50, 0, 0]
+        );
     }
 }

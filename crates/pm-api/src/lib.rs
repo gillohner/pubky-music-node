@@ -36,6 +36,7 @@ pub mod backup;
 pub mod bandcamp;
 pub mod bookmarks;
 pub mod bundled;
+pub mod comments;
 pub mod dash;
 pub mod deezer;
 pub mod devices;
@@ -57,9 +58,11 @@ pub mod item;
 pub mod jamendo;
 pub mod jellyfin;
 pub mod lastfm;
+pub mod library_edit;
 pub mod library_match;
 pub mod librespot;
 pub mod listenbrainz;
+pub mod listening_share;
 pub mod listens;
 pub mod loudness;
 pub mod lrclib;
@@ -75,6 +78,7 @@ pub mod playlists;
 pub mod plex;
 pub mod podcasts;
 pub mod prefs;
+pub mod presence;
 pub mod profiles;
 pub mod project_apps;
 pub mod qobuz;
@@ -88,6 +92,7 @@ pub mod search;
 pub mod shared;
 pub mod signin;
 pub mod smart;
+pub mod smart_network;
 pub mod soloist;
 pub mod soundcloud;
 pub mod sources;
@@ -248,7 +253,20 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/zones/{id}/dsp", get(dsp_get).put(dsp_put).delete(dsp_reset))
         .route("/library/stats", get(library_stats))
         .route("/library/tracks", get(tracks))
-        .route("/library/tracks/{id}", get(track))
+        .route(
+            "/library/tracks/{id}",
+            get(track).delete(library_edit::hide_track),
+        )
+        .route(
+            "/library/tracks/{id}/edit",
+            get(library_edit::get_edit)
+                .put(library_edit::edit_track)
+                .delete(library_edit::undo_edit),
+        )
+        .route("/library/albums/{id}/edit", put(library_edit::edit_album))
+        .route("/library/hidden", get(library_edit::hidden))
+        .route("/library/hidden/restore", post(library_edit::restore))
+        .route("/me/music", get(library_edit::my_music))
         .route("/library/tracks/{id}/lyrics", get(lyrics))
         .route("/lyrics", get(lrclib::get))
         .route("/library/tracks/{id}/versions", get(track_versions))
@@ -326,6 +344,13 @@ pub fn router(state: Arc<NodeState>) -> Router {
             "/bookmarks",
             get(bookmarks::list).put(bookmarks::put).delete(bookmarks::delete),
         )
+        .route(
+            "/comments",
+            get(comments::list)
+                .post(comments::create)
+                .delete(comments::delete),
+        )
+        .route("/posts", post(comments::share))
         // The name before social v1 bookmarks, for one release (docs/api.md, Deprecated)
         .route(
             "/favourites",
@@ -671,8 +696,18 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/library/webdav/{id}/scan", post(webdav::rescan))
         .route("/me", get(accounts::me))
         .route("/me/prefs", get(prefs::get).put(prefs::put))
+        .route(
+            "/me/presence",
+            get(presence::setting_get).put(presence::setting_put),
+        )
+        .route("/presence", get(presence::list))
+        .route("/presence/along", post(presence::join).delete(presence::leave))
         .route("/me/first-steps", get(first_steps::get))
         .route("/me/token", axum::routing::delete(accounts::sign_out))
+        .route(
+            "/me/listening",
+            get(listening_share::get).put(listening_share::put),
+        )
         .route("/me/listens", get(listens::list).delete(listens::delete_all))
         .route("/me/listens/stats", get(listens::get_stats))
         .route(
@@ -747,6 +782,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/source/{id}", get(web_ui))
         .route("/sources/{id}", get(web_ui))
         .route("/settings/{tab}", get(web_ui))
+        .route("/library/{tab}", get(web_ui))
         .route("/home/{section}", get(web_ui))
         .route("/tag/{labels}", get(web_ui))
         .route("/discover", get(web_ui))
@@ -874,10 +910,15 @@ async fn auth(
     }
     // Listeners (and, to be safe, party guests) see file names, not where the owner keeps files
     let not_owner = caller.role != accounts::Role::Owner;
+    // Who listens where (presence.rs): whoever plays on a zone
+    let played = presence::zone_written(req.method(), req.uri().path()).map(|z| (z, caller.clone()));
     req.extensions_mut().insert(caller);
     let resp = next.run(req).await;
+    if let Some((zone, caller)) = played.filter(|_| resp.status().is_success()) {
+        presence::played(&state, &zone, &caller);
+    }
     if not_owner {
-        accounts::listener_response(resp).await
+        accounts::listener_response(resp, &accounts::library_roots(&state)).await
     } else {
         resp
     }
@@ -918,7 +959,10 @@ fn token_ok(
 /// The built-in browser controller: one static page over `/v1`. It asks for
 /// the token itself, so the page is served without auth.
 /// Top-level views of the web UI that have their own path.
-const WEB_VIEWS: [&str; 12] = [
+const WEB_VIEWS: [&str; 15] = [
+    "library",
+    "add-music",
+    "downloads",
     "favourites",
     "albums",
     "artists",
@@ -1217,11 +1261,28 @@ async fn pull_stream(
         };
         return Ok(with_headers(mime, axum::body::Body::empty()));
     }
-    let Some(live) = out.take_stream(pm_zones::outputs::LISTENER_TIMEOUT).await else {
-        return Err(ApiError::new(
-            StatusCode::REQUEST_TIMEOUT,
-            "no zone is playing into this stream; start playback to the Stream zone first",
-        ));
+    // `g`: the stream the node gave the renderer this URL for (pm-out-upnp); an older one's poll
+    // never takes a newer stream
+    let generation = q.get("g").and_then(|g| g.parse::<u64>().ok());
+    let live = match out
+        .take_stream_for(pm_zones::outputs::LISTENER_TIMEOUT, generation)
+        .await
+    {
+        Ok(live) => live,
+        Err(pm_zones::outputs::Missed::Timeout) => {
+            return Err(ApiError::new(
+                StatusCode::REQUEST_TIMEOUT,
+                "no zone is playing into this stream; start playback to the Stream zone first",
+            ))
+        }
+        // A renderer polling its old URI while a new stream opened: the fetch the node asks
+        // for next gets it
+        Err(pm_zones::outputs::Missed::Superseded) => {
+            return Err(ApiError::new(
+                StatusCode::GONE,
+                "a new stream started after this request; ask again",
+            ))
+        }
     };
     let fmt = live.format;
     if kind == pm_out_upnp::dlna::StreamKind::L16 && fmt.bits != 16 {
@@ -1518,8 +1579,21 @@ async fn create_zone(State(s): State<Arc<NodeState>>, Json(body): Json<CreateZon
     if ids.is_empty() {
         return Err(ApiError::bad_request("give `output` or `outputs`"));
     }
+    let output = zone_output(&s, body.name.trim(), &ids).await?;
+    let zone = s.create_zone(body.name.trim(), output);
+    Ok(Json(zone.state()))
+}
+
+/// The output a zone named `name` plays on: the one output, or a group of them (the first leads),
+/// grouped by the speakers' own system when they all share one (Sonos, BluOS, HEOS), else in
+/// sync by the node.
+pub(crate) async fn zone_output(
+    s: &NodeState,
+    name: &str,
+    ids: &[String],
+) -> Result<Arc<dyn pm_zones::Output>, ApiError> {
     let mut members = Vec::with_capacity(ids.len());
-    for id in &ids {
+    for id in ids {
         let out = s
             .outputs
             .get(&OutputId(id.clone()))
@@ -1559,28 +1633,26 @@ async fn create_zone(State(s): State<Arc<NodeState>>, Json(body): Json<CreateZon
             heos.clear();
         }
     }
-    let output: Arc<dyn pm_zones::Output> = if members.len() == 1 {
+    Ok(if members.len() == 1 {
         members.remove(0)
     } else if sonos.len() == ids.len() {
         let mut sonos = sonos;
         let lead = sonos.remove(0);
-        Arc::new(pm_out_upnp::sonos::SonosGroup::new(body.name.trim(), lead, sonos))
+        Arc::new(pm_out_upnp::sonos::SonosGroup::new(name, lead, sonos))
     } else if bluos.len() == ids.len() {
         let mut bluos = bluos;
         let lead = bluos.remove(0);
-        Arc::new(pm_out_bluos::BluosGroup::new(body.name.trim(), lead, bluos))
+        Arc::new(pm_out_bluos::BluosGroup::new(name, lead, bluos))
     } else if heos.len() == ids.len() {
         let mut heos = heos;
         let lead = heos.remove(0);
-        Arc::new(pm_out_upnp::heos::HeosGroup::new(body.name.trim(), lead, heos))
+        Arc::new(pm_out_upnp::heos::HeosGroup::new(name, lead, heos))
     } else {
         Arc::new(
-            pm_zones::outputs::GroupOutput::new(body.name.trim(), members)
+            pm_zones::outputs::GroupOutput::new(name, members)
                 .map_err(|e| ApiError::bad_request(e.to_string()))?,
         )
-    };
-    let zone = s.create_zone(body.name.trim(), output);
-    Ok(Json(zone.state()))
+    })
 }
 
 async fn zone(State(s): State<Arc<NodeState>>, Path(id): Path<String>) -> ApiResult<ZoneState> {
@@ -1591,6 +1663,10 @@ async fn delete_zone(
     State(s): State<Arc<NodeState>>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
+    // A listen-along group ends as when its host ends it: the music goes back, not lost
+    if presence::delete_group(&s, &id).await? {
+        return Ok(StatusCode::NO_CONTENT);
+    }
     let zone = zone_of(&s, &id)?;
     zone.stop();
     s.remove_zone(zone.id());
@@ -1604,6 +1680,7 @@ async fn queue(State(s): State<Arc<NodeState>>, Path(id): Path<String>) -> ApiRe
 async fn enqueue(
     State(s): State<Arc<NodeState>>,
     Path(id): Path<String>,
+    axum::Extension(caller): axum::Extension<accounts::Caller>,
     Json(body): Json<Enqueue>,
 ) -> ApiResult<Enqueued> {
     let zone = zone_of(&s, &id)?;
@@ -1619,9 +1696,13 @@ async fn enqueue(
             }
         }
     }
-    for it in body.items {
-        if it.uri.trim().is_empty() {
+    for mut it in body.items {
+        it.uri = it.uri.trim().to_string();
+        if it.uri.is_empty() {
             return Err(ApiError::bad_request("item uri is empty"));
+        }
+        if caller.role != accounts::Role::Owner {
+            accounts::check_listener_item(&mut it)?;
         }
         items.push(it);
     }
@@ -1864,6 +1945,7 @@ async fn transfer(
     let position_ms = st.now_playing.as_ref().map(|n| n.position_ms).unwrap_or(0);
     from.stop();
     from.clear();
+    presence::played(&s, &body.to, &c);
     let moved = load_zone(
         &to,
         st.queue,
@@ -1881,7 +1963,7 @@ async fn transfer(
 /// Fills `to` the way a move leaves it: stopped and emptied, then `queue`, `repeat` and `radio`;
 /// `index` plays from `position_ms` (paused when the source was paused; nothing starts when it
 /// was stopped). Seeking needs the track open, so it waits for that (bounded) first.
-async fn load_zone(
+pub(crate) async fn load_zone(
     to: &Zone,
     queue: Vec<QueueItem>,
     index: Option<usize>,
@@ -1932,13 +2014,21 @@ async fn load_zone(
 async fn load(
     State(s): State<Arc<NodeState>>,
     Path(id): Path<String>,
+    axum::Extension(caller): axum::Extension<accounts::Caller>,
     Json(body): Json<LoadRequest>,
 ) -> ApiResult<ZoneState> {
+    let mut body = body;
     if body.items.is_empty() {
         return Err(ApiError::bad_request("nothing to move: the queue is empty"));
     }
-    if body.items.iter().any(|it| it.uri.trim().is_empty()) {
-        return Err(ApiError::bad_request("item uri is empty"));
+    for it in &mut body.items {
+        it.uri = it.uri.trim().to_string();
+        if it.uri.is_empty() {
+            return Err(ApiError::bad_request("item uri is empty"));
+        }
+        if caller.role != accounts::Role::Owner {
+            accounts::check_listener_item(it)?;
+        }
     }
     let to = zone_of(&s, &id)?;
     Ok(Json(
@@ -2318,6 +2408,14 @@ async fn artist_info_handler(
 
 async fn artist_image(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) -> Result<Response, ApiError> {
     let path = artist_info::image_path(&s, id);
+    // The page's own fetch (in the reader's language) brings the portrait: wait for it rather
+    // than fetch it all again
+    for _ in 0..50 {
+        if path.is_file() || !artist_info::fetching(id) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
     if !path.is_file() {
         // The first request may have to fetch it.
         let info = artist_info::artist_info(&s, id, "en").await?;
@@ -2856,6 +2954,84 @@ async fn pubky_login_start(State(s): State<Arc<NodeState>>) -> ApiResult<LoginSt
 }
 
 const CONTROLLER_LOGIN_TTL: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+/// Sign-ins waiting at once, in all and from one address (security review 2026-10-30, #4).
+const MAX_LOGINS: usize = 64;
+const MAX_LOGINS_PER_ORIGIN: usize = 6;
+
+/// Which waiting sign-in (`(id, started, origin)`) makes room for one more from `origin`: its own
+/// oldest when it has its share, else, when every place is taken, the oldest of the biggest
+/// bucket. Nobody is refused, so no client can lock everyone else out (review of #177); `None`
+/// when there is room.
+fn make_room(waiting: &[(String, std::time::Instant, String)], origin: &str) -> Option<String> {
+    let oldest_of = |o: &str| {
+        waiting
+            .iter()
+            .filter(|(_, _, w)| w == o)
+            .min_by_key(|(_, at, _)| *at)
+            .map(|(id, _, _)| id.clone())
+    };
+    let mine = waiting.iter().filter(|(_, _, w)| w == origin).count();
+    if mine >= MAX_LOGINS_PER_ORIGIN {
+        return oldest_of(origin);
+    }
+    if waiting.len() < MAX_LOGINS {
+        return None;
+    }
+    // The biggest bucket; of equal ones, the one whose oldest is oldest
+    let mut buckets: std::collections::HashMap<&str, (usize, std::time::Instant)> =
+        std::collections::HashMap::new();
+    for (_, at, w) in waiting {
+        let b = buckets.entry(w.as_str()).or_insert((0, *at));
+        b.0 += 1;
+        b.1 = b.1.min(*at);
+    }
+    let biggest = buckets
+        .into_iter()
+        .max_by_key(|(_, (n, oldest))| (*n, std::cmp::Reverse(*oldest)))?
+        .0;
+    oldest_of(biggest)
+}
+
+/// An address as a sign-in bucket: IPv4 as it is, IPv6 by its /64 (one network hands out many).
+fn login_bucket(ip: std::net::IpAddr) -> String {
+    match ip {
+        std::net::IpAddr::V6(v6) if v6.to_ipv4_mapped().is_none() => {
+            let s = v6.segments();
+            format!("{:x}:{:x}:{:x}:{:x}::/64", s[0], s[1], s[2], s[3])
+        }
+        std::net::IpAddr::V6(v6) => v6.to_ipv4_mapped().expect("mapped").to_string(),
+        v4 => v4.to_string(),
+    }
+}
+
+/// Who started a sign-in, for [`MAX_LOGINS_PER_ORIGIN`]: iroh for the remote tunnel; behind a
+/// proxy or tunnel on this machine, the last address in `X-Forwarded-For` (the one that proxy
+/// saw; anything before it the client may have written); else the connection's own. By
+/// [`login_bucket`].
+fn login_origin(req: &axum::extract::Request) -> String {
+    if req.extensions().get::<peer::Remote>().is_some() {
+        return "iroh".into();
+    }
+    let conn = req
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|c| c.0.ip());
+    // The forwarded address counts only from a proxy or tunnel on this machine (cloudflared, a
+    // local reverse proxy): from anyone else it is whatever they wrote, a new bucket each time
+    // (review of #177)
+    if !conn.is_some_and(|ip| ip.is_loopback()) {
+        return conn.map_or_else(|| "unknown".into(), login_bucket);
+    }
+    let forwarded = req
+        .headers()
+        .get_all("x-forwarded-for")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(','))
+        .filter_map(|a| a.trim().parse::<std::net::IpAddr>().ok())
+        .next_back();
+    forwarded.or(conn).map_or_else(|| "unknown".into(), login_bucket)
+}
 
 /// A QR code of `text` as an SVG string (dark modules on a light tile, a
 /// quiet zone of four modules), for Pubky Ring sign-ins.
@@ -2881,7 +3057,15 @@ pub(crate) fn qr_svg(text: &str) -> Option<String> {
 /// Pubky Ring. Only the node's owner (the identity the node itself is signed
 /// in as) is accepted; approval hands out the API token, so nothing is typed
 /// or pasted. 412 until the node has a Pubky session.
-async fn controller_login_start(State(s): State<Arc<NodeState>>) -> ApiResult<ControllerLoginStarted> {
+async fn controller_login_start(
+    State(s): State<Arc<NodeState>>,
+    req: axum::extract::Request,
+) -> ApiResult<ControllerLoginStarted> {
+    // Anyone may start one (it hands the token out), so few at a time: from one address, and in all
+    let origin = login_origin(&req);
+    // Held from the check to the insert: sign-ins started at once can't pass the caps together
+    let mut logins = s.controller_logins.lock().await;
+    logins.retain(|_, (_, at, _)| at.elapsed() < CONTROLLER_LOGIN_TTL);
     let Some(owner) = s.sync_handle().map(|h| h.z32().to_string()) else {
         return Err(ApiError::new(
             StatusCode::PRECONDITION_FAILED,
@@ -2899,9 +3083,20 @@ async fn controller_login_start(State(s): State<Arc<NodeState>>) -> ApiResult<Co
         .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, e.to_string()))?;
     let url = flow.url().to_string();
     let id = tidal::random_urlsafe(24);
-    let mut logins = s.controller_logins.lock().await;
-    logins.retain(|_, (_, at)| at.elapsed() < CONTROLLER_LOGIN_TTL);
-    logins.insert(id.clone(), (flow, std::time::Instant::now()));
+    loop {
+        let waiting: Vec<(String, std::time::Instant, String)> = logins
+            .iter()
+            .map(|(id, (_, at, o))| (id.clone(), *at, o.clone()))
+            .collect();
+        match make_room(&waiting, &origin) {
+            Some(old) => {
+                logins.remove(&old);
+            }
+            None => break,
+        }
+    }
+    logins.insert(id.clone(), (flow, std::time::Instant::now(), origin));
+    drop(logins);
     let qr_svg = qr_svg(&url);
     Ok(Json(ControllerLoginStarted {
         id,
@@ -2919,7 +3114,7 @@ async fn controller_login_poll(
 ) -> ApiResult<ControllerLoginStatus> {
     let id = q.get("id").cloned().unwrap_or_default();
     let mut logins = s.controller_logins.lock().await;
-    let Some((flow, at)) = logins.get(&id) else {
+    let Some((flow, at, _)) = logins.get(&id) else {
         return Ok(Json(ControllerLoginStatus {
             status: "expired".into(),
             token: None,
@@ -7178,7 +7373,12 @@ mod tests {
         assert_eq!(pubky["hits"][0]["tagged"], "#chill");
         let ans = lines(app.clone(), "/v1/search?q=%23chill%20%2390s".into()).await;
         let srcs: Vec<&str> = ans.iter().filter_map(|a| a["source"].as_str()).collect();
-        assert!(srcs.iter().all(|x| *x == "library" || *x == "pubky"), "{srcs:?}");
+        // tags only: the library, Pubky's cards and posts carrying the tag
+        assert!(
+            srcs.iter()
+                .all(|x| *x == "library" || *x == "pubky" || *x == "posts"),
+            "{srcs:?}"
+        );
         let pubky = ans.iter().find(|a| a["source"] == "pubky").unwrap();
         assert_eq!(pubky["hits"][0]["title"], "Both Tags", "{pubky}");
         let ans = lines(app.clone(), "/v1/search?q=%23chill".into()).await;
@@ -7616,7 +7816,13 @@ mod tests {
         };
         let lines = ask(app.clone()).await;
         let order: Vec<&str> = lines.iter().map(|a| a.source.as_str()).collect();
-        assert_eq!(order.len(), 3, "{order:?}");
+        // people and posts (Nexus) answer too; the three this test watches are the rest
+        let core: Vec<&str> = order
+            .iter()
+            .copied()
+            .filter(|s| *s != "people" && *s != "posts")
+            .collect();
+        assert_eq!(core.len(), 3, "{order:?}");
         assert_eq!(order[0], "library", "the library answers first: {order:?}");
         let lib = &lines[0];
         assert_eq!(lib.status, "ok");
@@ -8081,6 +8287,86 @@ mod tests {
         assert_eq!(v["status"], "expired");
     }
 
+    /// Anyone may start a Pubky Ring sign-in, so few wait at once: six per address (IPv6 per
+    /// /64), 64 in all. Nobody is refused: the oldest waiting one makes room, its own when an
+    /// address has its share, else the biggest bucket's, so one client can't lock everyone out
+    /// (security reviews 2026-10-30, #4 and of #177).
+    #[test]
+    fn sign_ins_make_room_instead_of_locking_everyone_out() {
+        let t0 = std::time::Instant::now();
+        let at = |n: u64| t0 + std::time::Duration::from_secs(n);
+        let entry = |id: &str, n: u64, o: &str| (id.to_string(), at(n), o.to_string());
+        // One address with its share: its own oldest goes
+        let mine: Vec<_> = (0..MAX_LOGINS_PER_ORIGIN as u64)
+            .map(|n| entry(&format!("a{n}"), n, "1.2.3.4"))
+            .collect();
+        assert_eq!(make_room(&mine, "1.2.3.4").as_deref(), Some("a0"));
+        assert_eq!(make_room(&mine, "5.6.7.8"), None, "another address has room");
+        // Every place taken (an attacker's ten addresses and some others): the biggest bucket's
+        // oldest makes room for a newcomer
+        let mut full: Vec<_> = (0..60u64)
+            .map(|n| entry(&format!("x{n}"), 100 + n, &format!("10.0.0.{}", n % 10)))
+            .collect();
+        full.extend((0..4u64).map(|n| entry(&format!("o{n}"), n, &format!("192.168.1.{n}"))));
+        assert_eq!(full.len(), MAX_LOGINS);
+        let gone = make_room(&full, "192.168.1.50").unwrap();
+        assert!(
+            gone.starts_with('x'),
+            "an attacker's goes, not a lone sign-in: {gone}"
+        );
+        assert_eq!(gone, "x0", "the oldest of the biggest bucket");
+        let req = |h: Option<(&str, &str)>, from: Option<&str>| {
+            let mut b = Request::builder().uri("/v1/auth/pubky/start");
+            if let Some((k, v)) = h {
+                b = b.header(k, v);
+            }
+            let mut r = b.body(Body::empty()).unwrap();
+            if let Some(a) = from {
+                r.extensions_mut().insert(axum::extract::ConnectInfo(
+                    a.parse::<std::net::SocketAddr>().unwrap(),
+                ));
+            }
+            r
+        };
+        assert_eq!(login_origin(&req(None, Some("192.168.1.9:5000"))), "192.168.1.9");
+        // Behind a local proxy: the address it saw is the last one; what the client wrote before
+        // it, and Cloudflare-style headers it could set itself, don't count
+        assert_eq!(
+            login_origin(&req(
+                Some(("x-forwarded-for", "6.6.6.6, 198.51.100.2")),
+                Some("127.0.0.1:1")
+            )),
+            "198.51.100.2"
+        );
+        assert_eq!(
+            login_origin(&req(
+                Some(("cf-connecting-ip", "203.0.113.7")),
+                Some("127.0.0.1:1")
+            )),
+            "127.0.0.1"
+        );
+        // From anyone else a forwarded address is ignored
+        assert_eq!(
+            login_origin(&req(
+                Some(("x-forwarded-for", "198.51.100.2")),
+                Some("192.168.1.9:5000")
+            )),
+            "192.168.1.9"
+        );
+        // IPv6 by /64: one network is one bucket
+        assert_eq!(
+            login_origin(&req(None, Some("[2001:db8:1:2:aaaa::1]:5000"))),
+            "2001:db8:1:2::/64"
+        );
+        assert_eq!(
+            login_origin(&req(None, Some("[2001:db8:1:2:bbbb::9]:5000"))),
+            "2001:db8:1:2::/64"
+        );
+        let mut tunnel = req(None, Some("127.0.0.1:1"));
+        tunnel.extensions_mut().insert(peer::Remote);
+        assert_eq!(login_origin(&tunnel), "iroh");
+    }
+
     #[tokio::test]
     async fn the_musicbrainz_proxy_needs_a_contact_and_rejects_bad_paths() {
         let dir = tempfile::tempdir().unwrap();
@@ -8109,6 +8395,46 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// The MusicBrainz proxy stops reading an answer past 4 MiB (it used to read it all first),
+    /// and passes a small one on (security review 2026-10-30, low).
+    #[tokio::test]
+    async fn the_musicbrainz_proxy_refuses_an_oversized_answer_as_it_streams() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mock = Router::new()
+            .route(
+                "/ws/2/big",
+                get(|| async {
+                    // No Content-Length: chunks until 8 MiB
+                    let chunks = futures_util::stream::iter(
+                        (0..128).map(|_| Ok::<_, std::io::Error>(vec![b'x'; 64 * 1024])),
+                    );
+                    Body::from_stream(chunks)
+                }),
+            )
+            .route(
+                "/ws/2/small",
+                get(|| async { Json(serde_json::json!({"ok": true})) }),
+            );
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        s.set_contact("test@example.org").unwrap();
+        *s.mb_base.write().unwrap() = format!("http://127.0.0.1:{port}/ws/2");
+        let app = router(s.clone());
+        let get_ = |path: &'static str| {
+            let app = app.clone();
+            async move {
+                app.oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+                    .await
+                    .unwrap()
+                    .status()
+            }
+        };
+        assert_eq!(get_("/mb/ws/2/big").await, StatusCode::BAD_GATEWAY);
+        assert_eq!(get_("/mb/ws/2/small").await, StatusCode::OK);
     }
 
     #[tokio::test]
@@ -12170,6 +12496,159 @@ exec sleep 300
         *imports::HOME_OVERRIDE.write().unwrap() = None;
     }
 
+    /// Comments (TASK-pinakes-social-ux.md B1) are read from Nexus by parent: the item's Resource
+    /// replies, newest first, with the authors' names; a rating that names the item as its parent
+    /// is not a comment; an item Nexus doesn't know has none; a comment's replies come by its post.
+    /// Writing needs a Pubky sign-in (the testnet test covers writing and deleting).
+    #[tokio::test]
+    async fn comments_are_read_from_nexus_by_parent() {
+        let a = "o3ftkuxjd9k6zgnc4hhbhbg5jusubr4zqyb1dtzi8hhm3hf5wbmy";
+        let b = "pxnu33x7jtpx9ar1ytsi4yxbp6a5o36gwhffs8zoxmbuptici1jy";
+        let song = "https://musicbrainz.org/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69";
+        let view = |author: &str, id: &str, kind: &str, content: &str, at: i64, replies: u64| {
+            serde_json::json!({"details": {"id": id, "author": author, "kind": kind, "content": content,
+                "uri": format!("pubky://{author}/pub/social/v1/posts/{id}"), "indexed_at": at,
+                "attachments": null}, "counts": {"replies": replies, "tags": 0}, "tags": [],
+                "relationships": {"replied": song, "mentioned": []}, "bookmark": null})
+        };
+        let replies = serde_json::json!([
+            view(a, "0034A", "note", "Older", 1_000, 2),
+            view(b, "0034C", "note", "Newest", 3_000, 0),
+            view(b, "0034R", "rating", "", 2_500, 0),
+        ]);
+        let thread = serde_json::json!([view(b, "0034D", "note", "A reply", 4_000, 0)]);
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mock = {
+            let seen = seen.clone();
+            Router::new()
+                .route(
+                    "/nexus/v0/resource/by-uri",
+                    get(move |Query(q): Query<std::collections::HashMap<String, String>>| async move {
+                        if q["uri"].contains("b1a9c0e9") {
+                            Json(serde_json::json!({"resource": {"id": "r1", "uri": q["uri"]}, "tags": []})).into_response()
+                        } else {
+                            (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "not found"}))).into_response()
+                        }
+                    }),
+                )
+                .route("/nexus/v0/resource/{id}/replies", get(move || async move { Json(replies) }))
+                .route(
+                    "/nexus/v0/stream/posts",
+                    get(move |Query(q): Query<std::collections::HashMap<String, String>>| {
+                        let seen = seen.clone();
+                        async move {
+                            seen.lock().unwrap().push(format!("{}/{}/{}", q["source"], q["author_id"], q["post_id"]));
+                            Json(thread)
+                        }
+                    }),
+                )
+                .route(
+                    "/nexus/v0/stream/users/by_ids",
+                    post(move || async move { Json(serde_json::json!([{"details": {"id": a, "name": "Ann"}}])) }),
+                )
+        };
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let pubky = pm_pubky::config::PmPubkyConfig {
+            pinakes_base: format!("http://127.0.0.1:{port}"),
+            nexus_base: format!("http://127.0.0.1:{port}/nexus"),
+            user_agent_contact: "test@example.org".into(),
+            ..Default::default()
+        };
+        let s = state_with(dir.path(), None, pubky).await;
+        s.set_contact("test@example.org").unwrap();
+        let app = router(s.clone());
+        let q = format!(
+            "/v1/comments?uri={}",
+            url::form_urlencoded::byte_serialize(song.as_bytes()).collect::<String>()
+        );
+        let (st, t) = call(&app, "GET", &q, None).await;
+        assert_eq!(st, StatusCode::OK, "{t}");
+        assert_eq!(t["indexed"], true);
+        assert_eq!(t["parent"], song);
+        let c = t["comments"].as_array().unwrap();
+        assert_eq!(
+            c.iter()
+                .map(|x| x["content"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["Newest", "Older"]
+        );
+        assert_eq!(c[1]["name"], "Ann");
+        assert_eq!(c[1]["replies"], 2);
+        assert_eq!(c[1]["post"], format!("pubky://{a}/pub/social/v1/posts/0034A"));
+        assert_eq!(c[1]["mine"], false, "not signed in: nothing is mine");
+        // A comment's replies, by its post
+        let (st, r) = call(
+            &app,
+            "GET",
+            &format!("/v1/comments?post=pubky://{a}/pub/social/v1/posts/0034A"),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        assert_eq!(r["comments"][0]["content"], "A reply");
+        assert_eq!(
+            seen.lock().unwrap().as_slice(),
+            [format!("post_replies/{a}/0034A")]
+        );
+        // An item Nexus has no Resource for has no comments yet
+        let (_, none) = call(
+            &app,
+            "GET",
+            "/v1/comments?uri=https%3A%2F%2Ftidal.com%2Ftrack%2F1",
+            None,
+        )
+        .await;
+        assert_eq!(
+            (
+                none["indexed"].as_bool(),
+                none["comments"].as_array().map(Vec::len)
+            ),
+            (Some(true), Some(0))
+        );
+        // Writing needs a Pubky sign-in; a bad link or a missing item is a 400
+        let (st, e) = call(
+            &app,
+            "POST",
+            "/v1/comments",
+            Some(serde_json::json!({"uri": song, "content": "Hi"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::PRECONDITION_FAILED, "{e}");
+        // "Post about this" too (B2)
+        let (st, e) = call(
+            &app,
+            "POST",
+            "/v1/posts",
+            Some(serde_json::json!({"uri": song, "content": "Listen"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::PRECONDITION_FAILED, "{e}");
+        assert_eq!(
+            call(&app, "GET", "/v1/comments", None).await.0,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            call(&app, "GET", "/v1/comments?post=https://example.org/x", None)
+                .await
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            call(
+                &app,
+                "DELETE",
+                &format!("/v1/comments?post=pubky://{a}/pub/social/v1/posts/0034A"),
+                None
+            )
+            .await
+            .0,
+            StatusCode::PRECONDITION_FAILED
+        );
+    }
+
     /// `GET /v1/cards` (TASK-pinakes-social-ux.md B3): the Pinakes card for a collection item the
     /// node doesn't play (a web page), with only an http(s) image; a link Pinakes can't read is
     /// `unknown`, never an error.
@@ -12316,6 +12795,259 @@ exec sleep 300
         );
     }
 
+    /// Smart playlists with tags from the network (TASK-pinakes-social-ux.md E2): `reach` other than
+    /// `me` asks Pinakes' generic search for music tagged with the tags in that reach, and Nexus by
+    /// URI for who tagged it (five named, the rest counted, labels in canonical (sorted) order). Items
+    /// that play here come first; the answer is cached; a personal reach needs a Pubky sign-in; a
+    /// plain smart playlist is unchanged.
+    #[tokio::test]
+    async fn smart_playlists_take_tags_from_the_network() {
+        let a = "o3ftkuxjd9k6zgnc4hhbhbg5jusubr4zqyb1dtzi8hhm3hf5wbmy";
+        let searches = Arc::new(std::sync::Mutex::new(Vec::<
+            std::collections::HashMap<String, String>,
+        >::new()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mock = {
+            let searches = searches.clone();
+            Router::new()
+                .route(
+                    "/v1/search",
+                    get(move |Query(q): Query<std::collections::HashMap<String, String>>| {
+                        let searches = searches.clone();
+                        async move {
+                            searches.lock().unwrap().push(q);
+                            Json(serde_json::json!({"items": [
+                                {"id": "c1", "uri": "https://example.org/not-music", "status": "ok", "type": "Article", "name": "Not music"},
+                                {"id": "c2", "uri": "https://musicbrainz.org/recording/833f00e1-781f-4edd-90e4-e52712618862", "status": "ok", "type": "MusicRecording", "name": "On MusicBrainz", "site": "musicbrainz.org"},
+                                {"id": "c3", "uri": "https://tidal.com/track/50850120", "status": "ok", "type": "MusicRecording", "name": "On TIDAL", "site": "tidal.com"}
+                            ], "cursor": null}))
+                        }
+                    }),
+                )
+                .route(
+                    "/nexus/v0/resource/by-uri",
+                    get(move |Query(q): Query<std::collections::HashMap<String, String>>| async move {
+                        let taggers: Vec<String> = (0..7).map(|i| if i == 0 { a.to_string() } else { format!("tagger{i}") }).collect();
+                        Json(serde_json::json!({"resource": {"id": "r", "uri": q["uri"]}, "tags": [
+                            {"label": "house", "taggers": [a], "taggers_count": 1, "relationship": false},
+                            // Nexus lists some of the taggers; the label says how many there are
+                            {"label": "techno", "taggers": taggers, "taggers_count": 9, "relationship": false},
+                            {"label": "other", "taggers": ["x"], "taggers_count": 1, "relationship": false}
+                        ]}))
+                    }),
+                )
+                .route(
+                    "/nexus/v0/stream/users/by_ids",
+                    post(move || async move { Json(serde_json::json!([{"details": {"id": a, "name": "Ann"}}])) }),
+                )
+        };
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let pubky = pm_pubky::config::PmPubkyConfig {
+            pinakes_base: format!("http://127.0.0.1:{port}"),
+            nexus_base: format!("http://127.0.0.1:{port}/nexus"),
+            user_agent_contact: "test@example.org".into(),
+            ..Default::default()
+        };
+        let s = state_with(dir.path(), None, pubky).await;
+        s.set_contact("test@example.org").unwrap();
+        let app = router(s.clone());
+        let rules = serde_json::json!({"reach": "all", "tags": ["Techno", "house"], "network_limit": 5});
+        let (st, r) = call(&app, "POST", "/v1/smart/preview", Some(rules.clone())).await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        let q = searches.lock().unwrap()[0].clone();
+        assert_eq!(
+            (q["tags"].as_str(), q.get("reach"), q.get("viewer")),
+            ("house,techno", None, None),
+            "{q:?}"
+        );
+        let net = r["network"].as_array().unwrap();
+        assert_eq!(net.len(), 2, "music cards only: {r}");
+        // Nothing is connected here: neither plays, so both are cards, in Pinakes' order
+        assert!(net.iter().all(|n| n["plays_from"].is_null()), "{r}");
+        let tidal = &net[1];
+        assert_eq!(tidal["site"], "tidal.com");
+        let by = &tidal["tagged_by"];
+        assert_eq!(by.as_array().unwrap().len(), 5);
+        assert_eq!(
+            tidal["taggers_count"], 9,
+            "the label's count, not the listed taggers"
+        );
+        assert_eq!(
+            by[0],
+            serde_json::json!({"key": a, "name": "Ann", "labels": ["house", "techno"]})
+        );
+        assert_eq!(by[1], serde_json::json!({"key": "tagger1", "labels": ["techno"]}));
+        assert_eq!(tidal["page"], "https://tidal.com/track/50850120");
+        // The same answer again comes from the cache
+        call(&app, "POST", "/v1/smart/preview", Some(rules)).await;
+        assert_eq!(searches.lock().unwrap().len(), 1);
+        // One query, as the feed says (review of #159): with a rule, what the network found meets
+        // it too; a card nothing can check it on (no genre known) is left out
+        let (st, r) = call(
+            &app,
+            "POST",
+            "/v1/smart/preview",
+            Some(
+                serde_json::json!({"reach": "all", "tags": ["Techno", "house"], "network_limit": 5,
+                                    "rules": [{"field": "genre", "value": "techno"}]}),
+            ),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        assert!(r.get("network").is_none(), "{r}");
+        // People you follow need a Pubky sign-in: said in plain words, not an error
+        let (st, r) = call(
+            &app,
+            "POST",
+            "/v1/smart/preview",
+            Some(serde_json::json!({"reach": "following", "tags": ["techno"]})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        assert!(
+            r["network_note"].as_str().unwrap().contains("Sign in with Pubky"),
+            "{r}"
+        );
+        // Refused: tags with "just me", a network reach without tags, every one of four tags
+        for bad in [
+            serde_json::json!({"reach": "me", "tags": ["techno"], "rules": [{"field": "genre", "op": "contains", "value": "x"}]}),
+            serde_json::json!({"reach": "friends"}),
+            serde_json::json!({"reach": "all", "tags": ["a", "b", "c", "d"], "match": "all"}),
+            serde_json::json!({"reach": "nearby", "tags": ["a"]}),
+        ] {
+            assert_eq!(
+                call(&app, "POST", "/v1/smart/preview", Some(bad.clone())).await.0,
+                StatusCode::BAD_REQUEST,
+                "{bad}"
+            );
+        }
+        // A plain smart playlist is as before: no network, nothing new in its answer
+        let (st, plain) = call(
+            &app,
+            "POST",
+            "/v1/smart/preview",
+            Some(serde_json::json!({"rules": [{"field": "genre", "op": "contains", "value": "techno"}]})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{plain}");
+        assert!(
+            plain.get("network").is_none() && plain.get("network_note").is_none(),
+            "{plain}"
+        );
+        // Saving tags from the network writes a music feed: that needs a Pubky sign-in
+        let (st, e) = call(
+            &app,
+            "POST",
+            "/v1/smart",
+            Some(serde_json::json!({"name": "Techno", "reach": "all", "tags": ["techno"]})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_GATEWAY, "{e}");
+        assert!(e["error"].as_str().unwrap().contains("Sign in with Pubky"), "{e}");
+    }
+
+    /// A smart playlist with tags from the network is also a music feed on the owner's homeserver
+    /// (E2): written on save, rewritten in place on an edit, gone when it goes back to "just me"
+    /// or is deleted. On a testnet only (`PM_TESTNET=1`).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_network_smart_playlist_is_a_music_feed() {
+        if std::env::var("PM_TESTNET").as_deref() != Ok("1") {
+            eprintln!("PM_TESTNET not set; skipping");
+            return;
+        }
+        let pubky = pubky::Pubky::testnet().unwrap();
+        let signer = pubky.signer(pubky::Keypair::random());
+        let hs = pubky::PublicKey::try_from("8pinxxgqs41n4aididenw5apqp1urfmzdztr8jt4abrkdn435ewo").unwrap();
+        signer.signup(&hs, None).await.unwrap();
+        let session = signer
+            .signin_blocking(pubky::ClientId::new("pm-api-feeds").unwrap())
+            .await
+            .unwrap();
+        let z32 = session.public_key().to_string();
+        let homeserver = pm_pubky::homeserver::NodeHomeserver::from_pubky(pubky.clone());
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        s.set_sync(Some(Arc::new(crate::sync::PubkySync::from_session(
+            homeserver.clone(),
+            session.clone(),
+        ))));
+        let app = router(s.clone());
+        let read = |id: String| {
+            let (hs, z32, session) = (homeserver.clone(), z32.clone(), session.clone());
+            async move {
+                hs.get_bytes(
+                    &z32,
+                    &format!("/priv/music/v1/feeds/{id}.json"),
+                    pm_pubky::Visibility::Private,
+                    Some(&session),
+                )
+                .await
+                .ok()
+                .map(|b| serde_json::from_slice::<pubky_music_specs::MusicFeed>(&b).unwrap())
+            }
+        };
+        let (st, p) = call(
+            &app,
+            "POST",
+            "/v1/smart",
+            Some(serde_json::json!({"name": "Techno from friends", "reach": "friends", "tags": ["Techno"], "match": "any",
+                "rules": [{"field": "year", "op": "between", "value": 1990, "to": 1999}], "limit": 40})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{p}");
+        let fid = p["feed"]["id"].as_str().unwrap().to_string();
+        assert_eq!(p["feed"]["public"], false);
+        assert!(p["feed"]["uri"]
+            .as_str()
+            .unwrap()
+            .ends_with(&format!("/priv/music/v1/feeds/{fid}.json")));
+        let f = read(fid.clone()).await.expect("the feed is on the homeserver");
+        f.validate(Some(&fid), true).unwrap();
+        assert_eq!(f.name, "Techno from friends");
+        assert_eq!(f.feed.tags.as_deref(), Some(&["techno".to_string()][..]));
+        assert_eq!(serde_json::to_value(&f.feed.reach).unwrap(), "friends");
+        assert_eq!(f.feed.rules[0].field, "year");
+        assert_eq!(f.feed.limit.as_ref().unwrap().songs, Some(40));
+        // An edit rewrites the same feed
+        let id = p["id"].as_str().unwrap().to_string();
+        let (st, p2) = call(
+            &app,
+            "PUT",
+            &format!("/v1/smart/{id}"),
+            Some(serde_json::json!({"name": "Techno from everyone", "reach": "all", "tags": ["techno"]})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{p2}");
+        assert_eq!(p2["feed"]["id"], fid.as_str());
+        assert_eq!(read(fid.clone()).await.unwrap().name, "Techno from everyone");
+        // Back to "just me": the feed goes
+        let (st, p3) = call(
+            &app,
+            "PUT",
+            &format!("/v1/smart/{id}"),
+            Some(serde_json::json!({"name": "Mine", "rules": [{"field": "genre", "op": "contains", "value": "techno"}]})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{p3}");
+        assert!(p3.get("feed").is_none(), "{p3}");
+        assert!(read(fid).await.is_none());
+        // Deleting one with a feed removes the feed too
+        let (_, p4) = call(
+            &app,
+            "PUT",
+            &format!("/v1/smart/{id}"),
+            Some(serde_json::json!({"name": "Again", "reach": "all", "tags": ["house"]})),
+        )
+        .await;
+        let fid4 = p4["feed"]["id"].as_str().unwrap().to_string();
+        assert!(read(fid4.clone()).await.is_some());
+        let (st, _) = call(&app, "DELETE", &format!("/v1/smart/{id}"), None).await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(read(fid4).await.is_none());
+    }
+
     /// A node at `public_url`, which the binary guessed (none configured) or the owner set.
     async fn state_at(dir: &std::path::Path, public_url: &str, guessed: bool) -> Arc<NodeState> {
         let db = dir.join("lib.sqlite");
@@ -12366,13 +13098,13 @@ exec sleep 300
     }
 
     /// The LAN address the node picks for speakers when public_url is empty is not where the
-    /// browser is: sign-in callbacks follow the request (localhost, umbrel.local, a proxy). A
+    /// browser is: sign-in callbacks follow the request (localhost, a `.local` name, a proxy). A
     /// public_url the owner set is used as it is.
     #[tokio::test]
     async fn a_guessed_public_url_leaves_sign_in_callbacks_to_the_request() {
         let dir = tempfile::tempdir().unwrap();
         let lan = "http://192.168.1.10:7788";
-        for host in ["localhost:7788", "umbrel.local:7788"] {
+        for host in ["localhost:7788", "nas.local:7788"] {
             let s = state_at(dir.path(), lan, true).await;
             assert_eq!(
                 tidal_redirect(s, host).await,
@@ -12405,12 +13137,16 @@ exec sleep 300
         assert!(!set.contains("picked"), "{set}");
     }
 
+    /// One matching pass at a time runs in the node, so tests that run one take turns.
+    static MATCH_PASSES: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     /// Library matching (F1): an album is matched by title, artist and song count, a tagged
     /// release by its id, and each artist by its albums' credits; an artist with nothing but a
     /// name that several MusicBrainz artists share stays unmatched. Pages carry the id and where
     /// it came from, and a second pass asks nothing.
     #[tokio::test]
     async fn library_artists_and_albums_are_matched_without_trusting_a_name_alone() {
+        let _one = MATCH_PASSES.lock().await;
         const RG_TAXI: &str = "0b5d3e2b-4b0c-4d5f-9d4b-1e9a2b3c4d5e";
         const TAXI: &str = "2d7f5a4d-6d2e-4f7b-9f6d-3a1c4d5e6f70";
         const RELEASE: &str = "4f9b7c6f-8f4a-4b9d-9b8f-5c3e6f708192";
@@ -12429,7 +13165,8 @@ exec sleep 300
             move |Query(q): Query<std::collections::HashMap<String, String>>| {
                 c1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 let query = q.get("query").cloned().unwrap_or_default();
-                let releases = if query.contains("Zahltag") {
+                // Only the title without its edition finds it, as on MusicBrainz
+                let releases = if query.starts_with("release:\"Zahltag\" AND") {
                     serde_json::json!([
                         {"title": "Zahltag", "track-count": 5, "release-group": {"id": RG_SOLO}, "artist-credit": taxi},
                         {"title": "Zahltag", "track-count": 2, "release-group": {"id": RG_TAXI}, "artist-credit": taxi}
@@ -12579,6 +13316,10 @@ exec sleep 300
             serde_json::json!({"mbid": RG_TAXI, "source": "lookup"}),
             "{p}"
         );
+        assert_eq!(
+            p["uri"],
+            format!("https://musicbrainz.org/release-group/{RG_TAXI}")
+        );
         let (_, p) = call(
             &app,
             "GET",
@@ -12591,10 +13332,8 @@ exec sleep 300
             serde_json::json!({"mbid": RG_SOLO, "source": "tags"}),
             "{p}"
         );
-        assert_eq!(
-            p["uri"],
-            format!("https://musicbrainz.org/release-group/{RG_SOLO}")
-        );
+        // The page stays on the tagged release, which its heart and tags were saved on
+        assert_eq!(p["uri"], format!("https://musicbrainz.org/release/{RELEASE}"));
         // Answered, sure or not: nothing is asked again
         let again = library_match::pass(&s, std::time::Duration::ZERO).await;
         assert_eq!(again, library_match::PassReport::default());
@@ -12624,6 +13363,8 @@ exec sleep 300
             format!("/ws/2/artist/{ARTIST}"),
             serde_json::json!({"relations": [
                 rel("wikidata", "https://www.wikidata.org/wiki/Q1"),
+                // A direct article with no summary (encoded in the link): the next one is used
+                rel("wikipedia", "https://de.wikipedia.org/wiki/Sieben_%C3%84rzte"),
                 rel("official homepage", "https://7dollartaxi.example/"),
                 rel("free streaming", "https://open.spotify.com/artist/abc"),
                 rel("streaming", "https://tidal.com/browse/artist/42"),
@@ -12675,6 +13416,7 @@ exec sleep 300
             "claims": {}, "sitelinks": {"dewiki": {"title": "Taxi (Lied)"}}}}}),
         );
         let answers = Arc::new(answers);
+        let asked_titles: Arc<std::sync::Mutex<Vec<String>>> = Default::default();
         let b2 = base.clone();
         let c2 = calls.clone();
         let mock = Router::new()
@@ -12700,15 +13442,22 @@ exec sleep 300
                         }}]}}}}))
                 }
             }))
-            .route("/api/rest_v1/page/summary/{title}", get(|Path(title): Path<String>| async move {
-                let text = match title.as_str() {
-                    "7_Dollar_Taxi_(Band)" => "7 Dollar Taxi ist eine Band aus Zürich.",
-                    "Zahltag_(album)" => "Zahltag is the first album by 7 Dollar Taxi.",
-                    "Taxi_(Lied)" => "Taxi ist ein Lied von 7 Dollar Taxi.",
-                    other => panic!("no article {other}"),
-                };
-                Json(serde_json::json!({"title": title.replace('_', " "), "extract": text,
-                    "content_urls": {"desktop": {"page": format!("https://de.wikipedia.org/wiki/{title}")}}}))
+            .route("/api/rest_v1/page/summary/{title}", get({
+                let asked = asked_titles.clone();
+                move |Path(title): Path<String>| {
+                    asked.lock().unwrap().push(title.clone());
+                    async move {
+                        let text = match title.as_str() {
+                            "7_Dollar_Taxi_(Band)" => "7 Dollar Taxi ist eine Band aus Zürich.",
+                            "Zahltag_(album)" => "Zahltag is the first album by 7 Dollar Taxi.",
+                            "Taxi_(Lied)" => "Taxi ist ein Lied von 7 Dollar Taxi.",
+                            _ => return StatusCode::NOT_FOUND.into_response(),
+                        };
+                        Json(serde_json::json!({"title": title.replace('_', " "), "extract": text,
+                            "content_urls": {"desktop": {"page": format!("https://de.wikipedia.org/wiki/{title}")}}}))
+                        .into_response()
+                    }
+                }
             }))
             .route("/img/taxi.jpg", get(|| async { ([(header::CONTENT_TYPE, "image/jpeg")], vec![0xffu8, 0xd8, 0xff, 1, 2, 3]) }))
             .fallback({
@@ -12765,14 +13514,48 @@ exec sleep 300
                 .find(|f| f["label"] == label)
                 .map(|f| f["value"].clone())
         };
-        let (st, p) = call(
-            &app,
-            "GET",
-            &format!("/v1/item/artist/lib-{artist}?lang=de-CH"),
-            None,
-        )
-        .await;
-        assert_eq!(st, StatusCode::OK, "{p}");
+        // A page never waits for open sources: it says they are coming, and has them when asked again
+        let settled = |path: String, lang: Option<&'static str>| {
+            let app = app.clone();
+            async move {
+                let t = std::time::Instant::now();
+                let mut first = None;
+                for _ in 0..100 {
+                    let mut req = Request::builder().uri(path.as_str());
+                    if let Some(l) = lang {
+                        req = req.header(header::ACCEPT_LANGUAGE, l);
+                    }
+                    let resp = app
+                        .clone()
+                        .oneshot(req.body(Body::empty()).unwrap())
+                        .await
+                        .unwrap();
+                    assert_eq!(resp.status(), StatusCode::OK);
+                    let p: serde_json::Value =
+                        serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes())
+                            .unwrap();
+                    first.get_or_insert((p["about_pending"] == true, t.elapsed()));
+                    if p["about_pending"] != true {
+                        return (p, first.unwrap());
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+                panic!("{path} never settled");
+            }
+        };
+        let (p, (pending, took)) = settled(format!("/v1/item/artist/lib-{artist}?lang=de-CH"), None).await;
+        assert!(pending, "the first answer says About is coming");
+        assert!(
+            took < std::time::Duration::from_secs(1),
+            "and doesn't wait for it: {took:?}"
+        );
+        // The direct link was asked once, decoded (not "%C3%84" twice over), then the sitelink
+        let asked = asked_titles.lock().unwrap().clone();
+        assert_eq!(
+            asked[..2],
+            ["Sieben_Ärzte".to_string(), "7_Dollar_Taxi_(Band)".to_string()],
+            "{asked:?}"
+        );
         assert_eq!(
             p["about_text"]["text"], "7 Dollar Taxi ist eine Band aus Zürich.",
             "{p}"
@@ -12814,21 +13597,14 @@ exec sleep 300
             .unwrap();
         assert_eq!(tidal["id"], "artist:42");
         // The album: no German article, so the English one; label and date from the release
-        let req = Request::builder()
-            .uri(format!("/v1/item/album/lib-{album}"))
-            .header(header::ACCEPT_LANGUAGE, "de-DE,de;q=0.9")
-            .body(Body::empty())
-            .unwrap();
-        let resp = app.clone().oneshot(req).await.unwrap();
-        let p: serde_json::Value =
-            serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
+        let (p, _) = settled(format!("/v1/item/album/lib-{album}"), Some("de-DE,de;q=0.9")).await;
         assert_eq!(p["about_text"]["lang"], "en", "{p}");
         assert_eq!(p["blurb"], "Zahltag is the first album by 7 Dollar Taxi.");
         assert_eq!(fact(&p, "Released"), Some("2001-05-04".into()), "{p}");
         assert_eq!(fact(&p, "Label"), Some("Sound Service".into()));
         assert_eq!(sources(&p), ["bandcamp", "deezer"], "{p}");
         // The song: its work's article
-        let (_, p) = call(&app, "GET", &format!("/v1/item/song/lib-{track}?lang=de"), None).await;
+        let (p, _) = settled(format!("/v1/item/song/lib-{track}?lang=de"), None).await;
         assert_eq!(
             p["about_text"]["text"], "Taxi ist ein Lied von 7 Dollar Taxi.",
             "{p}"
@@ -12836,15 +13612,59 @@ exec sleep 300
         assert_eq!(fact(&p, "Work"), Some("Taxi".into()));
         // Cached per language: the same pages again ask nothing
         let asked = calls.load(std::sync::atomic::Ordering::SeqCst);
-        call(
+        let (_, p) = call(
             &app,
             "GET",
             &format!("/v1/item/artist/lib-{artist}?lang=de"),
             None,
         )
         .await;
+        assert!(p["about_pending"].is_null(), "cached: {p}");
         call(&app, "GET", &format!("/v1/item/song/lib-{track}?lang=de"), None).await;
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), asked);
+    }
+
+    /// A failed album lookup doesn't hold back another artist in the same pass: an artist with
+    /// nothing to ask (no album, no song length) is still answered "not sure".
+    #[tokio::test]
+    async fn a_failed_album_lookup_does_not_skip_other_artists() {
+        let _one = MATCH_PASSES.lock().await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mock = Router::new().route(
+            "/ws/2/release",
+            get(|| async { StatusCode::INTERNAL_SERVER_ERROR }),
+        );
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        s.set_contact("tests@example.org").unwrap();
+        *s.discovery.write().unwrap() = None;
+        *s.mb_base.write().unwrap() = format!("http://127.0.0.1:{port}/ws/2");
+        {
+            let lib = s.library.lock().unwrap();
+            let mut on_album = untagged_track(dir.path().join("1.flac"), "One", "Band");
+            on_album.album = Some(pm_model::Album {
+                id: None,
+                title: "Album".into(),
+                album_artist: Some("Band".into()),
+                release_mbid: None,
+                release_group_mbid: None,
+                year: None,
+                upc: None,
+                total_discs: None,
+            });
+            lib.upsert_track(&on_album).unwrap();
+            let mut loose = untagged_track(dir.path().join("2.flac"), "Two", "Loner");
+            loose.duration_ms = None;
+            loose.file.duration_ms = None;
+            lib.upsert_track(&loose).unwrap();
+        }
+        let report = library_match::pass(&s, std::time::Duration::ZERO).await;
+        assert_eq!(report.failed, 1, "{report:?}");
+        let c = s.library.lock().unwrap().match_counts().unwrap();
+        assert_eq!(c.artists.unmatched, 1, "Loner is answered: {c:?}");
+        assert_eq!(c.albums.pending, 1, "the album is asked again next pass: {c:?}");
     }
 
     #[tokio::test]
@@ -12904,5 +13724,617 @@ exec sleep 300
         assert_eq!(z["queue"].as_array().unwrap().len(), 1);
         assert_eq!(z["transport"], "stopped");
         assert_eq!(z["repeat"], "off");
+    }
+
+    #[tokio::test]
+    async fn item_pages_list_similar_music_from_the_library() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let add = |name: &str, artist: &str, album: &str, genres: &[&str]| {
+            let mut t = untagged_track(dir.path().join(format!("{name}.wav")), name, artist);
+            t.album = Some(pm_model::Album {
+                id: None,
+                title: album.into(),
+                album_artist: Some(artist.into()),
+                release_mbid: None,
+                release_group_mbid: None,
+                year: None,
+                upc: None,
+                total_discs: None,
+            });
+            t.genres = genres.iter().map(|g| g.to_string()).collect();
+            s.library.lock().unwrap().upsert_track(&t).unwrap().0
+        };
+        let seed = add("Seed", "Alpha", "First", &["Disco", "Funk"]);
+        add("Both", "Beta", "Second", &["Funk", "Disco"]);
+        add("One", "Gamma", "Third", &["Disco"]);
+        add("Same Artist", "Alpha", "Other Alpha", &["Jazz"]);
+        add("Unrelated", "Delta", "Fourth", &["Jazz"]);
+        let app = router(s.clone());
+        let titles = |v: &serde_json::Value| -> Vec<String> {
+            v["similar"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|h| h["title"].as_str().unwrap().to_string())
+                .collect()
+        };
+        // A song: shared genres first (most first), then the same artist's; never itself
+        let (st, v) = call(&app, "GET", &format!("/v1/item/song/lib-{seed}/extras"), None).await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        assert_eq!(titles(&v), vec!["Both", "One", "Same Artist"], "{v}");
+        assert_eq!(v["similar"][0]["kind"], "song");
+        assert!(v["similar"][0]["track_id"].is_i64(), "playable: {v}");
+        // An album: other albums, then the same artist's other albums
+        let album = s
+            .library
+            .lock()
+            .unwrap()
+            .get_track(pm_model::TrackId(seed))
+            .unwrap()
+            .unwrap()
+            .album
+            .unwrap()
+            .id
+            .unwrap();
+        let (_, v) = call(&app, "GET", &format!("/v1/item/album/lib-{album}/extras"), None).await;
+        assert_eq!(titles(&v), vec!["Second", "Third", "Other Alpha"], "{v}");
+        // An artist: the artists of the songs that share genres, never the artist itself
+        let artist = s
+            .library
+            .lock()
+            .unwrap()
+            .get_track(pm_model::TrackId(seed))
+            .unwrap()
+            .unwrap()
+            .artists[0]
+            .id
+            .unwrap();
+        let (_, v) = call(&app, "GET", &format!("/v1/item/artist/lib-{artist}/extras"), None).await;
+        // (Alpha has a Jazz song too, so Delta shares a genre; equals come in any order)
+        let got = titles(&v);
+        assert_eq!(got[0], "Beta", "the most shared first: {v}");
+        let mut rest = got[1..].to_vec();
+        rest.sort();
+        assert_eq!(rest, vec!["Delta", "Gamma"], "{v}");
+    }
+
+    /// Search groups (TASK-pinakes-social-ux A1/A2): own playlists, people and posts from Nexus,
+    /// `tag:` as `#`, the `tags` parameter, and a library file's format and quality on its row.
+    #[tokio::test]
+    async fn search_lists_playlists_people_posts_and_formats() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let key = "k".repeat(52);
+        let who = key.clone();
+        let mock = Router::new()
+            .route("/v1/search", get(|| async { Json(serde_json::json!({"items": []})) }))
+            .route(
+                "/nexus/v0/stream/users/username",
+                get(move |Query(q): Query<std::collections::HashMap<String, String>>| {
+                    let who = who.clone();
+                    async move {
+                        let items = if q.get("username").map(String::as_str) == Some("sat") {
+                            serde_json::json!([{"details": {"id": who, "name": "Sat", "bio": "plays bass"}}])
+                        } else {
+                            serde_json::json!([])
+                        };
+                        Json(items)
+                    }
+                }),
+            )
+            .route(
+                "/nexus/v0/search/posts/by_content",
+                get(|| async { Json(serde_json::json!([{"post_key": "author1:0033", "score": 1.0}])) }),
+            )
+            .route(
+                "/nexus/v0/search/posts/by_tag/{t}",
+                // every tag carries post 0033; `rare` carries only another post
+                get(|Path(t): Path<String>| async move {
+                    let key = if t == "rare" { "author2:0044" } else { "author1:0033" };
+                    Json(serde_json::json!([{"post_key": key, "score": 1}]))
+                }),
+            )
+            .route(
+                "/nexus/v0/stream/posts/by_ids",
+                post(|| async {
+                    Json(serde_json::json!([{"details": {"id": "0033", "author": "author1", "content": "Great music tonight\nand more", "uri": "pubky://author1/pub/pubky.app/posts/0033", "kind": "short"}}]))
+                }),
+            )
+            .route(
+                "/nexus/v0/stream/users/by_ids",
+                post(|| async { Json(serde_json::json!([{"details": {"id": "author1", "name": "Author One"}}])) }),
+            )
+            .route(
+                "/nexus/v0/search/tags/by_prefix/{p}",
+                get(|| async { Json(serde_json::json!([])) }),
+            );
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let pubky = pm_pubky::config::PmPubkyConfig {
+            pinakes_base: format!("http://127.0.0.1:{port}"),
+            nexus_base: format!("http://127.0.0.1:{port}/nexus"),
+            user_agent_contact: "test@example.org".into(),
+            ..Default::default()
+        };
+        let s = state_with(dir.path(), None, pubky).await;
+        s.set_contact("test@example.org").unwrap();
+        let tid = {
+            let lib = s.library.lock().unwrap();
+            let tr = untagged_track(dir.path().join("s.flac"), "Saturday Song", "Someone");
+            lib.upsert_track(&tr).unwrap().0
+        };
+        let app = router(s.clone());
+        let (st, _) = call(
+            &app,
+            "POST",
+            "/v1/playlists",
+            Some(serde_json::json!({"name": "Saturday chill", "track_ids": [tid]})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let lines = |app: Router, uri: String| async move {
+            let resp = app
+                .oneshot(
+                    axum::http::Request::get(uri)
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let sources = resp
+                .headers()
+                .get("x-pm-sources")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_string();
+            let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+            let answers = String::from_utf8_lossy(&body)
+                .lines()
+                .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+                .filter(|v| v.get("source").is_some())
+                .collect::<Vec<_>>();
+            (sources, answers)
+        };
+        let (sources, ans) = lines(app.clone(), "/v1/search?q=sat".into()).await;
+        assert!(
+            sources.contains("people") && sources.contains("posts"),
+            "{sources}"
+        );
+        let lib = ans
+            .iter()
+            .find(|a| a["source"] == "library")
+            .expect("library answered");
+        let hits = lib["hits"].as_array().unwrap();
+        let pl = hits
+            .iter()
+            .find(|h| h["kind"] == "playlist")
+            .expect("the playlist is a result");
+        assert_eq!(pl["title"], "Saturday chill", "{pl}");
+        let song = hits
+            .iter()
+            .find(|h| h["kind"] == "song")
+            .expect("the song is a result");
+        assert!(song["format"].as_str().is_some_and(|f| !f.is_empty()), "{song}");
+        assert!(
+            ["hi_res", "lossless", "lossy"].contains(&song["quality"].as_str().unwrap_or("")),
+            "{song}"
+        );
+        let people = ans
+            .iter()
+            .find(|a| a["source"] == "people")
+            .expect("people answered");
+        assert_eq!(people["status"], "ok", "{people}");
+        assert_eq!(people["hits"][0]["kind"], "person");
+        assert_eq!(people["hits"][0]["title"], "Sat");
+        assert_eq!(people["hits"][0]["id"], key);
+        let posts = ans
+            .iter()
+            .find(|a| a["source"] == "posts")
+            .expect("posts answered");
+        assert_eq!(posts["status"], "ok", "{posts}");
+        assert_eq!(posts["hits"][0]["kind"], "post");
+        assert_eq!(posts["hits"][0]["title"], "Great music tonight");
+        assert_eq!(posts["hits"][0]["subtitle"], "Author One");
+        assert_eq!(posts["hits"][0]["page"], "https://pubky.app/post/author1/0033");
+        // `tag:` is `#`: tags only, posts carrying the tag included (a tag no other test searches:
+        // answers are cached per process)
+        let (sources, _) = lines(app.clone(), "/v1/search?q=tag%3Alofi".into()).await;
+        assert_eq!(sources, "library,pubky,posts");
+        // several tags: posts carrying all of them
+        let (_, ans) = lines(app.clone(), "/v1/search?tags=lofi,deep".into()).await;
+        let posts = ans
+            .iter()
+            .find(|a| a["source"] == "posts")
+            .expect("posts answered");
+        assert_eq!(
+            posts["hits"].as_array().map(Vec::len),
+            Some(1),
+            "both tags on 0033: {posts}"
+        );
+        let (_, ans) = lines(app.clone(), "/v1/search?tags=lofi,rare".into()).await;
+        let posts = ans
+            .iter()
+            .find(|a| a["source"] == "posts")
+            .expect("posts answered");
+        assert_eq!(
+            posts["hits"].as_array().map(Vec::len),
+            Some(0),
+            "no post has both: {posts}"
+        );
+        let (sources2, ans) = lines(app.clone(), "/v1/search?tags=lofi".into()).await;
+        assert_eq!(sources2, sources);
+        // the tag reaches the posts search (Nexus's by_tag answers the post)
+        let posts = ans
+            .iter()
+            .find(|a| a["source"] == "posts")
+            .expect("posts answered");
+        assert_eq!(posts["status"], "ok", "{posts}");
+        assert_eq!(posts["hits"][0]["title"], "Great music tonight");
+        // One letter is no search for Nexus: people and posts answer with nothing, not an error
+        let (_, ans) = lines(app.clone(), "/v1/search?q=a".into()).await;
+        for src in ["people", "posts"] {
+            let a = ans.iter().find(|a| a["source"] == src).expect("answered");
+            assert_eq!(a["status"], "ok", "{a}");
+            assert_eq!(a["hits"].as_array().map(Vec::len), Some(0), "{a}");
+        }
+        assert_eq!(search::hash_tags("rock tag:chill #90s"), vec!["chill", "90s"]);
+        assert_eq!(search::text_words("rock tag:chill #90s"), "rock");
+        let (sources, _) = lines(app.clone(), "/v1/search?q=sat&in=library".into()).await;
+        assert_eq!(sources, "library");
+    }
+
+    /// Every view the page navigates to by path (NAV_VIEWS in app.js) is served on a reload or a
+    /// shared link, not a 404.
+    #[tokio::test]
+    async fn every_page_view_is_served_by_its_path() {
+        let js = include_str!("../static/app.js");
+        let start = js.find("const NAV_VIEWS = [").expect("NAV_VIEWS");
+        let end = start + js[start..].find("];").expect("end of NAV_VIEWS");
+        let views: Vec<&str> = js[start..end].split('\'').skip(1).step_by(2).collect();
+        assert!(views.len() > 5, "{views:?}");
+        let dir = tempfile::tempdir().unwrap();
+        let app = router(state(dir.path(), None).await);
+        for v in views {
+            // Home is the root path (pathFor in app.js)
+            let v = if v == "home" { "" } else { v };
+            let resp = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::get(format!("/{v}"))
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "/{v}");
+        }
+    }
+
+    /// An album with no MusicBrainz id yet can't take tags or a review: the reads say so
+    /// (`needs_match`) instead of a 422; an unmatched song's tags still wait for a match.
+    #[tokio::test]
+    async fn unmatched_items_say_they_need_a_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let (tid, album) = {
+            let lib = s.library.lock().unwrap();
+            let mut tr = untagged_track(dir.path().join("a.flac"), "Song", "Someone");
+            tr.album = Some(pm_model::Album {
+                id: None,
+                title: "No Id".into(),
+                album_artist: Some("Someone".into()),
+                release_mbid: None,
+                release_group_mbid: None,
+                year: None,
+                upc: None,
+                total_discs: None,
+            });
+            let tid = lib.upsert_track(&tr).unwrap();
+            let t = lib.get_track(tid).unwrap().unwrap();
+            (tid.0, t.album.unwrap().id.unwrap())
+        };
+        let app = router(s.clone());
+        let (st, tg) = call(&app, "GET", &format!("/v1/tags?album_id={album}"), None).await;
+        assert_eq!(
+            (st, tg["needs_match"].as_bool()),
+            (StatusCode::OK, Some(true)),
+            "{tg}"
+        );
+        let (st, rv) = call(&app, "GET", &format!("/v1/reviews?album_id={album}"), None).await;
+        assert_eq!(
+            (st, rv["needs_match"].as_bool()),
+            (StatusCode::OK, Some(true)),
+            "{rv}"
+        );
+        let (st, tg) = call(&app, "GET", &format!("/v1/tags?track_id={tid}"), None).await;
+        assert_eq!(st, StatusCode::OK, "{tg}");
+        assert!(
+            tg.get("needs_match").is_none(),
+            "an unmatched song takes tags that wait: {tg}"
+        );
+    }
+
+    /// Identify library as a ladder (owner, 2026-10-30: too slow on the NUC): a folder that is an
+    /// album is identified from one MusicBrainz search and one release lookup, without decoding
+    /// a file; only what doesn't fit (a bonus track, a compilation folder of mixed artists) is
+    /// fingerprinted. A fingerprint an earlier run looked up agrees (higher confidence) or names
+    /// another song (both go to the owner).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn identify_matches_album_folders_and_fingerprints_only_the_rest() {
+        const REL_A: &str = "1a5b6a49-4c4f-4d18-9e3d-1c4d1b0a7a3e";
+        const REL_O: &str = "2b6c7b5a-5d5a-4e29-8f4e-2d5e2c1b8b4f";
+        const ELSE: &str = "3c7d8c6b-6e6b-4f3a-9a5f-3e6f3d2c9c5a";
+        const REL_V: &str = "4d8e9d7c-7f7c-4a4b-8b6a-4f7a4e3d0d6b";
+        let rec = |i: u32| format!("00000000-0000-4000-8000-{i:012}");
+        let counter = || Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (searches, lookups, recordings, acoustid) = (counter(), counter(), counter(), counter());
+        let n = |c: &Arc<std::sync::atomic::AtomicUsize>| c.load(std::sync::atomic::Ordering::SeqCst);
+        // A release of `count` tracks "Song i" (Other: "Take i"), each 200 + i seconds
+        let tracklist = move |id: &str, title: &str, word: &str, count: u32, base: u32| {
+            serde_json::json!({"id": id, "title": title, "media": [{"position": 1, "tracks": (1..=count).map(|i| serde_json::json!({
+                "position": i, "title": format!("{word} {i}"), "length": (200 + i) * 1000,
+                "recording": {"id": rec(base + i)}
+            })).collect::<Vec<_>>()}]})
+        };
+        let (a, o, v) = (
+            tracklist(REL_A, "Album", "Song", 4, 0),
+            tracklist(REL_O, "Other", "Take", 3, 10),
+            tracklist(REL_V, "Summer Mix", "Anthem", 2, 20),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mock = {
+            let (searches, lookups, recordings, acoustid) = (
+                searches.clone(),
+                lookups.clone(),
+                recordings.clone(),
+                acoustid.clone(),
+            );
+            Router::new()
+                .route(
+                    "/ws/2/release",
+                    get(
+                        move |Query(q): Query<std::collections::HashMap<String, String>>| {
+                            searches.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            let query = q.get("query").cloned().unwrap_or_default();
+                            let (id, title, count, credit) =
+                                if query.starts_with("release:\"Album\" AND artist:\"Band\"") {
+                                    (REL_A, "Album", 4, "Band")
+                                } else if query.starts_with("release:\"Other\" AND artist:\"Band\"") {
+                                    (REL_O, "Other", 3, "Band")
+                                } else if query
+                                    .starts_with("release:\"Summer Mix\" AND artist:\"Various Artists\"")
+                                {
+                                    (REL_V, "Summer Mix", 2, "Various Artists")
+                                } else {
+                                    panic!("unexpected release search {query}")
+                                };
+                            async move {
+                                Json(
+                                    serde_json::json!({"releases": [{"id": id, "score": 100, "title": title,
+                                "track-count": count, "artist-credit": [{"name": credit}]}]}),
+                                )
+                            }
+                        },
+                    ),
+                )
+                .route(
+                    "/ws/2/release/{id}",
+                    get(move |Path(id): Path<String>| {
+                        lookups.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        let r = match id.as_str() {
+                            REL_A => a.clone(),
+                            REL_O => o.clone(),
+                            _ => v.clone(),
+                        };
+                        async move { Json(r) }
+                    }),
+                )
+                .route(
+                    "/ws/2/recording",
+                    get(move || {
+                        recordings.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        async { Json(serde_json::json!({"recordings": []})) }
+                    }),
+                )
+                .route(
+                    "/v2/lookup",
+                    post(move || {
+                        acoustid.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        async { Json(serde_json::json!({"status": "ok", "results": []})) }
+                    }),
+                )
+        };
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        s.set_contact("tests@example.org").unwrap();
+        *s.mb_base.write().unwrap() = format!("http://127.0.0.1:{port}/ws/2");
+        *s.acoustid.write().unwrap() = identify::AcoustIdSettings {
+            api_key: "test-key".into(),
+            base_url: format!("http://127.0.0.1:{port}"),
+            configured: String::new(),
+        };
+        // Every file its own audio (the fingerprint cache is by content)
+        let mut secs = 1;
+        let mut add =
+            |folder: &str, title: &str, artist: &str, album: (&str, Option<&str>), no: u32, ms: u64| {
+                let dir = dir.path().join("music").join(folder);
+                std::fs::create_dir_all(&dir).unwrap();
+                let path = dir.join(format!("{no:02} {title}.wav"));
+                tone_wav(&path, secs);
+                secs += 1;
+                let mut t = untagged_track(path.clone(), title, artist);
+                t.track_no = Some(no);
+                t.disc_no = None;
+                t.duration_ms = Some(ms);
+                t.album = Some(pm_model::Album {
+                    id: None,
+                    title: album.0.into(),
+                    album_artist: album.1.map(str::to_string),
+                    release_mbid: None,
+                    release_group_mbid: None,
+                    year: None,
+                    upc: None,
+                    total_discs: None,
+                });
+                let id = s.library.lock().unwrap().upsert_track(&t).unwrap();
+                (id.0, path)
+            };
+        // The album, ripped a second longer than MusicBrainz says
+        let album: Vec<(i64, std::path::PathBuf)> = (1..=4)
+            .map(|i| {
+                add(
+                    "Band/Album",
+                    &format!("Song {i}"),
+                    "Band",
+                    ("Album (Remastered)", Some("Band")),
+                    i,
+                    (201 + i as u64) * 1000,
+                )
+            })
+            .collect();
+        // Another album with a bonus track MusicBrainz's release hasn't
+        let mut other: Vec<(i64, std::path::PathBuf)> = (1..=3)
+            .map(|i| {
+                add(
+                    "Band/Other",
+                    &format!("Take {i}"),
+                    "Band",
+                    ("Other", Some("Band")),
+                    i,
+                    (200 + i as u64) * 1000,
+                )
+            })
+            .collect();
+        other.push(add(
+            "Band/Other",
+            "Demo",
+            "Band",
+            ("Other", Some("Band")),
+            4,
+            150_000,
+        ));
+        // A compilation folder of mixed artists, as the scanner stores it ("Various Artists"); a
+        // compilation of that name on MusicBrainz has other songs
+        let mix: Vec<(i64, std::path::PathBuf)> = (1..=2)
+            .map(|i| {
+                add(
+                    "Mix",
+                    &format!("Hit {i}"),
+                    &format!("Artist {i}"),
+                    ("Summer Mix", Some("Various Artists")),
+                    i,
+                    180_000,
+                )
+            })
+            .collect();
+        // An earlier run's fingerprints: song 1 sounds like another song, song 2 like itself
+        let cached = |path: &std::path::Path, recording: &str, title: &str| {
+            let key = Library::file_key(path).unwrap();
+            let lib = s.library.lock().unwrap();
+            lib.save_fingerprint(&key, 3, "AQfake").unwrap();
+            let answer = serde_json::json!({"status": "ok", "results": [{"id": "9ff43b6a-4f16-427c-93c2-92307ca505e0",
+                "score": 0.95, "recordings": [{"id": recording, "title": title}]}]});
+            lib.save_lookup(&key, &answer.to_string()).unwrap();
+        };
+        cached(&album[0].1, ELSE, "Something Else");
+        cached(&album[1].1, &rec(2), "Song 2");
+        // Started and watched as the page does: the status answers all along
+        let app = router(s.clone());
+        let (st, _) = call(&app, "POST", "/v1/library/identify", Some(serde_json::json!({}))).await;
+        assert_eq!(st, StatusCode::OK);
+        let watch = async {
+            loop {
+                let (_, st) = call(&app, "GET", "/v1/library/identify", None).await;
+                if st["progress"]["running"] == false {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(60), watch)
+            .await
+            .expect("the status keeps answering and the run ends");
+
+        // One search and one lookup per album (the mix too); no fingerprint for a song its
+        // folder settled
+        assert_eq!((n(&searches), n(&lookups)), (3, 3));
+        assert_eq!(n(&acoustid), 3, "the bonus track and the compilation's two songs");
+        // The search by tags for what nothing found (with the length, then without)
+        assert_eq!(n(&recordings), 6);
+        let track = |id: i64| {
+            s.library
+                .lock()
+                .unwrap()
+                .get_track(pm_model::TrackId(id))
+                .unwrap()
+                .unwrap()
+        };
+        for (i, (id, _)) in album.iter().enumerate().skip(1) {
+            let (uri, conf) = track(*id).canonical.expect("identified by its folder");
+            assert_eq!(
+                uri.to_url(),
+                format!("https://musicbrainz.org/recording/{}", rec(i as u32 + 1))
+            );
+            let pm_model::Confidence::AlbumFit { score } = conf else {
+                panic!("{conf:?}")
+            };
+            if i == 1 {
+                assert!(score > 0.98, "the fingerprint agrees: {score}");
+            } else {
+                assert!((score - 0.95).abs() < 1e-6, "{score}");
+            }
+        }
+        for (i, (id, _)) in other.iter().take(3).enumerate() {
+            let (uri, _) = track(*id).canonical.expect("identified by its folder");
+            assert_eq!(
+                uri.to_url(),
+                format!("https://musicbrainz.org/recording/{}", rec(11 + i as u32))
+            );
+        }
+        // The bonus track and the mix: fingerprinted, searched for by their tags, nothing found
+        // (looked at, no suggestion: only a retry looks again)
+        let ids = |retry: bool| -> Vec<i64> {
+            let lib = s.library.lock().unwrap();
+            let todo = lib.tracks_to_identify(retry).unwrap();
+            todo.iter().filter_map(|t| t.id.map(|i| i.0)).collect()
+        };
+        let (again, new) = (ids(true), ids(false));
+        for (id, _) in other.iter().skip(3).chain(&mix) {
+            assert!(track(*id).canonical.is_none());
+            assert!(again.contains(id) && !new.contains(id), "{id} ends unknown");
+        }
+        // The folder and the fingerprint disagree on song 1: the owner decides
+        assert!(track(album[0].0).canonical.is_none());
+        let (_, sug) = call(&app, "GET", "/v1/library/suggestions", None).await;
+        let mut sources: Vec<(String, String)> = sug
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| {
+                (
+                    x["source"].as_str().unwrap().to_string(),
+                    x["recording_mbid"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect();
+        sources.sort();
+        assert_eq!(
+            sources,
+            vec![("album".into(), rec(1)), ("fingerprint".into(), ELSE.into())]
+        );
+        assert!(sug
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|x| x["track_id"] == album[0].0));
+        let (_, st) = call(&app, "GET", "/v1/library/identify", None).await;
+        assert_eq!(st["counts"]["by"]["album"], 6, "{st}");
+        assert_eq!(st["progress"]["identified_by"]["album_fit"], 6, "{st}");
+        assert_eq!(st["progress"]["done"], 10, "{st}");
+        assert_eq!(st["progress"]["unknown"], 3, "{st}");
+        assert_eq!(st["progress"]["suggested"], 1, "{st}");
     }
 }

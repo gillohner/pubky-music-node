@@ -204,6 +204,10 @@ impl<'a> Scanner<'a> {
             report.files_seen += 1;
             batch.tick()?;
             let path = entry.path().to_path_buf();
+            // Taken out of the library: not read, and its row stays missing
+            if self.lib.is_hidden(&path)? {
+                continue;
+            }
             let meta = match entry.metadata() {
                 Ok(m) => m,
                 Err(e) => {
@@ -332,6 +336,10 @@ impl<'a> Scanner<'a> {
         };
         let mut track = track_from_tags(file, &tagset);
         track.id = existing;
+        // The owner's edit of this file's tags stays on top of what the file says
+        if let Some(o) = self.lib.refresh_override(&track)? {
+            o.apply(&mut track);
+        }
         let id = self.lib.upsert_track(&track)?;
         // A sidecar .lrc (usually synchronised) wins over embedded text.
         let lyrics = crate::lyrics::sidecar(path)
@@ -383,6 +391,9 @@ impl<'a> Scanner<'a> {
             }
             report.files_seen += 1;
             batch.tick()?;
+            if self.lib.is_hidden(&e.path)? {
+                continue;
+            }
             let existing = self.lib.file_by_path(&e.path)?;
             if let Some(row) = &existing {
                 if row.size_bytes == e.size && row.mtime_unix == e.mtime {

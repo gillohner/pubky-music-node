@@ -2,13 +2,19 @@
 //   * Home's Get started shows the steps the node names (no music step: the config has a folder),
 //     goes when hidden, stays hidden in a new browser (kept on the node), comes back from
 //     Settings › Home for everyone, and goes by itself when only optional steps are left;
-//   * Library folders marks the config's folder and offers no Remove for it;
+//   * Your library › Node library marks the config's folder and offers no Remove for it;
+//   * Your library: My music lists homeserver files as songs (names, not hashes) with the save
+//     status and Save now, edits a song's tags on the node, deletes a file; Add music offers
+//     upload, a folder or share, and playlists; Node library takes a song out and brings it back;
+//     a listener gets My music only, with no edit controls; Settings has no library or import tab;
 //   * Group outputs offers the outputs that group in sync (Sonos, HEOS, BluOS, squeezelite, the
 //     app's players on a DAC), by
 //     kind, one kind at a time, says what a pick becomes, and doesn't offer one that shares no
 //     sample rate with the ones picked;
 //   * About: "Use a different token in this browser", the node's token set in the config, or
 //     replaced and shown once; the login dialog says where the token is;
+//   * an item page credits Wikipedia's text and a Commons picture (source, licence, links), and
+//     redraws only About when it arrives in the background;
 //   * covers carry a provider badge (where it plays from: the library or the service) on tiles,
 //     song rows, the album page and Now playing, in the corner, named, in the service's colour.
 //   * Play to: while something plays or is queued, every other device gets Move here (This zone
@@ -21,6 +27,8 @@
 //     (and a link to all of it) and volume;
 //   * pressing play answers at once: the pressed button spins and the bar says "Starting on
 //     <device>…" until it plays, or shows the zone's error; Move to says "Moving to …" too.
+//   * search: results grouped (songs, albums, playlists, people, posts…), facet chips that narrow
+//     them, `tag:` like `#`, and the keyboard: ↑/↓ walk the results, Enter opens.
 // The rules behind the steps, the folders and the groups are pm-api's tests/node_setup.rs.
 //   node tools/ui-setup.js <api token> [http://127.0.0.1:7788]
 const { chromium } = require(require.resolve('playwright', { paths: [process.cwd(), __dirname] }));
@@ -82,10 +90,10 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
     await p.unroute(/\/v1\/me\/first-steps$/);
     await c.close();
 
-    // ---- Library folders ----
+    // ---- Your library › Node library: folders ----
     c = await ctx(); p = await c.newPage();
     const ns = await api('GET', '/node/settings');
-    await p.goto(BASE + '/settings/library');
+    await p.goto(BASE + '/library/node');
     await p.waitForSelector('#folderadd');
     const rows = await p.$$eval('#main code.path', (els) => els.map((e) => { const r = e.closest('.set-row'); return { path: e.textContent, text: r.textContent, remove: !!r.querySelector('[data-folder-del]') }; }));
     for (const f of ns.config_folders) {
@@ -140,6 +148,22 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
     check(await p.evaluate(() => performance.getEntriesByType('navigation')[0].type) === 'reload', 'Copy and reload reloads the page');
     await c.close();
 
+    // ---- About credits: Wikipedia's text and a Commons picture carry their source and licence ----
+    c = await ctx(); p = await c.newPage();
+    const credited = { kind: 'artist', id: 'lib-777', uri: null, target: { artist_id: 777 }, title: 'Credit Test', source: 'Your library', source_id: 'library',
+      songs: [], albums: [], versions: [], also_on: [], open_on: [], connect: [], about: [], section: 'artists', reading: false, pending: false, total_ms: 0,
+      blurb: 'Credit Test ist eine Band.',
+      about_text: { text: 'Credit Test ist eine Band.', source: 'Wikipedia', url: 'https://de.wikipedia.org/wiki/Credit_Test', lang: 'de', licence: 'CC BY-SA 4.0', licence_url: 'https://creativecommons.org/licenses/by-sa/4.0/' },
+      image_credit: { author: '<b>Jane</b> Doe', licence: 'CC BY 2.0', licence_url: 'javascript:alert(1)', file_page: 'https://commons.wikimedia.org/wiki/File:Credit.jpg', source: 'Wikimedia Commons' } };
+    await p.route(/\/v1\/item\/artist\/lib-777(\?.*)?$/, (r) => r.fulfill({ json: credited }));
+    await p.goto(BASE + '/artist/lib-777');
+    check(await visible(p, '#iabout .credit'), 'About shows a credit line');
+    const credit = await p.textContent('#iabout .credit').catch(() => '');
+    const links = await p.$$eval('#iabout .credit a', (as) => as.map((a) => [a.textContent, a.getAttribute('href')]));
+    check(links.some(([t, h]) => t === 'Read more on Wikipedia' && h === 'https://de.wikipedia.org/wiki/Credit_Test') && links.some(([t, h]) => t === 'CC BY-SA 4.0' && /creativecommons/.test(h)), 'the text links its article and CC BY-SA');
+    check(/Picture: <b>Jane<\/b> Doe · CC BY 2\.0 · Wikimedia Commons/.test(credit) && links.some(([t, h]) => t === 'Wikimedia Commons' && /File:Credit\.jpg/.test(h)), 'the picture names its author, licence and file page, as text');
+    check(links.every(([, h]) => /^https?:/.test(h || '')), 'a credit link is only ever a web link');
+    await c.close();
     // ---- Provider badges on covers ----
     // A mocked TIDAL artist page: a TIDAL album and a library album as tiles, a streamed and a
     // library song as rows; then album pages from TIDAL and from the library.
@@ -173,6 +197,35 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
     await p.goto(BASE + '/album/lib-1'); await p.waitForSelector('.hero .art');
     const h1 = await badge('.hero .art');
     check(h1 && h1.label === 'From your library', `a library album’s cover too (${h1 && h1.label})`);
+    // ---- Library artist pages: About under the header, Also on next to Play (F6) ----
+    const LONG = 'Mock Artist is a band from Zürich. '.repeat(30);
+    await p.route(/\/v1\/item\/artist\/lib-900$/, (r) => r.fulfill({ json: pageJson('artist', 'lib-900', {
+      source: 'Your library', source_id: 'library', image: IMG, songs: [SONGS[1]], albums: [ALBUMS[1]],
+      blurb: LONG, about_text: { text: LONG, source: 'Wikipedia', title: 'Mock Artist', url: 'https://de.wikipedia.org/wiki/Mock_Artist', lang: 'de', licence: 'CC BY-SA 4.0', licence_url: 'https://creativecommons.org/licenses/by-sa/4.0/' },
+      image_credit: { author: 'Jane Doe', licence: 'CC BY-SA 3.0', licence_url: 'https://creativecommons.org/licenses/by-sa/3.0/', file_page: 'https://commons.wikimedia.org/wiki/File:Mock.jpg', source: 'Wikimedia Commons' },
+      about: [{ label: 'Origin', value: 'Zürich' }, { label: 'Active', value: '1998–' }],
+      also_on: [{ source: 'tidal', id: 'artist:77', label: 'TIDAL', url: 'https://tidal.com/artist/77', page: 'tidal-77' }, { source: 'spotify', id: 'artist:abc', label: 'Spotify', url: 'https://open.spotify.com/artist/abc', page: 'spotify-abc' }],
+    }) }));
+    // TIDAL on and working here, Spotify not: the TIDAL icon opens its page here, Spotify's its site
+    // (the node gives every link a page, so the fixture does too)
+    await p.route(/\/v1\/sources$/, (r) => r.fulfill({ json: [{ id: 'tidal', name: 'TIDAL', enabled: true, healthy: true }, { id: 'spotify', name: 'Spotify', enabled: true, healthy: false }] }));
+    await p.route(/\/v1\/play-order$/, (r) => r.fulfill({ json: { order: ['library', 'tidal', 'spotify'], services: [{ id: 'tidal', connected: true }, { id: 'spotify', connected: false }] } }));
+    await p.goto(BASE + '/artist/lib-900'); await p.waitForSelector('#iabout');
+    const ab = await p.evaluate(() => { const ids = [...document.querySelectorAll('#main > section, #main > .hero')].map((e) => e.id || e.className); const b = document.querySelector('#iblurb'); const cr = document.querySelector('#iabout .credit'); return { order: ids.join(','), lang: b && b.getAttribute('lang'), clamped: b && b.classList.contains('clamp') && b.scrollHeight > b.clientHeight, credit: cr && cr.textContent, links: cr ? [...cr.querySelectorAll('a')].map((a) => a.getAttribute('href')) : [], facts: document.querySelectorAll('#iabout dl dt').length, icons: [...document.querySelectorAll('.hero .actions .also-icons .also-ico')].map((a) => a.getAttribute('aria-label')), line: (document.querySelector('#ialso') || {}).textContent || '' }; });
+    check(/^hero,iabout,isongs/.test(ab.order), `About sits under the header when there is an article (${ab.order})`);
+    check(ab.lang === 'de' && ab.clamped && ab.facts === 2, `the article in its language, a few lines, then the facts (${ab.lang})`);
+    check(/Text: Read more on Wikipedia · CC BY-SA 4\.0/.test(ab.credit) && /Picture: Jane Doe · CC BY-SA 3\.0 · Wikimedia Commons/.test(ab.credit) && ab.links.length === 4 && ab.links.every((h) => /^https:/.test(h)), `with its link and licence, and the photo's Commons credit (${(ab.credit || '').replace(/\s+/g, ' ')})`);
+    await p.click('#iblurbmore');
+    check(await p.evaluate(() => !document.querySelector('#iblurb').classList.contains('clamp') && document.querySelector('#iblurbmore').getAttribute('aria-expanded') === 'true'), 'More shows the whole text');
+    check([...ab.icons].sort().join('|') === 'Open on Spotify (opens a new tab)|Open on TIDAL' && !/also/.test(ab.line), `Also on: one icon per service next to Play, not in the source line (${ab.icons.join(', ')})`);
+    await p.click('.also-icons [data-also]'); await p.waitForTimeout(300);
+    check(/\/artist\/tidal-77$/.test(await p.evaluate(() => location.pathname)), 'a service the node plays from opens its page here');
+    await p.unroute(/\/v1\/item\/artist\/lib-900$/);
+    await p.unroute(/\/v1\/sources$/);
+    await p.unroute(/\/v1\/play-order$/);
+    // without an article, About stays at the end
+    await p.goto(BASE + '/album/lib-1'); await p.waitForSelector('#iabout');
+    check(await p.evaluate(() => { const s = [...document.querySelectorAll('#main > section')]; return s[s.length - 1].id === 'iabout'; }), 'without an article, About stays at the end of the page');
     await p.unroute(/\/v1\/item\/(artist|album)\/[a-z0-9-]+(\/extras)?$/);
     // Now playing: the first library track plays in This browser; the bar's art and the big cover
     await p.goto(BASE + '/tracks'); await p.waitForSelector('.track'); await p.hover('.track'); await p.click('.track [data-act="play"]');
@@ -298,9 +351,300 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
       check(await visible(p, '#np .warn-text'), 'a node that refuses: the bar says so');
       check(/refused the stream/.test(await p.textContent('#np')), 'in the node’s words');
       await p.unroute(/\/v1\/zones\/[^/]+\/queue$/);
+      // ---- Play from another source (Now playing › Sources) and Similar on item pages ----
+      {
+        // one song on repeat, so it is still playing when Sources opens (the test files are short)
+        const two = (await api('GET', '/library/tracks?limit=10')).tracks.slice(0, 2);
+        await api('PUT', `/zones/${encodeURIComponent(nz.id)}/repeat`, { repeat: 'all' }).catch(() => {});
+        if (two[0]) await api('POST', `/zones/${encodeURIComponent(nz.id)}/queue`, { track_ids: [two[0].id], replace: true, play: true }).catch(() => {});
+        let zs = null; { const end = Date.now() + 10000; for (;;) { zs = await api('GET', `/zones/${encodeURIComponent(nz.id)}`); if (zs.transport === 'playing' || Date.now() > end) break; await p.waitForTimeout(200); } }
+        // CI's Null output plays faster than real time, so a short song on repeat loops at once: pause it
+        // so the bar and Now playing stay on it (Play from here keeps a paused zone paused)
+        await api('POST', `/zones/${encodeURIComponent(nz.id)}/transport`, { action: 'pause' }).catch(() => {});
+        { const end = Date.now() + 10000; for (;;) { zs = await api('GET', `/zones/${encodeURIComponent(nz.id)}`); if (zs.transport === 'paused' || Date.now() > end) break; await p.waitForTimeout(200); } }
+        const curUri = zs.now_playing && zs.now_playing.item.uri; const curId = Number((/^track:(\d+)$/.exec(curUri || '') || [])[1]);
+        const other = two.find((t) => t.id !== curId);
+        if (curId && other) {
+          // the song page says the song is also another library file (stands in for TIDAL, Deezer…)
+          await p.route(new RegExp(`/v1/item/song/lib-${curId}$`), (r) => r.fulfill({ json: { kind: 'song', id: `lib-${curId}`, target: { track_id: curId }, source: 'Your library', section: 'albums', songs: [], albums: [], versions: [], about: [], open_on: [], also_on: [{ source: 'library', label: 'Your library: the other file', uri: `track:${other.id}`, url: '' }] } }));
+          let loadBody = null;
+          await p.route(/\/v1\/zones\/[^/]+\/load$/, (r) => { loadBody = JSON.parse(r.request().postData() || '{}'); return r.continue(); });
+          // the page learns the zone plays from the node's events: open Now playing once the bar shows
+          // the song (its cover button), not while it still says the earlier refusal
+          const shown = await p.waitForSelector('#np #npart', { timeout: 20000 }).then(() => true).catch(() => false);
+          check(shown, 'the bar shows the song the zone plays');
+          let sw = null;
+          if (shown) {
+            await p.click('#np #npart');
+            // Now playing draws itself again on zone updates: a locator finds the tab afresh each try
+            const opened = await p.locator('#nowplaying [data-npsheet="sources"]:visible').first().click({ timeout: 15000 }).then(() => true).catch(() => false);
+            if (opened) sw = await p.waitForSelector('[data-npswitch]', { timeout: 8000 }).catch(() => null);
+          }
+          check(!!sw && /Play from here/.test(await sw.textContent()), 'Sources: Play from here on another source of the playing song');
+          if (sw) {
+            await p.locator('[data-npswitch]').first().click({ timeout: 10000 });
+            const moved = await (async () => { const end = Date.now() + 10000; for (;;) { const z2 = await api('GET', `/zones/${encodeURIComponent(nz.id)}`); if (z2.now_playing && z2.now_playing.item.uri === `track:${other.id}`) return z2; if (Date.now() > end) return null; await p.waitForTimeout(250); } })();
+            check(!!moved && loadBody && loadBody.items[loadBody.index].uri === `track:${other.id}` && loadBody.items.length === zs.queue.length && loadBody.transport === 'paused', `the zone plays it from there, same place in the queue (${loadBody ? `${loadBody.index}/${loadBody.items.length} at ${loadBody.position_ms} ms` : 'no load'})`);
+          }
+          await p.unroute(new RegExp(`/v1/item/song/lib-${curId}$`)); await p.unroute(/\/v1\/zones\/[^/]+\/load$/);
+          await p.keyboard.press('Escape');
+          // Similar: the library's own (playable rows), then what people tagged alike on Pubky
+          await p.route(new RegExp(`/v1/item/song/lib-${curId}/extras$`), (r) => r.fulfill({ json: { related: [{ uri: 'https://musicbrainz.org/release/b1a9c0e9-d987-4042-ae91-78d6a3267d69', title: 'Tagged Alike', kind: 'album', also_on: [] }], concerts: [], similar: [{ kind: 'song', title: other.title, subtitle: (other.artists[0] || {}).name || '', id: `lib-${other.id}`, track_id: other.id, duration_ms: other.duration_ms, keys: [] }] } }));
+          await p.goto(BASE + `/song/lib-${curId}`); await p.waitForSelector('#isimilar', { timeout: 15000 }).catch(() => {});
+          const sim = await p.evaluate(() => { const s = document.querySelector('#isimilar'); return s && { head: s.querySelector('h3').textContent, parts: [...s.querySelectorAll('.simhead')].map((h) => h.textContent), rows: s.querySelectorAll('#isimlib .srow, #isimlib .track').length, play: !!s.querySelector('#isimlib [data-splay]'), tiles: s.querySelectorAll('#irelated .tile').length }; });
+          check(sim && sim.head === 'Similar' && sim.parts.join('|') === 'In your library|Tagged alike on Pubky' && sim.rows === 1 && sim.play && sim.tiles === 1, `one Similar section: your library's songs with Play, then Pubky's (${JSON.stringify(sim)})`);
+          await p.unroute(new RegExp(`/v1/item/song/lib-${curId}/extras$`));
+        } else check(false, `Play from here needs a playing library song and another one (${curUri})`);
+        await api('PUT', `/zones/${encodeURIComponent(nz.id)}/repeat`, { repeat: 'off' }).catch(() => {});
+      }
+      // A refused play from the transport: the wait ends at once with the node's words
+      await api('POST', `/zones/${encodeURIComponent(nz.id)}/queue`, { track_ids: [(await api('GET', '/library/tracks?limit=1')).tracks[0].id], replace: true, play: false });
+      await p.goto(BASE + '/tracks'); await p.waitForSelector('.track');
+      await p.click('#zonebtn'); await p.waitForSelector(`#zonepop:not([hidden]) [data-zone="${nz.id}"]`); await p.click(`#zonepop [data-zone="${nz.id}"]`);
+      await p.waitForTimeout(800);
+      await p.route(/\/v1\/zones\/[^/]+\/transport$/, (r) => r.fulfill({ status: 409, json: { error: 'the zone is busy' } }));
+      await p.click('#toggle'); await p.waitForTimeout(500);
+      const np2 = await p.textContent('#np');
+      check(!/Starting on/.test(np2) && /zone is busy/.test(np2), `a refused play ends the wait at once (${np2.trim().replace(/\s+/g, ' ')})`);
+      await p.unroute(/\/v1\/zones\/[^/]+\/transport$/);
+      // The DSP switches keep what was set: EQ's switched-off band, crossfeed's values
+      await api('PUT', `/zones/${encodeURIComponent(nz.id)}/dsp`, { dither: true, resample: true, dsd_mode: 'auto', loudness: 'off', eq: [{ kind: 'peaking', freq_hz: 100, gain_db: 2, q: 1, enabled: true }, { kind: 'peaking', freq_hz: 1000, gain_db: -2, q: 1, enabled: false }], crossfeed: { level_db: -9, cutoff_hz: 650, delay_us: 280, enabled: true } });
+      await p.click('#quality'); await p.waitForSelector('#qpanel:not([hidden]) [data-dsp="eq"]:not([disabled])');
+      const flip = async (k) => { await p.locator(`#qpanel [data-dsp="${k}"]`).click({ force: true }); await p.waitForSelector(`#qpanel [data-dsp="${k}"]:not([disabled])`); await p.waitForTimeout(200); };
+      await flip('eq'); await flip('eq');
+      const dsp = await api('GET', `/zones/${encodeURIComponent(nz.id)}/dsp`);
+      check(JSON.stringify(dsp.eq.map((b) => b.enabled)) === '[true,false]', `EQ off and on keeps the band that was off (${JSON.stringify(dsp.eq.map((b) => b.enabled))})`);
+      await flip('crossfeed');
+      const cf1 = (await api('GET', `/zones/${encodeURIComponent(nz.id)}/dsp`)).crossfeed;
+      await flip('crossfeed');
+      const cf2 = (await api('GET', `/zones/${encodeURIComponent(nz.id)}/dsp`)).crossfeed;
+      check(cf1 && cf1.enabled === false && cf1.level_db === -9 && cf2 && cf2.enabled === true && cf2.level_db === -9 && cf2.cutoff_hz === 650, `crossfeed off and on keeps its values (${JSON.stringify(cf1)} → ${JSON.stringify(cf2)})`);
+      check(await p.evaluate(() => document.activeElement && document.activeElement.dataset && document.activeElement.dataset.dsp === 'crossfeed'), 'the switch keeps the keyboard focus');
+      await p.click('#scrim');
+      // Move to… from the Queue page: a song this browser can't play is not moved into it
+      await p.route(/\/v1\/zones\/[^/?]+$/, (r) => (r.request().method() === 'GET' ? r.fulfill({ json: { id: nz.id, name: nz.name, output: nz.output, queue: [{ id: 1, uri: 'spotify:track:abc', title: 'Spot' }], queue_index: 0, now_playing: { index: 0, item: { id: 1, uri: 'spotify:track:abc', title: 'Spot' }, position_ms: 0 }, transport: 'paused' } }) : r.continue()));
+      await p.click('.nav-item[data-view="queue"]'); await p.waitForSelector('#qtransfer');
+      await p.click('#qtransfer'); await p.waitForSelector('.popover.menu:not([hidden]) .pop-item');
+      await p.locator('.popover.menu:not([hidden]) .pop-item', { hasText: 'This browser' }).click();
+      check(await visible(p, '.toast.error', 4000) && /plays on the node’s zones only/.test(await p.textContent('#toast')), 'a song this browser can’t play is not moved into it (the zone keeps it)');
+      await p.unroute(/\/v1\/zones\/[^/?]+$/);
+      // and out of This browser, Move to… says “Moving to …” at once
+      await p.click('#zonebtn'); await p.waitForSelector('#zonepop:not([hidden]) [data-zone="browser"]'); await p.click('#zonepop [data-zone="browser"]');
+      await p.click('.nav-item[data-view="tracks"]'); await p.waitForSelector('.track'); await p.hover('.track'); await p.click('.track [data-act="play"]'); await p.waitForTimeout(800);
+      await p.evaluate(() => document.querySelector('audio').pause());
+      await p.route(/\/v1\/zones\/[^/]+\/load$/, async (r) => { await new Promise((res) => setTimeout(res, 1500)); return r.fulfill({ status: 409, json: { error: 'not now' } }); });
+      await p.click('.nav-item[data-view="queue"]'); await p.waitForSelector('#qtransfer');
+      await p.click('#qtransfer'); await p.waitForSelector('.popover.menu:not([hidden]) .pop-item');
+      await p.locator('.popover.menu:not([hidden]) .pop-item', { hasText: nz.name }).first().click();
+      await p.waitForTimeout(150);
+      check(/Moving to/.test(await p.textContent('#toast')), `Move to… says “Moving to …” at once (${(await p.textContent('#toast')).trim()})`);
+      await p.waitForTimeout(1800);
+      await p.unroute(/\/v1\/zones\/[^/]+\/load$/);
       await c.close();
       await api('DELETE', `/zones/${encodeURIComponent(nz.id)}/queue`).catch(() => {});
       await api('DELETE', `/zones/${encodeURIComponent(nz.id)}/dsp`).catch(() => {});
+      await api('PUT', '/node/settings', { dev_outputs: !!devBefore }).catch(() => {});
+    }
+    // ---- Your library ----
+    c = await ctx(); p = await c.newPage();
+    const choose = async (label) => { await p.waitForSelector('dialog[open] .choice'); await p.locator('dialog[open] .choice', { hasText: label }).first().click(); };
+    // The owner: three tabs; without a Pubky session (CI's node) My music says to sign in
+    await p.goto(BASE + '/library'); await p.waitForSelector('#libadd');
+    const libTabs = await p.$$eval('#main [data-libtab]', (els) => els.map((e) => e.textContent.trim()));
+    check(JSON.stringify(libTabs) === '["My music","Node library","Import"]', `the owner's tabs (${libTabs.join(', ')})`);
+    check(/Sign in with Pubky/.test(await p.textContent('#main')), 'without a Pubky session My music asks to sign in');
+    check(await p.locator('.nav-item[data-view="library"]').count() === 1, 'Your library is in the main navigation');
+    await p.goto(BASE + '/settings'); await p.waitForSelector('#main .set-group', { state: 'attached' });
+    const setNav = await p.textContent('#main');
+    check(!/Library folders/.test(setNav) && !/Move from Roon/.test(setNav), 'Settings keeps settings: no library folders, no import');
+    // My music with a session (mocked): songs by name, the save status, Save now, the ⋯ menu
+    const libTracks = (await api('GET', '/library/tracks?limit=5')).tracks;
+    const lt0 = libTracks[0];
+    await p.route(/\/v1\/pubky$/, (r) => r.fulfill({ json: { user: 'k'.repeat(52), sync: null, needs_resign: false } }));
+    await p.route(/\/v1\/storage$/, (r) => r.fulfill({ json: { homeserver: { mode: 'bundled', quota_mb: 1000, used_bytes: 8300000 }, saving: { state: 'saved', pending: 0, last_saved_at: Math.floor(Date.now() / 1000) - 120 } } }));
+    const HASHED = '0123456789abcdef-one.flac';
+    await p.route(/\/v1\/me\/music$/, (r) => r.fulfill({ json: { count: 2, bytes: 8300100, files: [
+      { path: `/priv/pubky.music/files/${HASHED}`, name: 'one.flac', size: 8300000, song: { id: lt0.id, title: lt0.title, artist: 'The Band', duration_ms: 5000, edited: false } },
+      { path: '/priv/pubky.music/files/fedcba9876543210-new.flac', name: 'new.flac', size: 100 },
+    ] } }));
+    let deleted = null;
+    await p.route(/\/v1\/pubky\/files$/, (r) => { if (r.request().method() !== 'DELETE') return r.continue(); deleted = r.request().postDataJSON(); return r.fulfill({ json: [] }); });
+    await p.goto(BASE + '/library'); await p.waitForSelector('#main .mrow');
+    const mineText = await p.textContent('#main');
+    check(mineText.includes(lt0.title) && !mineText.includes(HASHED), 'a homeserver file shows as its song, not its hashed name');
+    check(/Being added/.test(mineText) && mineText.includes('new.flac'), 'a file the library hasn’t read yet shows by its own name');
+    check(/Saved · 2 min ago/.test(await p.textContent('#libsaved')) && (await p.textContent('#sync')).trim() === 'Save now', 'the save status in a few words, with Save now');
+    await p.click('#main [data-mmore]');
+    const mItems = await p.$$eval('.popover.menu:not([hidden]) .pop-item', (els) => els.map((e) => e.textContent.trim()));
+    check(['Edit tags…', 'Download', 'Delete from my homeserver'].every((x) => mItems.includes(x)), `a song’s ⋯: edit, download, delete (${mItems.join(', ')})`);
+    // Edit tags: on the node, the file untouched; then back to the file's tags
+    await p.locator('.popover.menu:not([hidden]) .pop-item', { hasText: 'Edit tags…' }).click();
+    await p.waitForSelector('dialog[open] [data-k="title"]');
+    check(await p.inputValue('dialog[open] [data-k="title"]') === '' && await p.getAttribute('dialog[open] [data-k="title"]', 'placeholder') === lt0.title, 'the edit dialog shows what the file says (an empty field keeps it)');
+    await p.fill('dialog[open] [data-k="title"]', 'Edited by ui-setup'); await p.click('dialog[open] [data-save]');
+    await p.waitForTimeout(600);
+    check((await api('GET', `/library/tracks/${lt0.id}`)).title === 'Edited by ui-setup', 'Save edits the song on the node');
+    const ed = await api('GET', `/library/tracks/${lt0.id}/edit`);
+    check(ed.edit && ed.edit.title === 'Edited by ui-setup' && !ed.edit.artist && !ed.edit.album, `only the changed field is pinned (${JSON.stringify(ed.edit)})`);
+    await api('DELETE', `/library/tracks/${lt0.id}/edit`);
+    check((await api('GET', `/library/tracks/${lt0.id}`)).title === lt0.title, 'and it goes back to the file’s tags');
+    // Delete a file from the homeserver, after asking
+    await p.goto(BASE + '/library'); await p.waitForSelector('#main [data-mdel]');
+    await p.click('#main [data-mdel]'); await choose('Delete'); await p.waitForTimeout(400);
+    check(deleted && JSON.stringify(deleted.paths) === JSON.stringify(['/priv/pubky.music/files/fedcba9876543210-new.flac']), `Delete removes that file from the homeserver (${JSON.stringify(deleted)})`);
+    // Add music: three ways in; Upload opens the drop zone, Import its tab, a folder is checked
+    await p.click('#libadd');
+    await p.waitForSelector('dialog[open] .choice');
+    const ways = await p.$$eval('dialog[open] .choice .choice-label', (els) => els.map((e) => e.textContent.trim()));
+    check(JSON.stringify(ways) === '["Upload files","Add a folder or network share","Import playlists"]', `Add music: ${ways.join(', ')}`);
+    await choose('Upload files');
+    check(await visible(p, '#libupload #updrop'), 'Upload files opens the drop zone');
+    await p.click('#libadd'); await choose('Add a folder or network share'); await choose('A folder on the node');
+    await p.waitForSelector('dialog[open] [data-field]'); await p.fill('dialog[open] [data-field]', '/no/such/folder/ui-setup'); await choose('Add folder');
+    check(await visible(p, '.toast.error'), 'a folder that isn’t there is refused before it is saved');
+    await p.click('#libadd'); await choose('Import playlists');
+    check(await p.locator('#libplimport').waitFor({ state: 'attached', timeout: 8000 }).then(() => true).catch(() => false) && new URL(p.url()).pathname === '/library/import' && /Move from Roon/.test(await p.textContent('#main')), 'Import playlists opens Your library › Import (playlist files, Move from Roon)');
+    await p.unroute(/\/v1\/pubky$/); await p.unroute(/\/v1\/storage$/); await p.unroute(/\/v1\/me\/music$/); await p.unroute(/\/v1\/pubky\/files$/);
+    // Node library: a song taken out from its ⋯ menu, then brought back
+    const before = (await api('GET', '/library/tracks?limit=50')).tracks.length;
+    await p.goto(BASE + '/tracks'); await p.waitForSelector('.track'); await p.hover('.track'); await p.click('.track [data-act="more"]');
+    await p.waitForSelector('.popover.menu:not([hidden]) .pop-item');
+    await p.locator('.popover.menu:not([hidden]) .pop-item', { hasText: 'Remove from library' }).click();
+    await choose('Remove'); await p.waitForTimeout(600);
+    check((await api('GET', '/library/tracks?limit=50')).tracks.length === before - 1, 'Remove from library takes the song out');
+    await p.goto(BASE + '/library/node'); await p.waitForSelector('#main [data-unhide]');
+    check(/Taken out of the library/.test(await p.textContent('#main')), 'Node library lists it as taken out');
+    await p.click('#main [data-unhide]');
+    const backN = await (async () => { const end = Date.now() + 20000; for (;;) { const n = (await api('GET', '/library/tracks?limit=50')).tracks.length; if (n === before || Date.now() > end) return n; await p.waitForTimeout(300); } })();
+    check(backN === before, `Bring back returns it (${backN} of ${before})`);
+    await c.close();
+    // A listener: My music only, no edit controls
+    c = await ctx(); p = await c.newPage();
+    await p.route(/\/v1\/me$/, async (r) => { const res = await r.fetch(); const j = await res.json(); return r.fulfill({ json: { ...j, role: 'listener', zones: null } }); });
+    await p.goto(BASE + '/library'); await p.waitForSelector('#main [data-libtab]');
+    check(JSON.stringify(await p.$$eval('#main [data-libtab]', (els) => els.map((e) => e.textContent.trim()))) === '["My music"]' && !(await p.$('#libadd')), 'a listener gets My music only, without Add music');
+    await p.goto(BASE + '/tracks'); await p.waitForSelector('.track'); await p.hover('.track'); await p.click('.track [data-act="more"]');
+    await p.waitForSelector('.popover.menu:not([hidden]) .pop-item');
+    const lItems = await p.$$eval('.popover.menu:not([hidden]) .pop-item', (els) => els.map((e) => e.textContent.trim()));
+    check(lItems.includes('Play next') && !lItems.includes('Edit tags…') && !lItems.includes('Remove from library'), `no edit controls for a listener (${lItems.join(', ')})`);
+    await c.close();
+    // ---- Search: groups, facets, tag:, keyboard ----
+    // A mocked /v1/search stream (the real sources are pm-api's tests): the page groups, narrows
+    // by facets, sends tag: as the node expects, and walks the results from the keyboard.
+    c = await ctx(); p = await c.newPage();
+    const KEY = 'k'.repeat(52);
+    const ndjson = (lines) => lines.map((l) => JSON.stringify(l)).join('\n') + '\n';
+    const seen = [];
+    await p.route(/\/v1\/search\?/, (r) => {
+      const u = new URL(r.request().url()); seen.push(u.searchParams.get('q'));
+      const body = ndjson([
+        { source: 'library', status: 'ok', ms: 3, hits: [
+          { kind: 'song', title: 'Old Song', subtitle: 'Band', id: 'lib-5', track_id: 5, year: 1999, format: 'FLAC 16/44.1', quality: 'lossless', keys: [] },
+          { kind: 'song', title: 'New Song', subtitle: 'Band', id: 'lib-6', track_id: 6, year: 2015, format: 'MP3', quality: 'lossy', keys: [] },
+          { kind: 'album', title: 'Old Album', subtitle: 'Band', id: 'lib-1', year: 1999, keys: [] },
+          { kind: 'playlist', title: 'Saturday chill', subtitle: '3 songs · your playlist', id: 'pl1', keys: [] }] },
+        { source: 'pubky', status: 'ok', ms: 40, hits: [{ kind: 'song', title: 'Shared Song', subtitle: 'Someone', id: 'tidal-9', uri: 'tidal:track:9', page: 'https://tidal.com/track/9', site: 'tidal.com', year: 2015, keys: [] }] },
+        { source: 'people', status: 'ok', ms: 50, hits: [{ kind: 'person', title: 'Sat', subtitle: 'plays bass', id: KEY, page: `https://pubky.app/profile/${KEY}`, keys: [] }] },
+        { source: 'posts', status: 'ok', ms: 60, hits: [{ kind: 'post', title: 'Great music tonight', subtitle: 'Author One', id: 'post-a:1', page: 'https://pubky.app/post/a/1', keys: [] }] },
+      ]);
+      return r.fulfill({ status: 200, headers: { 'content-type': 'application/x-ndjson', 'x-pm-sources': 'library,pubky,people,posts' }, body });
+    });
+    await p.route(/\/v1\/search\/tags\?/, (r) => r.fulfill({ json: { mine: [], others: [] } }));
+    await p.goto(BASE + '/'); await p.waitForSelector('#search');
+    await p.fill('#search', 'sat'); await p.press('#search', 'Enter');
+    await p.waitForSelector('#sresults [data-skind="post"]');
+    const heads = await p.$$eval('#sresults .section h3', (els) => els.map((e) => e.textContent.trim()));
+    check(['Albums', 'Songs', 'Playlists', 'People', 'Posts'].every((h) => heads.includes(h)), `results come grouped (${heads.join(', ')})`);
+    check((await p.locator('#sresults [data-skind="person"] .list-row').count()) === 1 && (await p.locator('#sresults [data-skind="playlist"] .list-row').count()) === 1, 'a person and your playlist are rows of their own');
+    const facetText = await p.textContent('#sresults .facets');
+    check(/Quality/.test(facetText) && /Lossless/.test(facetText) && /Years/.test(facetText) && /1990s/.test(facetText) && /2010s/.test(facetText), `facets are counted from the results (${facetText.replace(/\s+/g, ' ').trim().slice(0, 120)})`);
+    check((await p.locator('#sresults .facets [data-facet^="service:pubky"]').count()) === 1 && (await p.locator('#sresults .facets [data-facet="service:people"], #sresults .facets [data-facet="service:posts"]').count()) === 0, 'people and posts count as Pubky: one Source chip for the three');
+    await p.click('#sresults [data-facet="decade:2010s"]'); await p.waitForTimeout(200);
+    const songsNow = await p.$$eval('#sresults [data-skind="song"] .srow .name', (els) => els.map((e) => e.textContent.trim()));
+    check(songsNow.includes('New Song') && songsNow.includes('Shared Song') && !songsNow.includes('Old Song') && (await p.locator('#sresults [data-skind="album"]').count()) === 0, `a facet narrows every group (${songsNow.join(', ')})`);
+    await p.click('#sresults [data-facet=""]'); await p.waitForTimeout(200);
+    check((await p.$$eval('#sresults [data-skind="song"] .srow', (els) => els.length)) === 3, 'Clear brings them all back');
+    check(await p.evaluate(() => !!document.activeElement && document.activeElement.matches('#sresults [data-facet]')), 'a facet chip keeps the keyboard focus across the re-render');
+    check(await p.evaluate(() => { const s = document.querySelector('#search'); return s.getAttribute('role') === 'combobox' && s.getAttribute('aria-controls') === 'sresults' && s.getAttribute('aria-expanded') === 'true'; }), 'the search box is a combobox over the results');
+    // the keyboard: ↓ ↓ walk the results, the box says where it is, Enter opens the person's page
+    await p.focus('#search');
+    await p.keyboard.press('ArrowDown'); await p.keyboard.press('ArrowDown');
+    const k = await p.evaluate(() => { const el = document.querySelector('#sresults .kfocus'); return { has: !!el, id: el && el.id, active: document.querySelector('#search').getAttribute('aria-activedescendant'), focusStays: document.activeElement && document.activeElement.id === 'search' }; });
+    check(k.has && k.id && k.active === k.id && k.focusStays, `↓ walks the results while the box keeps focus (${k.id})`);
+    check(/\(2 of \d+\)/.test(await p.textContent('#sresults-said')), 'the active row is said politely');
+    // typing drops the position: Enter then searches the new words, not the old row
+    await p.keyboard.type('u');
+    check(await p.evaluate(() => !document.querySelector('#search').hasAttribute('aria-activedescendant') && !document.querySelector('#sresults .kfocus')), 'typing drops the highlighted row');
+    await p.keyboard.press('Backspace'); await p.waitForTimeout(400);
+    await p.keyboard.press('ArrowDown'); await p.keyboard.press('ArrowDown');
+    const n = await p.$$eval('#sresults .srow, #sresults .tile, #sresults [data-sother], #sresults .toprow', (els) => els.findIndex((e) => e.classList.contains('kfocus')));
+    const total = await p.$$eval('#sresults .srow, #sresults .tile, #sresults [data-sother], #sresults .toprow', (els) => els.length);
+    const personAt = await p.$$eval('#sresults .srow, #sresults .tile, #sresults [data-sother], #sresults .toprow', (els) => els.findIndex((e) => (e.dataset.sother || '').startsWith('person:')));
+    for (let i = n; i < personAt; i++) await p.keyboard.press('ArrowDown');
+    await p.keyboard.press('Enter');
+    const path = await (async () => { const end = Date.now() + 5000; for (;;) { const v = await p.evaluate(() => location.pathname); if (v.startsWith('/person/')) return v; if (Date.now() > end) return v; await p.waitForTimeout(100); } })();
+    check(path === `/person/${KEY}`, `Enter opens the row in focus (${path}; ${total} results)`);
+    // tag: goes to the node as it is (the node reads it like #)
+    await p.goto(BASE + '/'); await p.waitForSelector('#search');
+    await p.fill('#search', 'tag:chill'); await p.press('#search', 'Enter'); await p.waitForSelector('#sresults [data-skind="song"]');
+    check(seen.includes('tag:chill'), `tag:chill is sent as typed (${seen.join(' | ')})`);
+    await p.unroute(/\/v1\/search\?/); await p.unroute(/\/v1\/search\/tags\?/);
+    await c.close();
+
+    // ---- About comes in the background: only About and the portrait are redrawn ----
+    c = await ctx(); p = await c.newPage();
+    let asked = 0;
+    const later = { ...credited, id: 'lib-778', target: { artist_id: 778 }, title: 'Pending Test', blurb: null, about_text: null, image_credit: null, about_pending: true };
+    await p.route(/\/v1\/item\/artist\/lib-778(\?.*)?$/, (r) => { asked++; return r.fulfill({ json: asked < 2 ? later : { ...later, about_pending: false, blurb: 'Pending Test is a band.', about_text: { text: 'Pending Test is a band.', source: 'Wikipedia', url: 'https://en.wikipedia.org/wiki/Pending_Test', lang: 'en', licence: 'CC BY-SA 4.0', licence_url: 'https://creativecommons.org/licenses/by-sa/4.0/' } } }); });
+    await p.goto(BASE + '/artist/lib-778');
+    check(await visible(p, '#main .hero'), 'the pending page shows');
+    await p.evaluate(() => { document.querySelector('#main .hero').dataset.mark = 'same'; });
+    check(await visible(p, '#iabout .blurb', 9000), 'About arrives by itself');
+    check(await p.evaluate(() => document.querySelector('#main .hero')?.dataset.mark === 'same'), 'without drawing the page again');
+    check(await p.evaluate(() => { const b = document.querySelector('#iblurbmore'); return !!document.querySelector('#iblurb.clamp') && !!b && typeof b.onclick === 'function'; }), 'the article that arrived is clamped, with its More button working');
+    check(asked === 2, `the page is asked again once About is due (asked ${asked} times, want 2)`);
+    await c.close();
+
+    // ---- Home: Listening now (L3) ----
+    if (nz) {
+      await api('PUT', '/node/settings', { dev_outputs: true });
+      c = await ctx(); p = await c.newPage();
+      const K = (ch) => ch.repeat(52);
+      const PRES = [
+        { key: 'owner', you: true, mine: false, playing: true, title: 'My own song', zone: { id: nz.id, name: nz.name }, can_join: false, along: [] },
+        { key: K('a'), name: 'Alice', you: false, mine: false, playing: true, title: 'Night Drive', artist: 'Synth Band', zone: { id: 'z-alice', name: 'Kitchen' }, can_join: true, along: [] },
+        { key: K('b'), name: 'Bob', you: false, mine: false, playing: true, title: 'Hidden Song', zone: null, can_join: false, along: [] },
+        { key: K('c'), name: 'Carol', you: false, mine: true, your_zone: nz.id, playing: true, title: 'Together', zone: { id: 'z-carol', name: 'Living room' }, can_join: true, along: [] },
+      ];
+      await p.route(/\/v1\/presence$/, (r) => r.fulfill({ json: PRES }));
+      await p.route(/\/v1\/me\/presence$/, (r) => r.fulfill({ json: { visible: 'hidden' } }));
+      let alongBody = null; let alongStatus = 409;
+      // the node answers with the new group zone: their music, your speakers with theirs
+      const GROUP = { ...nz, id: `group:${nz.output}+alice`, name: 'Kitchen + Null output', output: `group:${nz.output}+alice` };
+      await p.route(/\/v1\/presence\/along$/, (r) => { alongBody = JSON.parse(r.request().postData() || '{}'); if (alongStatus !== 200) return r.fulfill({ status: alongStatus, json: { error: 'someone else is listening on that zone: listen along from yours' } }); PRES[1] = { ...PRES[1], mine: true, your_zone: nz.id }; return r.fulfill({ json: GROUP }); });
+      await p.goto(BASE + '/'); await p.waitForSelector('#h-listening .list-row', { timeout: 15000 }).catch(() => {});
+      const rows = await p.$$eval('#h-listening .list-row', (els) => els.map((e) => ({ name: e.querySelector('.name').textContent.replace(/\s+/g, ' ').trim(), sub: (e.querySelector('.sub') || {}).textContent || '', join: !!e.querySelector('[data-alongjoin]'), pill: (e.querySelector('.pill') || {}).textContent || '' })));
+      check(rows.length === 3 && !rows.some((r) => /My own song/.test(r.name)), `Listening now lists the others, not you (${rows.length})`);
+      check(rows[0] && /^Alice is listening to Night Drive · Synth Band$/.test(rows[0].name) && rows[0].sub === 'on Kitchen' && rows[0].join, `who, what and where, with Listen along (${rows[0] && rows[0].name} / ${rows[0] && rows[0].sub})`);
+      check(rows[1] && /^Bob is listening/.test(rows[1].name) && !rows[1].sub && !rows[1].join, 'a zone not open to you: who, without a place or a button');
+      check(rows[2] && rows[2].pill === 'Listening along' && !rows[2].join, 'the one you listen along with says so');
+      // This browser can't join a group: Listen along asks which of your zones
+      await p.click('[data-alongjoin="0"]'); await p.waitForSelector('.popover.menu:not([hidden]) [data-mi]', { timeout: 5000 }).catch(() => {});
+      const menuText = await p.evaluate(() => (document.querySelector('.popover.menu:not([hidden])') || {}).textContent || '');
+      check(/Listen from/.test(menuText) && menuText.includes(nz.name), `from This browser it asks which speakers listen along (${menuText.replace(/\s+/g, ' ').slice(0, 80)})`);
+      await p.locator('.popover.menu:not([hidden]) [data-mi]', { hasText: nz.name }).first().click();
+      const refusal = await (async () => { const end = Date.now() + 8000; for (;;) { const v = await p.textContent('#toast').catch(() => ''); if (/listen along from yours/i.test(v || '')) return v; if (Date.now() > end) return v; await p.waitForTimeout(150); } })();
+      check(/someone else is listening on that zone/i.test(refusal || ''), `a refusal in the node's words (409: ${refusal})`);
+      check(alongBody && alongBody.key === K('a') && alongBody.zone === nz.id, `the request names them and your zone (${JSON.stringify(alongBody && { zone: alongBody.zone })})`);
+      check(await p.evaluate(() => { const b = document.querySelector('[data-alongjoin="0"]'); return !!b && !b.disabled && /Listen along with Alice/.test(b.getAttribute('aria-label')); }), 'after a refusal the button is back, named again');
+      // and now it works: the page switches to the group and the row says you listen along
+      alongStatus = 200;
+      await p.click('[data-alongjoin="0"]'); await p.locator('.popover.menu:not([hidden]) [data-mi]', { hasText: nz.name }).first().click();
+      const ok = await (async () => { const end = Date.now() + 8000; for (;;) { const v = await p.textContent('#toast').catch(() => ''); if (/Listening along with Alice/.test(v || '')) return true; if (Date.now() > end) return false; await p.waitForTimeout(150); } })();
+      check(ok && (await p.textContent('#zonename')).trim() === GROUP.name, `joined: a toast and the group zone in use (${(await p.textContent('#zonename')).trim()})`);
+      check(await waitText(p, '#h-listening .list-row:first-child .pill', 'Listening along'), 'the row says you listen along now');
+      await p.unroute(/\/v1\/presence$/); await p.unroute(/\/v1\/me\/presence$/); await p.unroute(/\/v1\/presence\/along$/);
+      await c.close();
       await api('PUT', '/node/settings', { dev_outputs: !!devBefore }).catch(() => {});
     }
 
@@ -309,7 +653,7 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
     await p.goto(BASE + '/');
     await p.waitForSelector('#login[open]');
     const hint = await p.textContent('#login details');
-    check(/api-token/.test(hint) && /PM_TOKEN/.test(hint) && /Umbrel/.test(hint), 'the login dialog says where the token is');
+    check(/api-token/.test(hint) && /PM_TOKEN/.test(hint), 'the login dialog says where the token is');
     check(await p.locator('#login a[href*="troubleshooting.md"]').count() === 1, 'and links the guide');
     await c.close();
   } finally {

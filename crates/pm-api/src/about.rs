@@ -8,9 +8,9 @@
 //!
 //! Every Wikimedia request carries the node's User-Agent (with its contact) and waits its turn
 //! at the node's Wikimedia pace (200 a minute at most); MusicBrainz goes through the shared gate.
-//! Answers are cached in the library settings per item and language: 30 days when something was
-//! found, a day when not. Albums and songs are fetched on the page's first view, which waits a
-//! few seconds for them and then shows the page without; the fetch goes on and is cached.
+//! Answers are cached in the library settings per MusicBrainz id and language: 30 days when
+//! something was found, a day when not. A page never waits for them: it shows what is cached,
+//! starts the fetch and says `about_pending`, and the web page asks again a few seconds later.
 
 use crate::state::NodeState;
 use crate::types::{AboutText, Fact, ImageCredit, Version};
@@ -23,11 +23,18 @@ pub(crate) const MISS_TTL_SECS: i64 = 24 * 3600;
 /// Wikipedia's text licence.
 const WIKIPEDIA_LICENCE: &str = "CC BY-SA 4.0";
 const WIKIPEDIA_LICENCE_URL: &str = "https://creativecommons.org/licenses/by-sa/4.0/";
-/// How long an album or song page waits for its first fetch.
-const PAGE_WAIT: Duration = Duration::from_secs(6);
+/// The Wikipedias a page is shown in (the larger ones); any other language reads English, so a
+/// client can't fill the cache with made-up codes.
+const LANGUAGES: &[&str] = &[
+    "af", "ar", "az", "be", "bg", "bn", "bs", "ca", "cs", "cy", "da", "de", "el", "en", "eo", "es", "et",
+    "eu", "fa", "fi", "fr", "ga", "gl", "he", "hi", "hr", "hu", "hy", "id", "is", "it", "ja", "ka", "kk",
+    "ko", "la", "lt", "lv", "mk", "ms", "nl", "nn", "no", "pl", "pt", "ro", "ru", "sh", "sk", "sl", "sq",
+    "sr", "sv", "ta", "th", "tr", "uk", "ur", "uz", "vi", "zh",
+];
 
 /// The reader's language for Wikipedia: `?lang=` (the browser's), else the first of
-/// Accept-Language; a bare code (`de`, `pt`, `zh`), English otherwise.
+/// Accept-Language; a bare code of a Wikipedia in [`LANGUAGES`] (`de`, `pt`, `zh`), English
+/// otherwise.
 pub(crate) fn language(query: Option<&str>, headers: &axum::http::HeaderMap) -> String {
     let header = headers
         .get(axum::http::header::ACCEPT_LANGUAGE)
@@ -38,7 +45,9 @@ pub(crate) fn language(query: Option<&str>, headers: &axum::http::HeaderMap) -> 
         .chain(header)
         .filter_map(|l| {
             let code = l.trim().split(['-', '_', ';']).next()?.to_ascii_lowercase();
-            ((2..=3).contains(&code.len()) && code.bytes().all(|b| b.is_ascii_lowercase())).then_some(code)
+            // Norwegian Bokmål's Wikipedia is `no`
+            let code = if code == "nb" { "no".to_string() } else { code };
+            LANGUAGES.contains(&code.as_str()).then_some(code)
         })
         .next()
         .unwrap_or_else(|| "en".into())
@@ -85,6 +94,31 @@ pub(crate) async fn get_json(s: &NodeState, url: &str) -> Option<Value> {
         return None;
     }
     resp.json().await.ok()
+}
+
+/// `%XX` in a URL path, decoded (`+` stays `+`: a path is not a form).
+pub(crate) fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        let hex = (b[i] == b'%')
+            .then(|| b.get(i + 1..i + 3))
+            .flatten()
+            .and_then(|h| std::str::from_utf8(h).ok())
+            .and_then(|h| u8::from_str_radix(h, 16).ok());
+        match hex {
+            Some(v) => {
+                out.push(v);
+                i += 3;
+            }
+            None => {
+                out.push(b[i]);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 pub(crate) fn urlencode(s: &str) -> String {
@@ -159,8 +193,9 @@ pub(crate) fn relations(v: &Value) -> Relations {
                     .next()
                     .unwrap_or("")
                     .to_string();
-                if let Some(title) = u.path().strip_prefix("/wiki/") {
-                    r.wikipedia.push((lang, title.to_string()));
+                // The path is encoded; the title is kept as text (encoded once when asked)
+                if let Some(title) = u.path().strip_prefix("/wiki/").map(percent_decode) {
+                    r.wikipedia.push((lang, title.replace(' ', "_")));
                 }
             }
             continue;
@@ -222,15 +257,32 @@ pub(crate) async fn entity(s: &NodeState, q: &str) -> Option<Value> {
     Some(v["entities"][q].clone())
 }
 
-/// The article to show: the reader's language, else English; from MusicBrainz's direct links
-/// first, then the item's sitelinks.
-pub(crate) fn article(lang: &str, rels: &Relations, ent: Option<&Value>) -> Option<(String, String)> {
+/// The articles to try, best first: the reader's language, then English; in each, MusicBrainz's
+/// direct link, then the item's sitelink. The next is tried when one has no summary.
+pub(crate) fn articles(lang: &str, rels: &Relations, ent: Option<&Value>) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
     for want in [lang, "en"] {
-        if let Some((l, t)) = rels.wikipedia.iter().find(|(l, _)| l == want) {
-            return Some((l.clone(), t.clone()));
+        let direct = rels.wikipedia.iter().find(|(l, _)| l == want).cloned();
+        let site = ent
+            .and_then(|e| e["sitelinks"][format!("{want}wiki")]["title"].as_str())
+            .map(|t| (want.to_string(), t.replace(' ', "_")));
+        for a in direct.into_iter().chain(site) {
+            if !out.contains(&a) {
+                out.push(a);
+            }
         }
-        if let Some(t) = ent.and_then(|e| e["sitelinks"][format!("{want}wiki")]["title"].as_str()) {
-            return Some((want.to_string(), t.replace(' ', "_")));
+    }
+    out
+}
+
+/// The first of `candidates` (see [`articles`]) Wikipedia has a summary of.
+pub(crate) async fn first_summary(
+    s: &NodeState,
+    candidates: &[(String, String)],
+) -> Option<(AboutText, Option<String>)> {
+    for (lang, title) in candidates {
+        if let Some(found) = summary(s, lang, title).await {
+            return Some(found);
         }
     }
     None
@@ -287,9 +339,12 @@ fn items(ent: &Value, prop: &str) -> Vec<String> {
 /// The year of a property's first time value.
 fn year(ent: &Value, prop: &str) -> Option<i32> {
     let t = ent["claims"][prop][0]["mainsnak"]["datavalue"]["value"]["time"].as_str()?;
-    let (sign, rest) = t.split_at(1);
+    let (bc, rest) = match t.strip_prefix('-') {
+        Some(r) => (true, r),
+        None => (false, t.strip_prefix('+').unwrap_or(t)),
+    };
     let y: i32 = rest.split('-').next()?.parse().ok()?;
-    Some(if sign == "-" { -y } else { y })
+    Some(if bc { -y } else { y })
 }
 
 /// Labels for items in `lang` (English where it has none), one request for up to 50.
@@ -446,32 +501,40 @@ struct Cached {
     about: About,
 }
 
-/// An item's About from cache, else fetched (`fetch`) and cached; the page waits
-/// [`PAGE_WAIT`] at most and the fetch goes on after that.
-async fn cached<F>(s: &std::sync::Arc<NodeState>, key: String, fetch: F) -> Option<About>
+/// What a page shows now: the cached About (an expired one while it is fetched again) and
+/// whether a fetch is running, which the page then asks again for.
+pub(crate) type Now = (Option<About>, bool);
+
+/// An item's About from cache; when there is none, or it expired, `fetch` runs in the
+/// background and is cached. Never waits on it.
+fn cached<F>(s: &std::sync::Arc<NodeState>, key: String, fetch: F) -> Now
 where
     F: std::future::Future<Output = About> + Send + 'static,
 {
-    {
-        let lib = s.library.lock().expect("library poisoned");
-        if let Some(c) = lib
-            .get_setting(&key)
-            .ok()
-            .flatten()
-            .and_then(|j| serde_json::from_str::<Cached>(&j).ok())
-        {
-            let found = c.about.text.is_some() || !c.about.facts.is_empty() || !c.about.links.is_empty();
-            let ttl = if found { HIT_TTL_SECS } else { MISS_TTL_SECS };
-            if pm_library::db::now_unix() - c.at < ttl {
-                return Some(c.about);
-            }
+    let old = s
+        .library
+        .lock()
+        .expect("library poisoned")
+        .get_setting(&key)
+        .ok()
+        .flatten()
+        .and_then(|j| serde_json::from_str::<Cached>(&j).ok());
+    if let Some(c) = &old {
+        let found = c.about.text.is_some() || !c.about.facts.is_empty() || !c.about.links.is_empty();
+        let ttl = if found { HIT_TTL_SECS } else { MISS_TTL_SECS };
+        if pm_library::db::now_unix() - c.at < ttl {
+            return (Some(c.about.clone()), false);
         }
     }
+    let old = old.map(|c| c.about);
     if !in_flight().lock().expect("in-flight").insert(key.clone()) {
-        return None;
+        return (old, true);
     }
     let st = s.clone();
-    let task = tokio::spawn(async move {
+    tokio::spawn(async move {
+        // Out of the in-flight set however the fetch ends, a panic too: else the item would say
+        // "coming" until the node restarts
+        let _done = InFlight(key.clone());
         let about = fetch.await;
         let c = Cached {
             at: pm_library::db::now_unix(),
@@ -482,10 +545,20 @@ where
             .lock()
             .expect("library poisoned")
             .set_setting(&key, &serde_json::to_string(&c).expect("about serializes"));
-        in_flight().lock().expect("in-flight").remove(&key);
-        about
     });
-    tokio::time::timeout(PAGE_WAIT, task).await.ok()?.ok()
+    (old, true)
+}
+
+/// Takes a key out of the in-flight set when dropped.
+struct InFlight(String);
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        in_flight()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&self.0);
+    }
 }
 
 fn in_flight() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
@@ -500,25 +573,27 @@ async fn text_for(s: &NodeState, rels: &Relations, lang: &str) -> (Option<AboutT
         Some(q) => entity(s, q).await,
         None => None,
     };
-    let text = match article(lang, rels, ent.as_ref()) {
-        Some((l, t)) => summary(s, &l, &t).await.map(|(text, _)| text),
-        None => None,
-    };
+    let text = first_summary(s, &articles(lang, rels, ent.as_ref()))
+        .await
+        .map(|(text, _)| text);
     (text, ent)
 }
 
 /// An album's About by its release group (and a tagged release, which carries the label and
 /// most streaming links): the Wikipedia article if the group has one, label and release date.
-pub(crate) async fn album(
+pub(crate) fn album(
     s: &std::sync::Arc<NodeState>,
-    album_id: i64,
     group: pm_model::Mbid,
     release: Option<pm_model::Mbid>,
     lang: &str,
-) -> Option<About> {
+) -> Now {
     let st = s.clone();
     let lang_owned = lang.to_string();
-    cached(s, format!("album.about.{album_id}.{lang}"), async move {
+    let key = format!(
+        "album.about.{group}.{}.{lang}",
+        release.map(|r| r.to_string()).unwrap_or_default()
+    );
+    cached(s, key, async move {
         let s = &st;
         let lang = lang_owned.as_str();
         let mb = s.info_bases.read().expect("info bases").musicbrainz.clone();
@@ -590,19 +665,13 @@ pub(crate) async fn album(
         .await;
         about
     })
-    .await
 }
 
 /// A song's About by its recording: the work it records, and that work's Wikipedia article.
-pub(crate) async fn song(
-    s: &std::sync::Arc<NodeState>,
-    track_id: i64,
-    recording: pm_model::Mbid,
-    lang: &str,
-) -> Option<About> {
+pub(crate) fn song(s: &std::sync::Arc<NodeState>, recording: pm_model::Mbid, lang: &str) -> Now {
     let st = s.clone();
     let lang_owned = lang.to_string();
-    cached(s, format!("song.about.{track_id}.{lang}"), async move {
+    cached(s, format!("song.about.{recording}.{lang}"), async move {
         let s = &st;
         let lang = lang_owned.as_str();
         let mb = s.info_bases.read().expect("info bases").musicbrainz.clone();
@@ -646,13 +715,27 @@ pub(crate) async fn song(
         about.links = rels.links;
         about
     })
-    .await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// A fetch that panics leaves the in-flight set all the same: the item doesn't say "coming"
+    /// until the node restarts (review of #180).
+    #[test]
+    fn a_panicking_fetch_leaves_the_in_flight_set() {
+        let key = "album.about.test-panic.en".to_string();
+        in_flight().lock().unwrap().insert(key.clone());
+        let k = key.clone();
+        let r = std::panic::catch_unwind(move || {
+            let _done = InFlight(k);
+            panic!("a fetch that panics");
+        });
+        assert!(r.is_err());
+        assert!(!in_flight().lock().unwrap().contains(&key));
+    }
 
     #[test]
     fn the_language_comes_from_the_query_then_the_header() {
@@ -667,6 +750,10 @@ mod tests {
         // Never a host name or anything that isn't a language code
         assert_eq!(language(Some("evil.example/"), &h), "de");
         assert_eq!(language(Some("x"), &axum::http::HeaderMap::new()), "en");
+        // Only Wikipedias it knows: a made-up code reads English (or the header's)
+        assert_eq!(language(Some("qqq"), &h), "de");
+        assert_eq!(language(Some("zz"), &axum::http::HeaderMap::new()), "en");
+        assert_eq!(language(Some("nb-NO"), &h), "no");
     }
 
     #[test]
@@ -708,23 +795,46 @@ mod tests {
     fn the_article_is_in_the_readers_language_else_english() {
         let ent = json!({"sitelinks": {"enwiki": {"title": "Seven Dollar Taxi"}, "frwiki": {"title": "Taxi à sept"}}});
         let none = Relations::default();
+        let pair = |l: &str, t: &str| (l.to_string(), t.to_string());
         assert_eq!(
-            article("fr", &none, Some(&ent)),
-            Some(("fr".into(), "Taxi_à_sept".into()))
+            articles("fr", &none, Some(&ent)),
+            [pair("fr", "Taxi_à_sept"), pair("en", "Seven_Dollar_Taxi")]
         );
         assert_eq!(
-            article("de", &none, Some(&ent)),
-            Some(("en".into(), "Seven_Dollar_Taxi".into()))
+            articles("de", &none, Some(&ent)),
+            [pair("en", "Seven_Dollar_Taxi")]
         );
+        // MusicBrainz's direct link first, then the sitelinks: each is a fallback for the one before
         let direct = Relations {
-            wikipedia: vec![("de".into(), "Sieben".into())],
+            wikipedia: vec![pair("de", "Die_Ärzte")],
             ..Relations::default()
         };
         assert_eq!(
-            article("de", &direct, Some(&ent)),
-            Some(("de".into(), "Sieben".into()))
+            articles("de", &direct, Some(&ent)),
+            [pair("de", "Die_Ärzte"), pair("en", "Seven_Dollar_Taxi")]
         );
-        assert_eq!(article("de", &none, None), None);
+        assert!(articles("de", &none, None).is_empty());
+    }
+
+    #[test]
+    fn wikipedia_links_from_musicbrainz_are_decoded_once() {
+        let v = json!({"relations": [{"type": "wikipedia", "url": {"resource": "https://de.wikipedia.org/wiki/Die_%C3%84rzte"}}]});
+        assert_eq!(
+            relations(&v).wikipedia,
+            [("de".to_string(), "Die_Ärzte".to_string())]
+        );
+        // Asked encoded once
+        assert_eq!(urlencode("Die_Ärzte"), "Die_%C3%84rzte");
+        assert_eq!(percent_decode("A%2BB+C%"), "A+B+C%");
+    }
+
+    #[test]
+    fn years_never_panic() {
+        let at = |t: &str| json!({"claims": {"P571": [{"mainsnak": {"datavalue": {"value": {"time": t}}}}]}});
+        assert_eq!(year(&at("+1994-00-00T00:00:00Z"), "P571"), Some(1994));
+        assert_eq!(year(&at("-0500-00-00T00:00:00Z"), "P571"), Some(-500));
+        assert_eq!(year(&at(""), "P571"), None);
+        assert_eq!(year(&at("é"), "P571"), None);
     }
 
     #[test]

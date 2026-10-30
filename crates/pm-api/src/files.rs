@@ -442,6 +442,25 @@ struct BringPlan {
     broken: usize,
 }
 
+/// A file name from elsewhere (the homeserver) as one plain name in a folder: separators of
+/// any system (`/`, `\\`), drive and stream markers (`:`) and control characters become `_`, and
+/// `.`, `..` or nothing left is no name at all. On Windows `..\\x` or `C:\\x` would otherwise
+/// leave the folder.
+pub(crate) fn file_name_from(name: &str) -> Option<String> {
+    let clean: String = name
+        .chars()
+        .map(|c| {
+            if matches!(c, '/' | '\\' | ':') || c.is_control() {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    let clean = clean.trim().trim_end_matches('.').to_string();
+    (!clean.is_empty() && clean != "." && clean != "..").then_some(clean)
+}
+
 /// The folder files are brought into: `From homeserver` in the first library folder, else the
 /// node's data folder.
 fn default_dest(s: &NodeState) -> PathBuf {
@@ -522,8 +541,16 @@ async fn plan_bring(
         have.insert(hash[..16].to_string());
     }
     for (path, size, parts) in wanted {
-        let full = path.rsplit('/').next().unwrap_or(&path).to_string();
+        // A name from the homeserver becomes one plain file name in the folder, never a path
+        let Some(full) = file_name_from(path.rsplit('/').next().unwrap_or(&path)) else {
+            plan.broken += 1;
+            continue;
+        };
         let (hash16, original) = parts.unwrap_or_else(|| (String::new(), full.clone()));
+        let Some(original) = file_name_from(&original) else {
+            plan.broken += 1;
+            continue;
+        };
         if !hash16.is_empty() && have.contains(&hash16) {
             plan.present += 1;
             plan.present_bytes += size;
@@ -797,6 +824,32 @@ pub(crate) async fn remove(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A homeserver file name never leaves the folder files are brought into, on any system
+    /// (security review 2026-10-30, #6).
+    #[test]
+    fn homeserver_names_become_plain_file_names() {
+        assert_eq!(file_name_from("Song.flac").as_deref(), Some("Song.flac"));
+        assert_eq!(
+            file_name_from("..\\..\\Windows\\evil.dll").as_deref(),
+            Some(".._.._Windows_evil.dll")
+        );
+        assert_eq!(file_name_from("C:\\x.flac").as_deref(), Some("C__x.flac"));
+        assert_eq!(file_name_from("a/b.flac").as_deref(), Some("a_b.flac"));
+        assert_eq!(
+            file_name_from("song.flac:stream").as_deref(),
+            Some("song.flac_stream")
+        );
+        for bad in ["", ".", "..", " .. ", "...", "\u{0}"] {
+            let n = file_name_from(bad);
+            assert!(n.is_none() || n.as_deref() == Some("_"), "{bad:?} -> {n:?}");
+        }
+        for n in ["..\\..\\x", "C:\\x", "../x", "/etc/x"] {
+            let f = file_name_from(n).unwrap();
+            let p = std::path::Path::new("/dest").join(&f);
+            assert_eq!(p.parent(), Some(std::path::Path::new("/dest")), "{n}");
+        }
+    }
 
     #[test]
     fn remote_names_are_content_addressed_and_safe() {

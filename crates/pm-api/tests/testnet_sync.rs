@@ -765,6 +765,9 @@ async fn another_node_opens_and_copies_a_shared_playlist() {
     assert_eq!(st, StatusCode::OK, "{one}");
     assert_eq!(one["play_from"]["items"].as_array().unwrap().len(), 2);
     assert_eq!(one["play_from"]["items"][0]["pin"]["service"], "tidal");
+    // Every item's kind, in the same order (review of #155, M4: a web page shows as its card)
+    assert_eq!(one["entries"].as_array().map(Vec::len), Some(2), "{one}");
+    assert_eq!(one["entries"][0]["kind"], "track", "{one}");
     assert_eq!(one["play_from"]["own_order"], true);
     let (st, copy) = call(
         &app_b,
@@ -2211,4 +2214,135 @@ async fn the_spec_migrator_and_the_node_converge() {
         .get_music_post(&post_id)
         .unwrap()
         .is_none());
+}
+
+/// Comments (TASK-pinakes-social-ux.md B1): a comment on a song is a public social v1 note whose
+/// `parent` is the song's URL; a reply's parent is the comment's post; the node shows its own new
+/// comments before Nexus has them; deleting removes every version, and only your own.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_comment_is_a_note_with_the_song_as_parent() {
+    if !enabled() {
+        eprintln!("PM_TESTNET not set; skipping");
+        return;
+    }
+    let pubky = Pubky::testnet().unwrap();
+    let homeserver = NodeHomeserver::from_pubky(pubky.clone());
+    let (session, z32, raw) = identity(&pubky, "pm-api-comments").await;
+    let dir = tempfile::tempdir().unwrap();
+    let n = node(dir.path(), "n");
+    let app = router(n.clone());
+    n.set_sync(Some(Arc::new(PubkySync::from_session(
+        homeserver.clone(),
+        session,
+    ))));
+    let song = "https://musicbrainz.org/recording/833f00e1-781f-4edd-90e4-e52712618862";
+    let (st, c) = call(
+        &app,
+        "POST",
+        "/v1/comments",
+        Some(serde_json::json!({"uri": song, "content": "  What a bassline  "})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{c}");
+    assert_eq!(
+        (c["mine"].as_bool(), c["content"].as_str()),
+        (Some(true), Some("What a bassline"))
+    );
+    let id = c["id"].as_str().unwrap().to_string();
+    assert_eq!(c["post"], format!("pubky://{raw}/pub/social/v1/posts/{id}"));
+    let read = |path: String| {
+        let (hs, z32) = (homeserver.clone(), z32.clone());
+        async move {
+            let bytes = hs.get_bytes(&z32, &path, Visibility::Public, None).await.unwrap();
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()
+        }
+    };
+    let body = read(format!("/pub/social/v1/posts/{id}/{id}.json")).await;
+    assert_eq!(
+        (&body["kind"], &body["parent"], &body["embed"]),
+        (&"note".into(), &song.into(), &serde_json::Value::Null)
+    );
+
+    // A reply names the comment's post as its parent
+    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    let (st, r) = call(
+        &app,
+        "POST",
+        "/v1/comments",
+        Some(serde_json::json!({"reply_to": c["post"], "content": "Agreed"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+    let rid = r["id"].as_str().unwrap().to_string();
+    let reply = read(format!("/pub/social/v1/posts/{rid}/{rid}.json")).await;
+    assert_eq!(reply["parent"], c["post"]);
+
+    // Before Nexus has indexed it (whether or not this node reaches one), the node shows its own
+    let q = format!(
+        "/v1/comments?uri={}",
+        song.replace(':', "%3A").replace('/', "%2F")
+    );
+    let (_, t) = call(&app, "GET", &q, None).await;
+    assert!(
+        t["comments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|x| x["post"] == c["post"] && x["mine"] == true),
+        "{t}"
+    );
+
+    // Only your own comments can be deleted; yours goes, every version of it
+    let (st, _) = call(
+        &app,
+        "DELETE",
+        "/v1/comments?post=pubky://pxnu33x7jtpx9ar1ytsi4yxbp6a5o36gwhffs8zoxmbuptici1jy/pub/social/v1/posts/0034A",
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+    let (st, d) = call(
+        &app,
+        "DELETE",
+        &format!("/v1/comments?post={}", c["post"].as_str().unwrap()),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{d}");
+    assert_eq!(d["deleted"], 1);
+    assert!(homeserver
+        .public_paths(&z32, &format!("/pub/social/v1/posts/{id}/"))
+        .await
+        .unwrap()
+        .is_empty());
+    let (_, t) = call(&app, "GET", &q, None).await;
+    assert!(t["comments"].as_array().unwrap().is_empty(), "{t}");
+
+    // "Post about this" (B2): a note with the song as its embed and no parent
+    let (st, p) = call(
+        &app,
+        "POST",
+        "/v1/posts",
+        Some(serde_json::json!({"uri": song, "content": "Listen to this"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{p}");
+    assert_eq!(p["embed"], song);
+    let pid = p["id"].as_str().unwrap().to_string();
+    assert_eq!(p["post"], format!("pubky://{raw}/pub/social/v1/posts/{pid}"));
+    let shared = read(format!("/pub/social/v1/posts/{pid}/{pid}.json")).await;
+    assert_eq!(
+        (
+            &shared["kind"],
+            &shared["embed"],
+            &shared["parent"],
+            &shared["content"]
+        ),
+        (
+            &"note".into(),
+            &song.into(),
+            &serde_json::Value::Null,
+            &"Listen to this".into()
+        )
+    );
 }

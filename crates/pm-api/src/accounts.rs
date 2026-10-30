@@ -17,6 +17,7 @@ use crate::{ApiError, ApiResult};
 use axum::extract::State;
 use axum::http::{Method, StatusCode};
 use axum::Json;
+use pm_zones::FetchLimit;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -176,6 +177,7 @@ const LISTENER_READS: &[&str] = &[
     "/podcasts/search",
     "/zones",
     "/devices",
+    "/presence",
 ];
 
 /// Inside [`LISTENER_READS`], still the owner's: identification candidates and suggestions.
@@ -190,7 +192,14 @@ fn under(path: &str, prefixes: &[&str]) -> bool {
 /// Whether a listener may use this zone: the owner's list, or every zone when none is set.
 fn zone_refusal(s: &NodeState, zone: &str) -> Option<&'static str> {
     match listener_zones(s) {
-        Some(allowed) if !allowed.iter().any(|z| z == zone) => {
+        // A listen-along group is open when every zone it plays for is (presence.rs)
+        Some(allowed)
+            if !allowed.iter().any(|z| z == zone)
+                && !s
+                    .presence
+                    .sources(zone)
+                    .is_some_and(|zs| zs.iter().all(|z| allowed.contains(z))) =>
+        {
             Some("the owner has not opened that zone to listeners")
         }
         _ => None,
@@ -238,6 +247,10 @@ pub fn listener_refusal(s: &NodeState, method: &Method, path: &str) -> Option<&'
     }
     // Their own phones and laptops and what those keep offline (devices.rs checks the owner)
     if path.starts_with("/devices/") {
+        return None;
+    }
+    // Listening along (presence.rs checks the zones)
+    if path == "/presence/along" {
         return None;
     }
     Some("listeners' own playlists, bookmarks and history are not built yet; this change would land in the owner's")
@@ -358,9 +371,62 @@ pub fn refused(why: &str) -> ApiError {
     ApiError::new(StatusCode::FORBIDDEN, format!("Not for listeners: {why}."))
 }
 
+/// What a listener may put in a queue (or announce): library songs, the services' own track ids,
+/// and http(s) links to public addresses, fetched only there (each redirect, playlist entry and
+/// address it resolves to is checked when the node connects: the item carries
+/// [`FetchLimit::PUBLIC`], whatever the request said). Never a path or a `file:` URL, nothing on
+/// the node's machine or its network: those are the owner's to play. The URI is trimmed: the one
+/// checked is the one queued.
+pub fn check_listener_item(it: &mut pm_zones::QueueItem) -> Result<(), ApiError> {
+    it.uri = it.uri.trim().to_string();
+    it.limit = Some(it.limit.map_or(FetchLimit::PUBLIC, |l| l.and(FetchLimit::PUBLIC)));
+    let uri = it.uri.clone();
+    let uri = uri.as_str();
+    use crate::*;
+    const SERVICES: [&str; 13] = [
+        sources::TRACK_SCHEME,
+        tidal::TRACK_URI_PREFIX,
+        deezer::TRACK_URI_PREFIX,
+        qobuz::TRACK_URI_PREFIX,
+        bandcamp::TRACK_URI_PREFIX,
+        soundcloud::TRACK_URI_PREFIX,
+        jamendo::TRACK_URI_PREFIX,
+        opensubsonic::TRACK_URI_PREFIX,
+        jellyfin::TRACK_URI_PREFIX,
+        plex::TRACK_URI_PREFIX,
+        audiobookshelf::TRACK_URI_PREFIX,
+        youtube::VIDEO_URI_PREFIX,
+        librespot::LIVE_URI,
+    ];
+    if SERVICES.iter().any(|p| uri.starts_with(p)) {
+        return Ok(());
+    }
+    let public = FetchLimit::PUBLIC;
+    let url = url::Url::parse(uri)
+        .ok()
+        .filter(|u| matches!(u.scheme(), "http" | "https") && u.host().is_some());
+    let Some(url) = url else {
+        return Err(refused(
+            "a listener queues songs from the library, the services' tracks and web links, not files or other addresses",
+        ));
+    };
+    let literal = match url.host() {
+        Some(url::Host::Ipv4(ip)) => Some(std::net::IpAddr::from(ip)),
+        Some(url::Host::Ipv6(ip)) => Some(std::net::IpAddr::from(ip)),
+        _ => None,
+    };
+    if literal.is_some_and(|ip| !sources::allows(public, ip)) || url.host_str() == Some("localhost") {
+        return Err(refused("that address is on the node's own network"));
+    }
+    // The URL as parsed is what is queued: `HTTP://…` or `http:\\…` would not be taken for a web
+    // link when it plays (review of #177)
+    it.uri = url.to_string();
+    Ok(())
+}
+
 /// A listener's JSON answers show a library file by its name, not by where the owner keeps it
 /// (`file.path` of every track, in lists, albums, search and item pages alike).
-pub async fn listener_response(resp: axum::response::Response) -> axum::response::Response {
+pub async fn listener_response(resp: axum::response::Response, roots: &[String]) -> axum::response::Response {
     use axum::http::header;
     use axum::response::IntoResponse;
     // Only application/json answers are rewritten: streams (search's NDJSON, events, audio, covers)
@@ -380,7 +446,7 @@ pub async fn listener_response(resp: axum::response::Response) -> axum::response
     let rewritten = serde_json::from_slice::<serde_json::Value>(&bytes)
         .ok()
         .and_then(|mut v| {
-            hide_file_paths(&mut v)
+            (hide_file_paths(&mut v) | hide_paths_under(&mut v, roots))
                 .then(|| serde_json::to_vec(&v).ok())
                 .flatten()
         });
@@ -395,9 +461,98 @@ pub async fn listener_response(resp: axum::response::Response) -> axum::response
 }
 
 /// Replaces the folder part of every library file's path with nothing, leaving the file name:
-/// in objects shaped like `pm_model::AudioFile` (`path`, `container`, `size_bytes`) and in the
-/// song page's "File" fact (`{label: "File", value}`, item.rs). Whether anything changed.
+/// in objects shaped like `pm_model::AudioFile` (`path`, `container`, `size_bytes`), in the
+/// song page's "File" fact (`{label: "File", value}`, item.rs) and in queue items whose `uri` is
+/// a file on the node (`/…`, `C:\\…`, `file:…`); then wherever else those paths appear in the
+/// answer (a zone's error names the file it could not play). Whether anything changed.
 pub fn hide_file_paths(v: &mut serde_json::Value) -> bool {
+    let mut seen = Vec::new();
+    let mut changed = hide_in(v, &mut seen);
+    if !seen.is_empty() {
+        seen.sort_by_key(|p: &String| std::cmp::Reverse(p.len()));
+        seen.dedup();
+        changed |= replace_paths(v, &seen);
+    }
+    changed
+}
+
+/// The folders the owner keeps music in (library folders and the homeserver's files), for
+/// [`hide_paths_under`].
+pub fn library_roots(s: &NodeState) -> Vec<String> {
+    let mut roots: Vec<String> = s
+        .library
+        .lock()
+        .expect("library poisoned")
+        .list_folders()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(p, _)| p.to_string_lossy().into_owned())
+        .collect();
+    if let Some(hs) = s.homeserver_files_dir() {
+        roots.push(hs.to_string_lossy().into_owned());
+    }
+    roots.retain(|r| r.len() > 1);
+    roots
+}
+
+/// Every path under one of `roots` in the answer's text, by its file name: a library song's
+/// open error names its file (`cannot open /srv/music/A/x.flac: …`) where no queue item carries
+/// it (review of #177). A path runs to `": "`, a quote or the end of the text.
+pub fn hide_paths_under(v: &mut serde_json::Value, roots: &[String]) -> bool {
+    use serde_json::Value;
+    match v {
+        Value::String(t) => {
+            let mut changed = false;
+            for root in roots {
+                let root = root.trim_end_matches(['/', '\\']);
+                let mut from = 0;
+                while let Some(found) = t[from..].find(root) {
+                    let at = from + found;
+                    // A path on its own: at the start or after a space, quote, bracket, `=` or
+                    // `:`, and the folder itself followed by a separator (never inside a URL)
+                    let before_ok = t[..at]
+                        .chars()
+                        .next_back()
+                        .is_none_or(|c| c.is_whitespace() || "\"'(=:".contains(c));
+                    let after_ok = t[at + root.len()..].starts_with(['/', '\\']);
+                    if !(before_ok && after_ok) {
+                        from = at + root.len();
+                        continue;
+                    }
+                    let rest = &t[at..];
+                    let end = [": ", "\"", "\n"]
+                        .iter()
+                        .filter_map(|e| rest.find(e))
+                        .min()
+                        .unwrap_or(rest.len());
+                    let name = file_name(rest[..end].trim_end_matches(['/', '\\']));
+                    t.replace_range(at..at + end, &name);
+                    from = at + name.len();
+                    changed = true;
+                }
+            }
+            changed
+        }
+        Value::Object(o) => o.values_mut().fold(false, |c, x| hide_paths_under(x, roots) | c),
+        Value::Array(a) => a.iter_mut().fold(false, |c, x| hide_paths_under(x, roots) | c),
+        _ => false,
+    }
+}
+
+fn file_name(p: &str) -> String {
+    p.rsplit(['/', '\\']).next().unwrap_or_default().to_string()
+}
+
+/// A queue item's `uri` that is a file on the node, not a link or a service's id.
+fn local_path(u: &str) -> bool {
+    let b = u.as_bytes();
+    u.starts_with('/')
+        || u.starts_with("\\\\")
+        || u.starts_with("file:")
+        || (b.len() > 2 && b[0].is_ascii_alphabetic() && b[1] == b':' && matches!(b[2], b'\\' | b'/'))
+}
+
+fn hide_in(v: &mut serde_json::Value, seen: &mut Vec<String>) -> bool {
     use serde_json::Value;
     match v {
         Value::Object(o) => {
@@ -406,22 +561,44 @@ pub fn hide_file_paths(v: &mut serde_json::Value) -> bool {
                 Some("path")
             } else if o.get("label").and_then(Value::as_str) == Some("File") {
                 Some("value")
+            } else if o.get("uri").and_then(Value::as_str).is_some_and(local_path) {
+                Some("uri")
             } else {
                 None
             };
             if let Some(Value::String(p)) = field.and_then(|f| o.get_mut(f)) {
-                let name = p.rsplit(['/', '\\']).next().unwrap_or_default().to_string();
+                let name = file_name(p);
                 if name != *p {
-                    *p = name;
+                    seen.push(std::mem::replace(p, name));
                     changed = true;
                 }
             }
             for x in o.values_mut() {
-                changed |= hide_file_paths(x);
+                changed |= hide_in(x, seen);
             }
             changed
         }
-        Value::Array(a) => a.iter_mut().fold(false, |c, x| hide_file_paths(x) | c),
+        Value::Array(a) => a.iter_mut().fold(false, |c, x| hide_in(x, seen) | c),
+        _ => false,
+    }
+}
+
+/// Every hidden path, wherever else it is in the answer's text, by its file name.
+fn replace_paths(v: &mut serde_json::Value, paths: &[String]) -> bool {
+    use serde_json::Value;
+    match v {
+        Value::String(t) => {
+            let mut changed = false;
+            for p in paths {
+                if t.contains(p.as_str()) {
+                    *t = t.replace(p.as_str(), &file_name(p));
+                    changed = true;
+                }
+            }
+            changed
+        }
+        Value::Object(o) => o.values_mut().fold(false, |c, x| replace_paths(x, paths) | c),
+        Value::Array(a) => a.iter_mut().fold(false, |c, x| replace_paths(x, paths) | c),
         _ => false,
     }
 }
@@ -429,6 +606,29 @@ pub fn hide_file_paths(v: &mut serde_json::Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A library song's open error names its file only in its text: under the library's folders
+    /// it is cut to the file name, links are left alone (review of #177).
+    #[test]
+    fn paths_under_the_library_folders_become_file_names() {
+        let roots = vec!["/srv/music".to_string(), "C:\\Music\\".to_string()];
+        let mut v = serde_json::json!({
+            "error": "cannot open /srv/music/My Album/01 x.flac: no decoder",
+            "reason": "C:\\Music\\A\\y.flac",
+            "links": ["https://musicbrainz.org/srv/music/z", "http://nas/srv/music/a.mp3", "/srv/musical/b.flac"],
+        });
+        assert!(hide_paths_under(&mut v, &roots));
+        assert_eq!(v["error"], "cannot open 01 x.flac: no decoder");
+        assert_eq!(v["reason"], "y.flac");
+        assert_eq!(
+            v["links"],
+            serde_json::json!([
+                "https://musicbrainz.org/srv/music/z",
+                "http://nas/srv/music/a.mp3",
+                "/srv/musical/b.flac"
+            ])
+        );
+    }
 
     #[test]
     fn listeners_see_file_names_only() {
@@ -454,5 +654,22 @@ mod tests {
         assert_eq!(v["folder"]["path"], "/srv/music");
         let mut plain = serde_json::json!({"file": {"path": "x.flac", "container": "flac", "size_bytes": 1}});
         assert!(!hide_file_paths(&mut plain));
+        // A zone: queue items that are files, and its error naming one (security review
+        // 2026-10-30, low)
+        let mut zone = serde_json::json!({"id": "z", "error": "cannot open /srv/music/My Album/x.flac: broken",
+            "queue": [{"id": 1, "uri": "/srv/music/My Album/x.flac"}, {"id": 2, "uri": "C:\\Music\\y.flac"},
+                      {"id": 3, "uri": "track:4"}, {"id": 4, "uri": "https://radio.example.org/s.mp3"}]});
+        assert!(hide_file_paths(&mut zone));
+        assert_eq!(zone["error"], "cannot open x.flac: broken");
+        let uris: Vec<_> = zone["queue"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|q| q["uri"].clone())
+            .collect();
+        assert_eq!(
+            uris,
+            ["x.flac", "y.flac", "track:4", "https://radio.example.org/s.mp3"]
+        );
     }
 }

@@ -504,3 +504,28 @@ async fn hearts_on_songs_without_an_identity_are_counted() {
     assert_eq!(report["expected"]["favourites"], 1, "{report}");
     assert_eq!(report["restored"]["favourites"], 1, "{report}");
 }
+
+/// Backups are the owner's alone: a scheduled backup file is 0600 (security review 2026-10-30,
+/// #2; the working copy's private folder is `backup.rs`'s test).
+#[cfg(unix)]
+#[tokio::test]
+async fn backups_are_readable_by_their_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let s = node(dir.path(), "a", None);
+    let app = router(s.clone());
+    let folder = dir.path().join("backups");
+    let (st, v) = json(
+        &app,
+        "PUT",
+        "/v1/backup/schedule",
+        Some(serde_json::json!({"folder": folder.to_string_lossy(), "every_hours": 24, "keep": 3})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let (st, v) = json(&app, "POST", "/v1/backup/schedule/run", None).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let file = folder.join(v["last_file"].as_str().unwrap());
+    let mode = std::fs::metadata(&file).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "{}", file.display());
+}

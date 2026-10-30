@@ -26,6 +26,9 @@ pub enum Confidence {
     /// count, position and duration fit one MusicBrainz release).
     #[serde(rename = "fingerprint+release")]
     FingerprintRelease { score: f32 },
+    /// The file's folder fits one MusicBrainz release (album, artist, and each file's position,
+    /// length and title), with this score (0–1) for how well the folder covers it.
+    AlbumFit { score: f32 },
     /// The owner confirmed a suggestion.
     ConfirmedByUser,
     /// Artist / title / duration match with this score (0–1). A suggestion
@@ -45,6 +48,7 @@ impl Confidence {
             Confidence::TaggedIsrc => 0.95,
             Confidence::Fingerprint { score }
             | Confidence::FingerprintRelease { score }
+            | Confidence::AlbumFit { score }
             | Confidence::Fuzzy { score } => *score,
         }
     }
@@ -57,7 +61,7 @@ impl Confidence {
     }
 
     /// The identify brief's name for this level: `tagged_mbid`,
-    /// `tagged_isrc`, `fingerprint`, `fingerprint+release`,
+    /// `tagged_isrc`, `fingerprint`, `fingerprint+release`, `album_fit`,
     /// `confirmed_by_user`, `suggested`.
     pub fn label(&self) -> &'static str {
         match self {
@@ -65,6 +69,7 @@ impl Confidence {
             Confidence::TaggedIsrc => "tagged_isrc",
             Confidence::Fingerprint { .. } => "fingerprint",
             Confidence::FingerprintRelease { .. } => "fingerprint+release",
+            Confidence::AlbumFit { .. } => "album_fit",
             Confidence::ConfirmedByUser => "confirmed_by_user",
             Confidence::Fuzzy { .. } => "suggested",
         }

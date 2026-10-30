@@ -942,7 +942,7 @@ pub(crate) async fn set_app(
             lib.set_setting(APP_KEY, &id.to_ascii_lowercase())?;
         }
     }
-    crate::search::forget_answers();
+    crate::search::forget_answers(&s);
     Ok(Json(status_view(&s, &headers)))
 }
 
