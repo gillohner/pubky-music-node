@@ -374,6 +374,10 @@ pub struct Tags {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub uri: Option<String>,
     pub tags: Vec<TagEntry>,
+    /// The item has no identity yet (an album or artist without a MusicBrainz id): it can't
+    /// take tags until it is matched. An unmatched song still takes tags that wait for a match.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub needs_match: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -417,6 +421,9 @@ pub struct Reviews {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub uri: Option<String>,
     pub reviews: Vec<ReviewEntry>,
+    /// The item has no identity yet: it can't be reviewed until it is matched.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub needs_match: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

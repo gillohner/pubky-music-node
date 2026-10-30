@@ -12687,4 +12687,48 @@ exec sleep 300
             assert_eq!(resp.status(), StatusCode::OK, "/{v}");
         }
     }
+
+    /// An album with no MusicBrainz id yet can't take tags or a review: the reads say so
+    /// (`needs_match`) instead of a 422; an unmatched song's tags still wait for a match.
+    #[tokio::test]
+    async fn unmatched_items_say_they_need_a_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let (tid, album) = {
+            let lib = s.library.lock().unwrap();
+            let mut tr = untagged_track(dir.path().join("a.flac"), "Song", "Someone");
+            tr.album = Some(pm_model::Album {
+                id: None,
+                title: "No Id".into(),
+                album_artist: Some("Someone".into()),
+                release_mbid: None,
+                release_group_mbid: None,
+                year: None,
+                upc: None,
+                total_discs: None,
+            });
+            let tid = lib.upsert_track(&tr).unwrap();
+            let t = lib.get_track(tid).unwrap().unwrap();
+            (tid.0, t.album.unwrap().id.unwrap())
+        };
+        let app = router(s.clone());
+        let (st, tg) = call(&app, "GET", &format!("/v1/tags?album_id={album}"), None).await;
+        assert_eq!(
+            (st, tg["needs_match"].as_bool()),
+            (StatusCode::OK, Some(true)),
+            "{tg}"
+        );
+        let (st, rv) = call(&app, "GET", &format!("/v1/reviews?album_id={album}"), None).await;
+        assert_eq!(
+            (st, rv["needs_match"].as_bool()),
+            (StatusCode::OK, Some(true)),
+            "{rv}"
+        );
+        let (st, tg) = call(&app, "GET", &format!("/v1/tags?track_id={tid}"), None).await;
+        assert_eq!(st, StatusCode::OK, "{tg}");
+        assert!(
+            tg.get("needs_match").is_none(),
+            "an unmatched song takes tags that wait: {tg}"
+        );
+    }
 }

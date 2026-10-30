@@ -189,6 +189,7 @@ pub(crate) async fn list(State(s): State<Arc<NodeState>>, Query(r): Query<TagRef
         return Ok(Json(Tags {
             uri: None,
             tags: rows_for(&lib, None)?,
+            ..Default::default()
         }));
     }
     promote_pending(&lib)?;
@@ -205,7 +206,11 @@ pub(crate) async fn list(State(s): State<Arc<NodeState>>, Query(r): Query<TagRef
                 pending: true,
             })
             .collect();
-        return Ok(Json(Tags { uri: None, tags }));
+        return Ok(Json(Tags {
+            uri: None,
+            tags,
+            ..Default::default()
+        }));
     }
     // An item with no identity yet (an album or artist without a MusicBrainz id) has no tags yet
     let uri = match canonical_for(&lib, &target(&r)) {
@@ -214,6 +219,7 @@ pub(crate) async fn list(State(s): State<Arc<NodeState>>, Query(r): Query<TagRef
             return Ok(Json(Tags {
                 uri: None,
                 tags: Vec::new(),
+                needs_match: true,
             }))
         }
         Err(e) => return Err(e),
@@ -222,6 +228,7 @@ pub(crate) async fn list(State(s): State<Arc<NodeState>>, Query(r): Query<TagRef
     Ok(Json(Tags {
         tags: rows_for(&lib, Some(&url))?,
         uri: Some(url),
+        ..Default::default()
     }))
 }
 

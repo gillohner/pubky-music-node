@@ -67,6 +67,7 @@ pub(crate) async fn list(State(s): State<Arc<NodeState>>, Query(r): Query<Review
         return Ok(Json(Reviews {
             uri: None,
             reviews: all_reviews(&lib)?.iter().map(|(row, r)| entry(row, r)).collect(),
+            ..Default::default()
         }));
     }
     // An item with no identity yet has no review yet (writing one still says why it can't)
@@ -76,6 +77,7 @@ pub(crate) async fn list(State(s): State<Arc<NodeState>>, Query(r): Query<Review
             return Ok(Json(Reviews {
                 uri: None,
                 reviews: Vec::new(),
+                needs_match: true,
             }))
         }
         Err(e) => return Err(e),
@@ -87,6 +89,7 @@ pub(crate) async fn list(State(s): State<Arc<NodeState>>, Query(r): Query<Review
     Ok(Json(Reviews {
         uri: Some(url),
         reviews,
+        ..Default::default()
     }))
 }
 
@@ -133,6 +136,7 @@ pub(crate) async fn delete(
         Reviews {
             uri: Some(url),
             reviews: Vec::new(),
+            ..Default::default()
         }
     };
     s.notify_library();

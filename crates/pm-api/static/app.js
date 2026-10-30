@@ -872,7 +872,9 @@
       if (state.browserRetry.n < 1 && state.browserIndex === i) { state.browserRetry.n++; toast(`“${it.title || 'This song'}” did not start: ${why}. Trying again…`); setTimeout(() => { if (state.browserIndex === i) browserPlay(i); }, 2000); return; }
       toast(`“${it.title || 'This song'}” can't play here: ${why}.${it.track_id != null ? '' : ' Try another version on the song\u2019s page.'}`, 'error');
     });
-    if (it.track_id != null) api('POST', '/library/history', { track_id: it.track_id, zone: 'browser' }).catch(() => {});
+    // A song moved in from a zone was counted there already
+    if (it.track_id != null && !it.moved) api('POST', '/library/history', { track_id: it.track_id, zone: 'browser' }).catch(() => {});
+    it.moved = false;
     mediaSessionUpdate(it);
     renderBar();
     if (state.view === 'queue') render();
@@ -1044,7 +1046,7 @@
     if (state.ytOn) { yt.stop(); state.ytOn = false; ytPanel(null); }
     // The seek is for this song only: a later song (this one never loaded) is not moved
     audio.addEventListener('loadedmetadata', () => { if (state.browserIndex !== index) return; try { if (posMs > 1000) audio.currentTime = posMs / 1000; } catch { /* not seekable */ } renderBar(); }, { once: true });
-    if (!paused) { browserPlay(index); return; } // browserPlay says why when it can't play
+    if (!paused) { it.moved = true; browserPlay(index); return; } // browserPlay says why when it can't play
     state.browserIndex = index;
     audio.src = it.stream ? it.stream : streamUrlFor(it.uri) || `/v1/library/tracks/${it.track_id}/file${tokenQ()}`;
     audio.preload = 'metadata'; audio.load();
@@ -1098,7 +1100,7 @@
         const np = z.now_playing; const index = np ? np.index : (z.queue_index != null ? z.queue_index : -1); const pos = np ? np.position_ms || 0 : 0;
         // Refused before the zone empties: the song in hand must be one this browser can play
         const cur = index >= 0 ? z.queue[index] : null;
-        if (cur && !browserCanPlay(cur)) throw new Error(`“${cur.title || 'This song'}” plays on the node’s zones only; it stays on ${z.name}`);
+        if (cur && z.transport !== 'stopped' && !browserCanPlay(cur)) throw new Error(`“${cur.title || 'This song'}” plays on the node’s zones only; it stays on ${z.name}`);
         await api('DELETE', `/zones/${encodeURIComponent(from)}/queue`);
         if (state.zones[from]) { state.zones[from] = { ...state.zones[from], queue: [], now_playing: null, transport: 'stopped' }; }
         state.browserQueue = z.queue.map((it, k) => { const m = /^track:(\d+)$/.exec(it.uri || ''); return { id: Date.now() + k, uri: it.uri, track_id: m ? Number(m[1]) : undefined, stream: m ? null : streamUrlFor(it.uri) || it.uri, title: it.title, artist: it.artist, album: it.album, duration_ms: it.duration_ms, image: it.image || null }; });
@@ -1454,6 +1456,7 @@
     if (state.dspBusy) return;
     state.dspBusy = true; state.dspFocus = what;
     $$('[data-dsp]', qPanel).forEach((c) => { c.disabled = true; });
+    try {
     const zone = state.zone; const cfg = { ...((state.dspCfg || {})[zone] || {}) }; delete cfg.error;
     if (what === 'eq') {
       const bands = cfg.eq || [];
@@ -1467,7 +1470,7 @@
     if (what === 'crossfeed') cfg.crossfeed = cfg.crossfeed ? { ...cfg.crossfeed, enabled: on } : on ? { level_db: -6, cutoff_hz: 700, delay_us: 300, enabled: true } : null;
     try { await api('PUT', `/zones/${encodeURIComponent(zone)}/dsp`, cfg); (state.dspCfg = state.dspCfg || {})[zone] = cfg; toast('Applies from the next track'); } catch (e) { toast(e.message, 'error'); }
     await loadDsp();
-    state.dspBusy = false; qPanelKey = null; syncQPanel();
+    } finally { state.dspBusy = false; qPanelKey = null; syncQPanel(); }
   };
   const renderQPanel = () => {
     const z = currentZone(); if (!z) return; const np = z.now_playing; const cfg = (state.dspCfg || {})[state.zone];
@@ -4153,9 +4156,10 @@
           const hereName = pg.source === 'Your library' ? 'your library' : pg.source;
           const refQs = (r) => new URLSearchParams(Object.entries(r).map(([k, v]) => [k, String(v)])).toString();
           const [myTags, linkTags, myReview] = isListener() ? [null, [], undefined] : await Promise.all([
-            api('GET', `/tags?${refQs(songRef)}`).then((r) => r.tags).catch(() => null),
+            // An item with no identity yet (needs_match): the "match it first" message, no editor
+            api('GET', `/tags?${refQs(songRef)}`).then((r) => (r.needs_match ? null : r.tags)).catch(() => null),
             linkRef ? api('GET', `/tags?${refQs(linkRef)}`).then((r) => r.tags).catch(() => []) : Promise.resolve([]),
-            api('GET', `/reviews?${qs}`).then((r) => (r.reviews || [])[0] || null).catch(() => undefined),
+            api('GET', `/reviews?${qs}`).then((r) => (r.needs_match ? undefined : (r.reviews || [])[0] || null)).catch(() => undefined),
           ]);
           if (state.view !== 'item' || state.viewArg.id !== id) return;
           const favKey = pg.uri; const fav = !!(state.favUris && ((favKey && state.favUris.has(favKey)) || (target.track_id != null && state.favUris.has(`track:${target.track_id}`)) || (target.album_id != null && state.favUris.has(`album:${target.album_id}`)) || (target.artist_id != null && state.favUris.has(`artist:${target.artist_id}`))));
