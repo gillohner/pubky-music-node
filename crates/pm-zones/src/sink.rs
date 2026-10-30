@@ -38,6 +38,9 @@ pub struct OutputInfo {
     pub name: String,
     pub protocol: String,
     pub caps: OutputCaps,
+    /// The device as its maker names it (`Klimax DSM`, `HomePod`), when the protocol tells.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -201,12 +204,19 @@ pub trait Output: Send + Sync {
     fn name(&self) -> String;
     fn caps(&self) -> &OutputCaps;
 
+    /// The device's maker and model in words, when the protocol tells (UPnP, AirPlay, Cast,
+    /// BluOS); a UI shows it instead of the id.
+    fn model(&self) -> Option<String> {
+        None
+    }
+
     fn info(&self) -> OutputInfo {
         OutputInfo {
             id: self.id(),
             name: self.name(),
             protocol: self.id().protocol().to_string(),
             caps: self.caps().clone(),
+            model: self.model(),
         }
     }
 

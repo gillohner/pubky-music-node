@@ -38,6 +38,11 @@ async fn call(
 }
 
 fn node(dir: &std::path::Path) -> std::sync::Arc<NodeState> {
+    node_with(dir, Default::default())
+}
+
+/// A node whose node.toml sets `tidal` (empty: none).
+fn node_with(dir: &std::path::Path, tidal: pm_api::tidal::TidalCredentials) -> std::sync::Arc<NodeState> {
     let db = dir.join("lib.sqlite");
     NodeState::new(
         NodeSettings {
@@ -56,7 +61,7 @@ fn node(dir: &std::path::Path) -> std::sync::Arc<NodeState> {
             cast: false,
             slimproto_port: 0,
             session_secret_path: None,
-            tidal: Default::default(),
+            tidal,
             spotify: Default::default(),
             acoustid_key: String::new(),
             jamendo: Default::default(),
@@ -285,4 +290,210 @@ async fn preferences_override_the_nodes_defaults_and_say_which_applies() {
         call(&app, &listener, "GET", "/v1/node/apps", None).await.0,
         StatusCode::FORBIDDEN
     );
+}
+
+/// Settings › Service apps (TASK-service-apps-builtin.md): the admin's own TIDAL, Jamendo and
+/// drive apps are set here and win over the build's own; node.toml wins over them; a secret is
+/// never answered; a change of app signs out what the old app signed in; a restart keeps them.
+#[tokio::test]
+async fn own_apps_are_set_in_service_apps_and_node_toml_wins() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = node(dir.path());
+    let app = router(s.clone());
+    let find = |a: &Value, id: &str| {
+        a.as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["id"] == id)
+            .cloned()
+            .unwrap()
+    };
+    let (_, apps) = call(&app, OWNER, "GET", "/v1/node/apps", None).await;
+    let tidal = find(&apps, "tidal");
+    let built = pm_api::project_apps::tidal_client_id();
+    assert_eq!(tidal["builtin"], built.is_some());
+    assert_eq!(tidal["set"], "PUT /v1/node/apps/tidal");
+    assert_eq!(tidal["fields"][0]["name"], "client_id");
+    assert_eq!(tidal["fields"][1]["secret"], true);
+    assert!(tidal["limits"].as_str().unwrap().contains("30-second previews"));
+    assert_eq!(
+        tidal["redirects"][1], "http://127.0.0.1:7788/tidal/callback",
+        "{tidal}"
+    );
+    // A row that can be set says what it takes
+    for a in apps.as_array().unwrap() {
+        assert!(
+            a["set"].is_null() || !a["fields"].as_array().unwrap().is_empty(),
+            "{a}"
+        );
+    }
+
+    // A TIDAL sign-in made with the build's app goes when the app changes
+    s.library
+        .lock()
+        .unwrap()
+        .set_setting(
+            "tidal.user",
+            r#"{"access_token":"a","refresh_token":"r","expires_at":0}"#,
+        )
+        .unwrap();
+    let (st, row) = call(
+        &app,
+        OWNER,
+        "PUT",
+        "/v1/node/apps/tidal",
+        Some(json!({"client_id": "my-own-tidal-id", "client_secret": "my-own-tidal-secret"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{row}");
+    assert_eq!(
+        (row["configured"].as_bool(), row["from"].as_str()),
+        (Some(true), Some("settings"))
+    );
+    assert_eq!(s.tidal.read().unwrap().creds.client_id, "my-own-tidal-id");
+    assert!(s
+        .library
+        .lock()
+        .unwrap()
+        .get_setting("tidal.user")
+        .unwrap()
+        .is_none());
+    let (_, apps) = call(&app, OWNER, "GET", "/v1/node/apps", None).await;
+    let text = apps.to_string();
+    assert!(
+        !text.contains("my-own-tidal-secret") && !text.contains("my-own-tidal-id"),
+        "{text}"
+    );
+
+    // The drives and Jamendo, the same way; OneDrive is a public client. A drive signed in with
+    // the old app is signed out (its refresh token can't work with the new app)
+    s.drives.write().unwrap().accounts.insert(
+        pm_api::drives::Provider::Google,
+        pm_api::drives::Account {
+            refresh_token: "from-the-old-app".into(),
+            access_token: String::new(),
+            expires_at: 0,
+            user: Some("me@example.org".into()),
+        },
+    );
+    for (id, body) in [
+        (
+            "google-drive",
+            json!({"client_id": "g.apps.example", "client_secret": "g-secret"}),
+        ),
+        ("jamendo", json!({"client_id": "jam-id"})),
+        (
+            "onedrive",
+            json!({"client_id": "00000000-0000-0000-0000-000000000001"}),
+        ),
+    ] {
+        let (st, row) = call(&app, OWNER, "PUT", &format!("/v1/node/apps/{id}"), Some(body)).await;
+        assert_eq!(st, StatusCode::OK, "{id}: {row}");
+        assert_eq!(row["from"], "settings", "{id}");
+    }
+    assert_eq!(
+        s.drives.read().unwrap().apps[&pm_api::drives::Provider::Google].client_secret,
+        "g-secret"
+    );
+    assert!(
+        !s.drives
+            .read()
+            .unwrap()
+            .accounts
+            .contains_key(&pm_api::drives::Provider::Google),
+        "the old app's sign-in goes"
+    );
+    assert_eq!(s.jamendo.read().unwrap().creds.client_id, "jam-id");
+    let (st, r) = call(
+        &app,
+        OWNER,
+        "PUT",
+        "/v1/node/apps/onedrive",
+        Some(json!({"client_id": "x", "client_secret": "y"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{r}");
+    let (st, _) = call(
+        &app,
+        OWNER,
+        "PUT",
+        "/v1/node/apps/spotify",
+        Some(json!({"client_id": "x"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+    let (st, _) = call(
+        &app,
+        OWNER,
+        "PUT",
+        "/v1/node/apps/tidal",
+        Some(json!({"client_id": "two words"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+
+    // A restart keeps them
+    drop(app);
+    let again = node(dir.path());
+    pm_api::apps::apply_own(&again);
+    assert_eq!(
+        again.tidal.read().unwrap().creds.client_secret,
+        "my-own-tidal-secret"
+    );
+    assert_eq!(
+        again.drives.read().unwrap().apps[&pm_api::drives::Provider::Onedrive].client_id,
+        "00000000-0000-0000-0000-000000000001"
+    );
+    let app = router(again.clone());
+
+    // Back to the build's own app (or none in a build without one)
+    let (st, row) = call(
+        &app,
+        OWNER,
+        "PUT",
+        "/v1/node/apps/tidal",
+        Some(json!({"client_id": ""})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{row}");
+    assert_eq!(row["from"].as_str(), built.map(|_| "builtin"));
+    assert_eq!(
+        again.tidal.read().unwrap().creds.client_id,
+        built.unwrap_or_default()
+    );
+    assert_eq!(again.tidal.read().unwrap().creds.client_secret, "");
+
+    // node.toml wins: the admin's own app is kept but not used, and can't be set here
+    call(
+        &app,
+        OWNER,
+        "PUT",
+        "/v1/node/apps/tidal",
+        Some(json!({"client_id": "my-own-tidal-id"})),
+    )
+    .await;
+    drop(app);
+    let toml = node_with(
+        dir.path(),
+        pm_api::tidal::TidalCredentials {
+            client_id: "from-node-toml".into(),
+            ..Default::default()
+        },
+    );
+    pm_api::apps::apply_own(&toml);
+    assert_eq!(toml.tidal.read().unwrap().creds.client_id, "from-node-toml");
+    let app = router(toml.clone());
+    let (_, apps) = call(&app, OWNER, "GET", "/v1/node/apps", None).await;
+    let tidal = find(&apps, "tidal");
+    assert_eq!(tidal["from"], "config");
+    assert!(tidal["set"].is_null(), "{tidal}");
+    let (st, _) = call(
+        &app,
+        OWNER,
+        "PUT",
+        "/v1/node/apps/tidal",
+        Some(json!({"client_id": "x"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT);
 }
