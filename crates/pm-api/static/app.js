@@ -292,32 +292,53 @@
     if (!r.text) { toast('Write something to post', 'error'); return; }
     try { await api('POST', '/posts', { uri, content: r.text }); toast('Posted'); } catch (e) { toast(e.message, 'error'); }
   };
+  // What someone is typing survives the page's re-renders (an item still being read renders
+  // again every few seconds): kept per item, and per comment for a reply
+  const commentDrafts = new Map();
+  const commentTyping = () => $$('.comment-form textarea').some((t) => t.value.trim() || t === document.activeElement);
   const mountComments = (sec) => {
     const uri = sec.dataset.curi; const body = $('.comments-body', sec);
+    const draftKey = (f) => `${uri}|${(f && f.dataset.replyTo) || ''}`;
+    const fill = (f, text) => { if (!f || !text) return; f.elements.content.value = text; f.querySelector('button').disabled = false; };
+    const openReply = (li, post) => {
+      const sub = $('.comment-sub', li); if (!$(':scope > form', sub)) { sub.insertAdjacentHTML('afterbegin', commentForm('Reply')); $(':scope > form', sub).dataset.replyTo = post; }
+      return $(':scope > form', sub);
+    };
     const show = async () => {
       let t; try { t = await api('GET', `/comments?uri=${encodeURIComponent(uri)}`); } catch (e) { body.innerHTML = `<p class="muted small">${esc(e.message)}</p>`; return; }
       if (!sec.isConnected) return;
       body.innerHTML = `${commentForm('Add a comment')}${t.comments.length ? `<ul class="comments">${t.comments.map(commentRow).join('')}</ul>` : `<p class="muted small">No comments yet.</p>`}<p class="muted small">A comment is a public post on your homeserver, so every Pubky app shows it.</p>`;
+      fill($('form.comment-form', body), commentDrafts.get(`${uri}|`));
+      for (const [k, text] of commentDrafts) {
+        const [u, post] = [k.slice(0, k.lastIndexOf('|')), k.slice(k.lastIndexOf('|') + 1)];
+        const li = u === uri && post ? $$('li.comment', body).find((x) => x.dataset.cpost === post) : null;
+        if (li) fill(openReply(li, post), text);
+      }
     };
     const replies = async (li, post) => {
       let t; try { t = await api('GET', `/comments?post=${encodeURIComponent(post)}`); } catch (e) { toast(e.message, 'error'); return; }
       $('.comment-sub', li).innerHTML = t.comments.length ? `<ul class="comments">${t.comments.map(commentRow).join('')}</ul>` : '<p class="muted small">No replies yet.</p>';
     };
     // Post wakes up once there is something to post
-    sec.addEventListener('input', (e) => { const f = e.target.closest('form.comment-form'); if (f) f.querySelector('button').disabled = !f.elements.content.value.trim(); });
+    sec.addEventListener('input', (e) => {
+      const f = e.target.closest('form.comment-form'); if (!f) return;
+      const text = f.elements.content.value; f.querySelector('button').disabled = !text.trim();
+      if (text.trim()) commentDrafts.set(draftKey(f), text); else commentDrafts.delete(draftKey(f));
+    });
     sec.addEventListener('submit', async (e) => {
       const f = e.target.closest('form.comment-form'); if (!f) return; e.preventDefault();
       const content = f.elements.content.value.trim(); if (!content) return;
       const b = f.querySelector('button'); b.disabled = true;
       try {
         await api('POST', '/comments', f.dataset.replyTo ? { reply_to: f.dataset.replyTo, content } : { uri, content });
+        commentDrafts.delete(draftKey(f));
         toast(f.dataset.replyTo ? 'Reply posted' : 'Comment posted');
         if (f.dataset.replyTo) await replies(f.closest('li.comment'), f.dataset.replyTo); else await show();
       } catch (err) { b.disabled = false; toast(err.message, 'error'); }
     });
     sec.addEventListener('click', async (e) => {
       const r = e.target.closest('[data-creply]');
-      if (r) { const sub = $('.comment-sub', r.closest('li.comment')); if (!$(':scope > form', sub)) { sub.insertAdjacentHTML('afterbegin', commentForm('Reply')); const f = $(':scope > form', sub); f.dataset.replyTo = r.dataset.creply; f.elements.content.focus(); } return; }
+      if (r) { const sub = $('.comment-sub', r.closest('li.comment')); if (!$(':scope > form', sub)) openReply(r.closest('li.comment'), r.dataset.creply).elements.content.focus(); return; }
       const rp = e.target.closest('[data-creplies]'); if (rp) { await replies(rp.closest('li.comment'), rp.dataset.creplies); return; }
       const d = e.target.closest('[data-cdel]');
       if (d) {
@@ -4367,7 +4388,8 @@
           $$('[data-tag-open]', $('#itags')).forEach((b) => b.onclick = () => setView('discover', { tag: b.dataset.tagOpen }));
           const csec = $('#icomments'); if (csec) mountComments(csec);
           if (pg.on_pubky && pg.on_pubky.faces) fillTagFaces($('#itags'), pg.on_pubky.faces, new Map(pg.on_pubky.tags));
-          if (pg.reading || pg.pending) { const tries = (state.viewArg.tries || 0) + 1; if (tries <= 12) setTimeout(() => { if (state.view === 'item' && state.viewArg.id === id) { state.viewArg.tries = tries; render(); } }, pg.pending ? 3000 : 4000); }
+          // Not while someone types a comment: the render would take the box away under them
+          if (pg.reading || pg.pending) { const tries = (state.viewArg.tries || 0) + 1; const again = () => { if (state.view !== 'item' || state.viewArg.id !== id) return; if (commentTyping()) { setTimeout(again, 3000); return; } state.viewArg.tries = tries; render(); }; if (tries <= 12) setTimeout(again, pg.pending ? 3000 : 4000); }
           break;
         }
         case 'queue': {
