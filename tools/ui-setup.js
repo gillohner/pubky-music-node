@@ -346,12 +346,13 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
           let sw = null;
           if (shown) {
             await p.click('#np #npart');
-            const tab = await p.waitForSelector('#nowplaying [data-npsheet="sources"]:visible', { timeout: 10000 }).catch(() => null);
-            if (tab) { await tab.click(); sw = await p.waitForSelector('[data-npswitch]', { timeout: 8000 }).catch(() => null); }
+            // Now playing draws itself again on zone updates: a locator finds the tab afresh each try
+            const opened = await p.locator('#nowplaying [data-npsheet="sources"]:visible').first().click({ timeout: 15000 }).then(() => true).catch(() => false);
+            if (opened) sw = await p.waitForSelector('[data-npswitch]', { timeout: 8000 }).catch(() => null);
           }
           check(!!sw && /Play from here/.test(await sw.textContent()), 'Sources: Play from here on another source of the playing song');
           if (sw) {
-            await sw.click();
+            await p.locator('[data-npswitch]').first().click({ timeout: 10000 });
             const moved = await (async () => { const end = Date.now() + 10000; for (;;) { const z2 = await api('GET', `/zones/${encodeURIComponent(nz.id)}`); if (z2.now_playing && z2.now_playing.item.uri === `track:${other.id}`) return z2; if (Date.now() > end) return null; await p.waitForTimeout(250); } })();
             check(!!moved && loadBody && loadBody.items[loadBody.index].uri === `track:${other.id}` && loadBody.items.length === zs.queue.length && loadBody.transport === 'paused', `the zone plays it from there, same place in the queue (${loadBody ? `${loadBody.index}/${loadBody.items.length} at ${loadBody.position_ms} ms` : 'no load'})`);
           }
