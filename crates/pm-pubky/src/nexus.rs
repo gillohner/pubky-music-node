@@ -305,6 +305,76 @@ impl NexusClient {
         Self::json(resp).await
     }
 
+    /// People whose name starts with `username` (`GET /v0/stream/users/username`), as profiles.
+    pub async fn users_by_name(&self, username: &str, limit: u32) -> Result<Vec<UserView>, NexusError> {
+        let resp = self
+            .http
+            .get(with_query(
+                &self.url("/stream/users/username"),
+                &[("username", username), ("limit", &limit.to_string())],
+            ))
+            .send()
+            .await?;
+        Self::json(resp).await
+    }
+
+    /// Posts whose text matches `q` (`GET /v0/search/posts/by_content`): their keys, best first.
+    pub async fn posts_by_content(&self, q: &str, limit: u32) -> Result<Vec<String>, NexusError> {
+        #[derive(Deserialize)]
+        struct Hit {
+            post_key: String,
+        }
+        let resp = self
+            .http
+            .get(with_query(
+                &self.url("/search/posts/by_content"),
+                &[("q", q), ("limit", &limit.to_string())],
+            ))
+            .send()
+            .await?;
+        let hits: Vec<Hit> = Self::json(resp).await?;
+        Ok(hits.into_iter().map(|h| h.post_key).collect())
+    }
+
+    /// Posts carrying a tag (`GET /v0/search/posts/by_tag/{label}`): their keys. Nexus answers
+    /// either keys or `{post_key, …}` objects, depending on its version.
+    pub async fn posts_by_tag(&self, label: &str, limit: u32) -> Result<Vec<String>, NexusError> {
+        let resp = self
+            .http
+            .get(with_query(
+                &self.url(&format!(
+                    "/search/posts/by_tag/{}",
+                    url::form_urlencoded::byte_serialize(label.as_bytes()).collect::<String>()
+                )),
+                &[("limit", &limit.to_string())],
+            ))
+            .send()
+            .await?;
+        let raw: Vec<Value> = Self::json(resp).await?;
+        Ok(raw
+            .into_iter()
+            .filter_map(|v| match v {
+                Value::String(s) => Some(s),
+                Value::Object(o) => o.get("post_key").and_then(|k| k.as_str()).map(str::to_string),
+                _ => None,
+            })
+            .collect())
+    }
+
+    /// Posts by key (`author:id`), in one call (`POST /v0/stream/posts/by_ids`).
+    pub async fn posts_by_ids(&self, keys: &[String]) -> Result<Vec<PostView>, NexusError> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        let resp = self
+            .http
+            .post(self.url("/stream/posts/by_ids"))
+            .json(&serde_json::json!({ "post_ids": keys }))
+            .send()
+            .await?;
+        Self::json(resp).await
+    }
+
     /// One profile, with the viewer's relationship when given.
     pub async fn user(&self, id: &str, viewer: Option<&str>) -> Result<UserView, NexusError> {
         let mut url = self.url(&format!("/user/{id}"));
