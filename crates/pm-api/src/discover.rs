@@ -1166,12 +1166,6 @@ pub(crate) async fn load_external(s: &Arc<NodeState>, uri: &str) -> External {
             }
         }
     }
-    // The owner's own matches ("Find on other services") count like Pinakes's links.
-    for m in crate::item::matches_for(s, &uri) {
-        if !it.also_on.iter().any(|v| v.url == m.url) {
-            it.also_on.push(m);
-        }
-    }
     let acc = service_access(s);
     let res = resolve(&acc, &it, album_id);
     let out = ItemContents {
