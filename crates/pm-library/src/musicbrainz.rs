@@ -343,17 +343,7 @@ impl MusicBrainzClient {
     }
 }
 
-/// Escape Lucene special characters inside a quoted phrase.
-pub fn lucene_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        if "+-&|!(){}[]^\"~*?:\\/".contains(c) {
-            out.push('\\');
-        }
-        out.push(c);
-    }
-    out
-}
+pub use crate::matching::lucene_escape;
 
 fn str_at<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
     v.get(key).and_then(Value::as_str)
