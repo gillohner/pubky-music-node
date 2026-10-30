@@ -2270,6 +2270,14 @@ async fn artist_info_handler(
 
 async fn artist_image(State(s): State<Arc<NodeState>>, Path(id): Path<i64>) -> Result<Response, ApiError> {
     let path = artist_info::image_path(&s, id);
+    // The page's own fetch (in the reader's language) brings the portrait: wait for it rather
+    // than fetch it all again
+    for _ in 0..50 {
+        if path.is_file() || !artist_info::fetching(id) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
     if !path.is_file() {
         // The first request may have to fetch it.
         let info = artist_info::artist_info(&s, id, "en").await?;

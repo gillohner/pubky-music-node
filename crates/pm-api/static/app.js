@@ -4218,6 +4218,8 @@
           const crumbs = kind === 'artist' ? [] : [pg.artist && pg.artist.id ? ['artist', pg.artist] : null, kind === 'song' && pg.album && pg.album.id ? ['album', pg.album] : null].filter(Boolean);
           const crumbBar = crumbs.length ? `<nav class="crumbs" aria-label="Breadcrumb"><ol>${crumbs.map(([k, l]) => `<li><button class="lnk" data-crumb-kind="${k}" data-crumb-id="${esc(l.id)}">${esc(l.name)}</button></li>`).join('')}<li aria-current="page">${esc(state.itemTitle || '')}</li></ol></nav>` : '';
           if (isListener()) pg.about = pg.about.filter((f) => f.label !== 'File');
+          // The About section, also redrawn on its own when open sources answer (about_pending)
+          const aboutHtml = (p) => `<section class="section" id="iabout"><div class="section-head"><h3>About</h3></div>${p.blurb ? `<p class="blurb">${esc(p.blurb)}</p>` : ''}${aboutCredit(p)}${p.about.length ? `<dl class="kv">${p.about.map((f) => `<dt>${esc(f.label)}</dt><dd>${webUrl(f.href) ? `<a href="${esc(webUrl(f.href))}" target="_blank" rel="noopener">${esc(f.value)}</a>` : esc(f.value)}</dd>`).join('')}</dl>` : empty('Nothing more is known yet.')}</section>`;
           main.innerHTML = `<div class="pagebar">${backBtn(parent ? `item:${parent.kind}:${parent.id}` : pg.section, parent ? parent.name : sectionName)}${crumbBar}</div>`
             + (pg.reading ? `<p class="muted small reading">Reading this link on Pinakes… versions and tags appear in a moment.</p>` : '')
             + (pg.pending ? `<p class="muted small reading" role="status"><span class="spin"></span> Getting the songs and albums${pg.plays_from && pg.plays_from.service ? ` from ${esc(SERVICE_NAMES[pg.plays_from.service] || pg.plays_from.service)}` : ''}…</p>` : '')
@@ -4231,7 +4233,7 @@
             + (kind === 'song' && pg.versions.length ? `<section class="section" id="iversions"><div class="section-head"><h3>Versions</h3><span class="muted small">other recordings: live, remastered, edits</span></div><div class="list compact">${pg.versions.map((v, k) => `<div class="list-row">${svcBadge(v.source === 'library' ? 'library' : v.source)}<div class="grow"><div class="name">${v.page ? `<a class="lnk" data-vpage="${k}">${esc(v.label.split(' · ')[0])}</a>` : esc(v.label.split(' · ')[0])}</div><div class="sub">${esc(v.label.split(' · ').slice(1).join(' · '))}</div></div><button class="icon-btn" data-vplay="${k}" title="Play this version" aria-label="Play this version">${icon('play')}</button></div>`).join('')}</div></section>` : '')
             + `<section class="section" id="itags"><div class="section-head"><h3>Tags</h3>${pg.on_pubky && pg.on_pubky.taggers ? `<button class="faces muted small" data-taggers="${pg.on_pubky.taggers}">${pg.on_pubky.taggers} ${pg.on_pubky.taggers === 1 ? 'person' : 'people'} tagged this on Pubky</button>` : ''}</div>${resignNotice()}${myTags ? scopedTagRow(myTags, linkTags, linkRef ? pg.source : null, kind, (pg.on_pubky && pg.on_pubky.tags) || []) : `${pg.on_pubky && pg.on_pubky.tags.length ? `<div class="chips">${pg.on_pubky.tags.map(([l, c]) => `<button class="chip" data-tag-open="${esc(l)}">#${esc(l)} <span class="muted">${c}</span></button>`).join('')}</div>` : ''}${empty(`Tagging works once this ${kind} is matched to MusicBrainz, the open music database, so other apps know what it is.`)}`}${myReview !== undefined ? reviewRow(myReview) : ''}</section>`
             + '<div id="irelated-slot"></div>'
-            + `<section class="section" id="iabout"><div class="section-head"><h3>About</h3></div>${pg.blurb ? `<p class="blurb">${esc(pg.blurb)}</p>` : ''}${aboutCredit(pg)}${pg.about.length ? `<dl class="kv">${pg.about.map((f) => `<dt>${esc(f.label)}</dt><dd>${webUrl(f.href) ? `<a href="${esc(webUrl(f.href))}" target="_blank" rel="noopener">${esc(f.value)}</a>` : esc(f.value)}</dd>`).join('')}</dl>` : empty('Nothing more is known yet.')}</section>`;
+            + aboutHtml(pg);
           $('[data-back]', main).onclick = () => goBack(pg.section);
           // One way back: on wide screens the breadcrumb stands in for Back when Back goes to a crumb
           { const bk = $('.pagebar > [data-back]', main);
@@ -4282,8 +4284,27 @@
           $$('[data-vpage]', main).forEach((a) => a.onclick = () => setView('item', { kind, id: pg.versions[Number(a.dataset.vpage)].page }));
           $$('[data-tag-open]', $('#itags')).forEach((b) => b.onclick = () => setView('discover', { tag: b.dataset.tagOpen }));
           if (pg.on_pubky && pg.on_pubky.faces) fillTagFaces($('#itags'), pg.on_pubky.faces, new Map(pg.on_pubky.tags));
-          // About from open sources comes in the background too: ask again until it is there
-          if (pg.reading || pg.pending || pg.about_pending) { const tries = (state.viewArg.tries || 0) + 1; if (tries <= 12) setTimeout(() => { if (state.view === 'item' && state.viewArg.id === id) { state.viewArg.tries = tries; render(); } }, pg.reading ? 4000 : 3000); }
+          if (pg.reading || pg.pending) { const tries = (state.viewArg.tries || 0) + 1; if (tries <= 12) setTimeout(() => { if (state.view === 'item' && state.viewArg.id === id) { state.viewArg.tries = tries; render(); } }, pg.reading ? 4000 : 3000); }
+          // About from open sources comes in the background: ask for the page again and redraw only
+          // About and the portrait in place (the page stays put: scroll, focus, a half-typed tag).
+          // When it brings other sources ("Also on"), the page is drawn once more at the end.
+          else if (pg.about_pending) {
+            const here = () => state.view === 'item' && state.viewArg.id === id;
+            const poll = (tries) => setTimeout(async () => {
+              if (!here()) return;
+              let np; try { np = await api('GET', `/item/${kind}/${encodeURIComponent(id)}`); } catch { return; }
+              if (!here()) return;
+              if (np.about_pending) { if (tries < 12) poll(tries + 1); return; }
+              const sources = (p) => JSON.stringify([(p.also_on || []).map((v) => v.url), (p.open_on || []).map((v) => v.url)]);
+              if (sources(np) !== sources(pg)) { render(); return; }
+              if (isListener()) np.about = (np.about || []).filter((f) => f.label !== 'File');
+              const sec = $('#iabout', main); if (sec) sec.outerHTML = aboutHtml({ ...np, about: np.about || [] });
+              const ph = np.image && !pg.image && $('.hero .art.placeholder', main);
+              if (ph) ph.outerHTML = `<div class="art${kind === 'artist' ? ' round' : ''}"><img src="${esc(imgSrc(np.image))}" alt="" style="width:100%;border-radius:${kind === 'artist' ? '50%' : '12px'}" data-err="remove"></div>`;
+              Object.assign(pg, { about: np.about, blurb: np.blurb, about_text: np.about_text, image_credit: np.image_credit, image: np.image || pg.image, about_pending: false });
+            }, 3000);
+            poll(1);
+          }
           break;
         }
         case 'queue': {
