@@ -12681,20 +12681,27 @@ exec sleep 300
         >::new()));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
+        // Pinakes down: it answers 503
+        let down = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let mock = {
             let searches = searches.clone();
+            let down = down.clone();
             Router::new()
                 .route(
                     "/v1/search",
                     get(move |Query(q): Query<std::collections::HashMap<String, String>>| {
                         let searches = searches.clone();
+                        let down = down.clone();
                         async move {
                             searches.lock().unwrap().push(q);
-                            Json(serde_json::json!({"items": [
+                            if down.load(std::sync::atomic::Ordering::SeqCst) {
+                                return Err(StatusCode::SERVICE_UNAVAILABLE);
+                            }
+                            Ok(Json(serde_json::json!({"items": [
                                 {"id": "c1", "uri": "https://example.org/not-music", "status": "ok", "type": "Article", "name": "Not music"},
                                 {"id": "c2", "uri": "https://musicbrainz.org/recording/833f00e1-781f-4edd-90e4-e52712618862", "status": "ok", "type": "MusicRecording", "name": "On MusicBrainz", "site": "musicbrainz.org"},
                                 {"id": "c3", "uri": "https://tidal.com/track/50850120", "status": "ok", "type": "MusicRecording", "name": "On TIDAL", "site": "tidal.com"}
-                            ], "cursor": null}))
+                            ], "cursor": null})))
                         }
                     }),
                 )
@@ -12754,7 +12761,7 @@ exec sleep 300
         assert_eq!(by[1], serde_json::json!({"key": "tagger1", "labels": ["techno"]}));
         assert_eq!(tidal["page"], "https://tidal.com/track/50850120");
         // The same answer again comes from the cache
-        call(&app, "POST", "/v1/smart/preview", Some(rules)).await;
+        call(&app, "POST", "/v1/smart/preview", Some(rules.clone())).await;
         assert_eq!(searches.lock().unwrap().len(), 1);
         // One query, as the feed says (review of #159): with a rule, what the network found meets
         // it too; a card nothing can check it on (no genre known) is left out
@@ -12770,6 +12777,19 @@ exec sleep 300
         .await;
         assert_eq!(st, StatusCode::OK, "{r}");
         assert!(r.get("network").is_none(), "{r}");
+        // ...because of the rule, not a failed call (review of #192): the network answered
+        assert!(r.get("network_note").is_none(), "{r}");
+        assert_eq!(searches.lock().unwrap().len(), 1);
+        // Pinakes down once the answer is old: the last answer stays, said to be old (review of
+        // #192: the playlist doesn't empty)
+        crate::smart_network::age_answers(std::time::Duration::from_secs(600));
+        down.store(true, std::sync::atomic::Ordering::SeqCst);
+        let (st, r) = call(&app, "POST", "/v1/smart/preview", Some(rules.clone())).await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        assert_eq!(searches.lock().unwrap().len(), 2, "asked again");
+        assert_eq!(r["network"].as_array().map(Vec::len), Some(2), "{r}");
+        assert!(r["network_note"].as_str().unwrap().contains("minutes ago"), "{r}");
+        down.store(false, std::sync::atomic::Ordering::SeqCst);
         // People you follow need a Pubky sign-in: said in plain words, not an error
         let (st, r) = call(
             &app,
@@ -13926,5 +13946,35 @@ exec sleep 300
             tg.get("needs_match").is_none(),
             "an unmatched song takes tags that wait: {tg}"
         );
+    }
+
+    /// Review of #192: an end of the Live post that fails (the homeserver doesn't answer, a
+    /// sign-in being restored) keeps the session, so it is tried again, and a retry is waiting:
+    /// a stopped zone has no next change to try it.
+    #[tokio::test]
+    async fn a_failed_end_of_the_live_post_is_tried_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let now = pm_pubky::ids::now_micros();
+        let post = serde_json::json!({"id": "0034A0Z4013G0", "edit": "0034A0Z4013G0", "zone": "gone",
+            "song": "https://musicbrainz.org/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69",
+            "session_at": now, "started_at": now, "expires_at": now + 600_000_000});
+        {
+            let lib = s.library.lock().unwrap();
+            lib.set_setting("listening.share", r#"{"share":true}"#).unwrap();
+            lib.set_setting("listening.post", &post.to_string()).unwrap();
+        }
+        crate::listening_share::zone_event(&s, "gone", &pm_zones::ZoneEvent::Stopped);
+        for _ in 0..200 {
+            if s.listening_retry.lock().unwrap().is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(s.listening_retry.lock().unwrap().as_deref(), Some("gone"));
+        let kept = s.library.lock().unwrap().get_setting("listening.post").unwrap();
+        assert!(kept.is_some(), "the session stays until its end is written");
+        let (_, share) = call(&router(s.clone()), "GET", "/v1/me/listening", None).await;
+        assert_eq!(share["share"], true, "not refused: sharing stays on");
     }
 }
