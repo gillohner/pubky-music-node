@@ -532,6 +532,9 @@ where
     }
     let st = s.clone();
     tokio::spawn(async move {
+        // Out of the in-flight set however the fetch ends, a panic too: else the item would say
+        // "coming" until the node restarts
+        let _done = InFlight(key.clone());
         let about = fetch.await;
         let c = Cached {
             at: pm_library::db::now_unix(),
@@ -542,9 +545,20 @@ where
             .lock()
             .expect("library poisoned")
             .set_setting(&key, &serde_json::to_string(&c).expect("about serializes"));
-        in_flight().lock().expect("in-flight").remove(&key);
     });
     (old, true)
+}
+
+/// Takes a key out of the in-flight set when dropped.
+struct InFlight(String);
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        in_flight()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&self.0);
+    }
 }
 
 fn in_flight() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
@@ -707,6 +721,21 @@ pub(crate) fn song(s: &std::sync::Arc<NodeState>, recording: pm_model::Mbid, lan
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// A fetch that panics leaves the in-flight set all the same: the item doesn't say "coming"
+    /// until the node restarts (review of #180).
+    #[test]
+    fn a_panicking_fetch_leaves_the_in_flight_set() {
+        let key = "album.about.test-panic.en".to_string();
+        in_flight().lock().unwrap().insert(key.clone());
+        let k = key.clone();
+        let r = std::panic::catch_unwind(move || {
+            let _done = InFlight(k);
+            panic!("a fetch that panics");
+        });
+        assert!(r.is_err());
+        assert!(!in_flight().lock().unwrap().contains(&key));
+    }
 
     #[test]
     fn the_language_comes_from_the_query_then_the_header() {

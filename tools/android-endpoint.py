@@ -80,6 +80,16 @@ def until(what, fn, timeout=60, every=1.0):
         time.sleep(every)
 
 
+def fresh_logcat():
+    """Start the log over for the next attempt, keeping what came before (logcat-<n>.txt in the
+    artifact), so a failure after a retry still shows why the first attempt ended."""
+    log_file = out / "logcat.txt"
+    if log_file.exists():
+        n = len(list(out.glob("logcat-*.txt"))) + 1
+        (out / f"logcat-{n}.txt").write_bytes(log_file.read_bytes())
+    log_file.write_text("")
+
+
 def logcat():
     return (out / "logcat.txt").read_text(errors="replace") if (out / "logcat.txt").exists() else ""
 
@@ -179,7 +189,8 @@ def rate_over(zid, seconds):
 
 # The address the app registers: the emulator's own, on the player's usual port
 GUEST = "10.0.2.15:7790"
-# The host end of `adb forward` to the player
+# The host end of `adb forward` to the player: one port per relay, so a second relay never
+# re-points the first
 FORWARD = 17790
 relays = {}
 
@@ -191,10 +202,11 @@ def relay(address):
     if address in relays:
         return
     ip, port = address.rsplit(":", 1)
+    host_port = FORWARD + len(relays)
     r = subprocess.run(["sudo", "ip", "addr", "add", f"{ip}/32", "dev", "lo"], capture_output=True, text=True)
     if r.returncode != 0 and "exists" not in r.stderr:
         raise RuntimeError(f"cannot add {ip} to the loopback: {r.stderr.strip()}")
-    adb("forward", f"tcp:{FORWARD}", f"tcp:{port}")
+    adb("forward", f"tcp:{host_port}", f"tcp:{port}")
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     srv.bind((ip, int(port)))
@@ -220,7 +232,7 @@ def relay(address):
         while True:
             c, _ = srv.accept()
             try:
-                up = socket.create_connection(("127.0.0.1", FORWARD), timeout=10)
+                up = socket.create_connection(("127.0.0.1", host_port), timeout=10)
                 up.settimeout(None)
             except OSError:
                 c.close()
@@ -230,7 +242,7 @@ def relay(address):
 
     threading.Thread(target=serve, daemon=True).start()
     relays[address] = srv
-    log(f"{address} relays to the phone's player (adb forward tcp:{FORWARD} -> tcp:{port})")
+    log(f"{address} relays to the phone's player (adb forward tcp:{host_port} -> tcp:{port})")
 
 
 def main():
@@ -356,7 +368,13 @@ def run(node):
             if ok:
                 return (True, ok.group(1))
             bad = re.search(r"player not registered[^\n]*address=(\S+)", text)
-            return (False, bad.group(1)) if bad else None
+            if bad:
+                return (False, bad.group(1))
+            # No address to relay: the player can't be registered at all; say why
+            stuck = re.search(r"[^\n]*(player not registered|no player:)[^\n]*", text)
+            if stuck:
+                raise SystemExit(f"FAIL: {stuck.group(0).strip()}")
+            return None
 
         done, address = until("the player's registration", registered, timeout=60)
         if not done:
@@ -365,7 +383,7 @@ def run(node):
             log(f"the player registered as {address}, not {GUEST}: relaying that and starting the app again")
             relay(address)
             adb("shell", "am", "force-stop", PKG)
-            (out / "logcat.txt").write_text("")
+            fresh_logcat()
             adb("logcat", "-c")
             adb("shell", "am", "start", "-W", "-n", f"{PKG}/.MainActivity")
             wait_page("the node's page after starting again", relaunch=True)
@@ -418,7 +436,7 @@ def run(node):
                 if attempt == 2 or len(kills) == seen:
                     raise
                 log(f"Android killed the app while it played, not a crash ({kills[-1]}); starting it again ({e})")
-                (out / "logcat.txt").write_text("")
+                fresh_logcat()
                 adb("logcat", "-c")
                 adb("shell", "am", "start", "-W", "-n", f"{PKG}/.MainActivity")
                 wait_page("the node's page after Android killed the app", relaunch=True)
@@ -428,7 +446,7 @@ def run(node):
 
         # Started again with the node saved: it reconnects and the service starts again
         adb("shell", "am", "force-stop", PKG)
-        (out / "logcat.txt").write_text("")
+        fresh_logcat()
         adb("logcat", "-c")
         adb("shell", "am", "start", "-W", "-n", f"{PKG}/.MainActivity")
         wait_page("the node's page after a restart", relaunch=True)

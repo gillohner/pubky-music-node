@@ -13,7 +13,8 @@
 //     sample rate with the ones picked;
 //   * About: "Use a different token in this browser", the node's token set in the config, or
 //     replaced and shown once; the login dialog says where the token is;
-//   * an item page credits Wikipedia's text and a Commons picture (source, licence, links);
+//   * an item page credits Wikipedia's text and a Commons picture (source, licence, links), and
+//     redraws only About when it arrives in the background;
 //   * covers carry a provider badge (where it plays from: the library or the service) on tiles,
 //     song rows, the album page and Now playing, in the corner, named, in the service's colour.
 //   * Play to: while something plays or is queued, every other device gets Move here (This zone
@@ -588,6 +589,20 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
     await p.fill('#search', 'tag:chill'); await p.press('#search', 'Enter'); await p.waitForSelector('#sresults [data-skind="song"]');
     check(seen.includes('tag:chill'), `tag:chill is sent as typed (${seen.join(' | ')})`);
     await p.unroute(/\/v1\/search\?/); await p.unroute(/\/v1\/search\/tags\?/);
+    await c.close();
+
+    // ---- About comes in the background: only About and the portrait are redrawn ----
+    c = await ctx(); p = await c.newPage();
+    let asked = 0;
+    const later = { ...credited, id: 'lib-778', target: { artist_id: 778 }, title: 'Pending Test', blurb: null, about_text: null, image_credit: null, about_pending: true };
+    await p.route(/\/v1\/item\/artist\/lib-778(\?.*)?$/, (r) => { asked++; return r.fulfill({ json: asked < 2 ? later : { ...later, about_pending: false, blurb: 'Pending Test is a band.', about_text: { text: 'Pending Test is a band.', source: 'Wikipedia', url: 'https://en.wikipedia.org/wiki/Pending_Test', lang: 'en', licence: 'CC BY-SA 4.0', licence_url: 'https://creativecommons.org/licenses/by-sa/4.0/' } } }); });
+    await p.goto(BASE + '/artist/lib-778');
+    check(await visible(p, '#main .hero'), 'the pending page shows');
+    await p.evaluate(() => { document.querySelector('#main .hero').dataset.mark = 'same'; });
+    check(await visible(p, '#iabout .blurb', 9000), 'About arrives by itself');
+    check(await p.evaluate(() => document.querySelector('#main .hero')?.dataset.mark === 'same'), 'without drawing the page again');
+    check(await p.evaluate(() => { const b = document.querySelector('#iblurbmore'); return !!document.querySelector('#iblurb.clamp') && !!b && typeof b.onclick === 'function'; }), 'the article that arrived is clamped, with its More button working');
+    check(asked === 2, `the page is asked again once About is due (asked ${asked} times, want 2)`);
     await c.close();
 
     // ---- Home: Listening now (L3) ----

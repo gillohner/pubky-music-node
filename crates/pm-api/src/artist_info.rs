@@ -144,8 +144,11 @@ pub(crate) async fn artist_info(
             ..ArtistInfo::default()
         });
     }
-    let info = fetch(s, artist_id, mbid, &name, lang).await;
-    in_flight().lock().expect("in-flight lock").remove(&flight);
+    let info = {
+        // Out of the in-flight set however the fetch ends (a panic too)
+        let _done = InFlight(flight);
+        fetch(s, artist_id, mbid, &name, lang).await
+    };
     let lib = s.library.lock().expect("library poisoned");
     let cached = Cached {
         at: pm_library::db::now_unix(),
@@ -180,6 +183,27 @@ pub(crate) fn artist_info_now(
         let _ = artist_info(&st, artist_id, &lang).await;
     });
     Ok((old, true))
+}
+
+/// Takes an artist and language out of the in-flight set when dropped.
+struct InFlight((i64, String));
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        in_flight()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&self.0);
+    }
+}
+
+/// Whether the artist's info is being fetched now, in any language (its portrait with it).
+pub(crate) fn fetching(artist_id: i64) -> bool {
+    in_flight()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .iter()
+        .any(|(id, _)| *id == artist_id)
 }
 
 pub(crate) fn image_path(s: &NodeState, artist_id: i64) -> std::path::PathBuf {
@@ -421,7 +445,9 @@ async fn download(http: &reqwest::Client, url: &str, to: &std::path::Path) -> bo
     {
         return false;
     }
-    tokio::fs::write(to, &bytes).await.is_ok()
+    // Whole or not at all: a request served meanwhile never gets half a picture
+    let part = to.with_extension("part");
+    tokio::fs::write(&part, &bytes).await.is_ok() && tokio::fs::rename(&part, to).await.is_ok()
 }
 
 #[cfg(test)]
