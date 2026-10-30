@@ -82,7 +82,7 @@ pub async fn play(paths: &[PathBuf], output: Arc<dyn Output>, cfg: PipelineConfi
                 None => println!("finished {}", item.uri),
             },
             Ok(ZoneEvent::Skipped { item, reason }) => println!("skipped {} : {reason}", item.uri),
-            Ok(ZoneEvent::Error(e)) => eprintln!("error: {e}"),
+            Ok(ZoneEvent::Error { message }) => eprintln!("error: {message}"),
             Ok(ZoneEvent::Stopped) => break,
             Ok(_) => {}
             Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}

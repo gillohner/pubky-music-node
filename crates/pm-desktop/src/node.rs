@@ -65,14 +65,14 @@ pub async fn probe(s: &Settings) -> Result<Info, ProbeError> {
     }
 }
 
-/// Register this machine's player: one zone per DAC appears in the UI.
+/// Register this machine's player with its key: one zone per DAC appears in the UI.
 #[cfg_attr(any(target_os = "android", target_os = "ios"), allow(dead_code))]
-pub async fn add_endpoint(s: &Settings, address: &str) -> Result<(), String> {
+pub async fn add_endpoint(s: &Settings, address: &str, key: &pm_stream::Key) -> Result<(), String> {
     let resp = client()
         .map_err(|e| e.to_string())?
         .post(api(s, "outputs/endpoints"))
         .bearer_auth(&s.token)
-        .json(&serde_json::json!({ "address": address }))
+        .json(&serde_json::json!({ "address": address, "key": key.expose() }))
         .send()
         .await
         .map_err(|e| e.to_string())?;

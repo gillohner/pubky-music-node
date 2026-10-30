@@ -1,5 +1,5 @@
 # Pubky Music Node on TrueNAS SCALE: Apps → Discover Apps → ⋮ → Install via YAML.
-# Edit the three paths before installing. Without PM_TOKEN the node makes a token on first start
+# Edit the two paths before installing. Without PM_TOKEN the node makes a token on first start
 # and keeps it in the data dataset (api-token, readable only by the container's user): sign in
 # with that. PM_TOKEN added after the first start also needs PM_REWRITE_CONFIG: "1" once. The image runs as uid 1000,
 # so the data dataset must be writable by that user (chown -R 1000:1000 or set
@@ -14,8 +14,9 @@ services:
     network_mode: host
     environment:
       PM_LISTEN: "0.0.0.0:7788"
-      # The address devices use to fetch audio from this node.
-      PM_PUBLIC_URL: "http://192.168.1.10:7788"
+      # The address devices fetch audio from; by default the NAS's own address on the network.
+      # Set it only when that is not the one they reach (several networks, a name):
+      # PM_PUBLIC_URL: "http://192.168.1.10:7788"
       # Your own token instead (a long random string): PM_TOKEN: "…"
       PM_CONTACT: "you@example.org"
       PM_NAME: "TrueNAS"

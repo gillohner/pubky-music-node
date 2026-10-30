@@ -124,7 +124,6 @@ def start_node(node_bin, work):
     p = subprocess.Popen([node_bin, "-c", str(work / "node.toml"), "serve"], stdout=logf, stderr=subprocess.STDOUT,
                          env={**os.environ, "RUST_LOG": "info", "PM_NULL_OUTPUT": "realtime"})
     until("the node answers", lambda: node("/v1/info"), 60, 1)
-    node("/v1/library/scan", "POST", {})
     until("the node scanned the library", lambda: len(node("/v1/library/tracks")["tracks"]) >= 2 or None, 60, 1)
     return p
 
