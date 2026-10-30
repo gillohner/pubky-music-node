@@ -926,6 +926,11 @@ code.path { font-size: 13px; overflow-wrap: anywhere; }
 .set-list .set-item .caps { flex: 0 1 50%; text-align: right; min-width: 0; overflow-wrap: anywhere; }
 @media (max-width: 720px) { .set-list .set-item { flex-wrap: wrap; } .set-list .set-item .caps { flex-basis: 100%; text-align: left; } }
 .set-help .spin { display: inline-block; vertical-align: -1px; margin-right: 4px; }
+/* Settings › Service apps: the admin's own app, under Advanced */
+.app-adv { margin-top: 6px; max-width: 64ch; }
+.app-adv > .toolbar { margin-top: 6px; }
+.app-redirects { list-style: none; margin: 4px 0; padding: 0; display: grid; gap: 4px; }
+.app-redirects code { overflow-wrap: anywhere; }
 .reading .spin { display: inline-block; vertical-align: -1px; margin-right: 6px; }
 /* Sources: the Settings layout, one tab per service with its on/off switch (STEWARD-UX-SOURCES.md) */
 .src-tabrow { display: flex; align-items: center; gap: 6px; min-width: 0; }

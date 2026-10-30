@@ -6,6 +6,11 @@ Newest first. Dates are when the change landed on `main`.
 
 - **Who's listening on this node, and listening along.** `GET /v1/presence` shows who on the node listens to what, as each person chooses (`PUT /v1/me/presence`: everyone, the people they follow on Pubky, or hidden, the default). Listening along (`POST /v1/presence/along`) joins your zone's speakers to theirs as one synced group, so you hear their music at the same moment, quality and DSP; leaving moves it back to their zone. Nothing is published.
 
+### 2026-10-30
+
+- **No guide asks you to open a developer console.** The steps for an app of your own moved to "Advanced: use your own app" in docs/STREAMING-PROVIDERS.md; deploy.md, the Docker entrypoint and the TrueNAS compose file point there, and CI checks the docs (`tools/console-links.py`). Messages that said "add [tidal] client_id" or "[drives] …_client_id" now point to Settings › This node › Service apps. Release builds can carry the project's OneDrive and Google Drive app ids (`PM_PROJECT_ONEDRIVE_CLIENT_ID`, `PM_PROJECT_GOOGLE_CLIENT_ID`, repository variables) once they are registered.
+- **Settings › This node › Service apps can be changed.** Each service says whether this build's own app is in use or yours, and what the service limits in plain words: Spotify's 25 people, TIDAL's previews, Qobuz's partner-only apps, Google's 100 people before verification. "Advanced: use your own app" takes the admin's own app, with the redirect address it lists, and "Use built-in" goes back. TIDAL, Jamendo, Google Drive and OneDrive, which only node.toml could set before, take one here too (`PUT /v1/node/apps/{id}`). It is kept like a sign-in, never answered, and node.toml still wins.
+
 ## 0.2.1
 
 ### 2026-10-29
