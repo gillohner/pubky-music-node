@@ -974,6 +974,28 @@ impl Library {
         Ok(out)
     }
 
+    /// Tracks sharing genres with `seeds`, the most shared genres first (random among equals),
+    /// never a seed; at most `limit` ids. An item page's "Similar" starts here.
+    pub fn tracks_sharing_genres(&self, seeds: &[i64], limit: u32) -> Result<Vec<i64>> {
+        if seeds.is_empty() {
+            return Ok(Vec::new());
+        }
+        // Numbers only, so the list is written into the statement
+        let list = seeds.iter().map(i64::to_string).collect::<Vec<_>>().join(",");
+        let conn = self.lock();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT tg.track_id FROM track_genres tg
+             JOIN (SELECT DISTINCT genre_id FROM track_genres WHERE track_id IN ({list})) sg
+               ON sg.genre_id = tg.genre_id
+             WHERE tg.track_id NOT IN ({list})
+             GROUP BY tg.track_id ORDER BY COUNT(*) DESC, random() LIMIT ?1"
+        ))?;
+        let ids = stmt
+            .query_map(params![limit as i64], |r| r.get::<_, i64>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(ids)
+    }
+
     // ----- backup -----------------------------------------------------------
 
     /// Write a consistent snapshot of the whole database to `path` (SQLite
@@ -2719,6 +2741,32 @@ pub(crate) mod tests_support {
 mod tests {
     use super::tests_support::{sample_track, MB};
     use super::*;
+
+    #[test]
+    fn tracks_sharing_genres_rank_by_shared_genres() {
+        let lib = Library::open_in_memory().unwrap();
+        let add = |path: &str, genres: &[&str]| {
+            let mut t = sample_track(path, path);
+            t.recording_mbid = None;
+            t.isrc = None;
+            t.canonical = None;
+            t.genres = genres.iter().map(|g| g.to_string()).collect();
+            lib.upsert_track(&t).unwrap().0
+        };
+        let seed = add("/m/seed.flac", &["Disco", "Funk"]);
+        let both = add("/m/both.flac", &["Funk", "Disco"]);
+        let one = add("/m/one.flac", &["Disco"]);
+        let none = add("/m/none.flac", &["Jazz"]);
+        let got = lib.tracks_sharing_genres(&[seed], 10).unwrap();
+        assert_eq!(
+            got,
+            vec![both, one],
+            "most shared first, never the seed, nothing unrelated"
+        );
+        assert!(!got.contains(&none));
+        assert!(lib.tracks_sharing_genres(&[], 10).unwrap().is_empty());
+        assert_eq!(lib.tracks_sharing_genres(&[seed], 1).unwrap(), vec![both]);
+    }
 
     #[test]
     fn format_labels() {

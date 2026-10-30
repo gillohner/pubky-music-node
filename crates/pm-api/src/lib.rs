@@ -12658,4 +12658,77 @@ exec sleep 300
         assert_eq!(z["transport"], "stopped");
         assert_eq!(z["repeat"], "off");
     }
+
+    #[tokio::test]
+    async fn item_pages_list_similar_music_from_the_library() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let add = |name: &str, artist: &str, album: &str, genres: &[&str]| {
+            let mut t = untagged_track(dir.path().join(format!("{name}.wav")), name, artist);
+            t.album = Some(pm_model::Album {
+                id: None,
+                title: album.into(),
+                album_artist: Some(artist.into()),
+                release_mbid: None,
+                release_group_mbid: None,
+                year: None,
+                upc: None,
+                total_discs: None,
+            });
+            t.genres = genres.iter().map(|g| g.to_string()).collect();
+            s.library.lock().unwrap().upsert_track(&t).unwrap().0
+        };
+        let seed = add("Seed", "Alpha", "First", &["Disco", "Funk"]);
+        add("Both", "Beta", "Second", &["Funk", "Disco"]);
+        add("One", "Gamma", "Third", &["Disco"]);
+        add("Same Artist", "Alpha", "Other Alpha", &["Jazz"]);
+        add("Unrelated", "Delta", "Fourth", &["Jazz"]);
+        let app = router(s.clone());
+        let titles = |v: &serde_json::Value| -> Vec<String> {
+            v["similar"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|h| h["title"].as_str().unwrap().to_string())
+                .collect()
+        };
+        // A song: shared genres first (most first), then the same artist's; never itself
+        let (st, v) = call(&app, "GET", &format!("/v1/item/song/lib-{seed}/extras"), None).await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        assert_eq!(titles(&v), vec!["Both", "One", "Same Artist"], "{v}");
+        assert_eq!(v["similar"][0]["kind"], "song");
+        assert!(v["similar"][0]["track_id"].is_i64(), "playable: {v}");
+        // An album: other albums, then the same artist's other albums
+        let album = s
+            .library
+            .lock()
+            .unwrap()
+            .get_track(pm_model::TrackId(seed))
+            .unwrap()
+            .unwrap()
+            .album
+            .unwrap()
+            .id
+            .unwrap();
+        let (_, v) = call(&app, "GET", &format!("/v1/item/album/lib-{album}/extras"), None).await;
+        assert_eq!(titles(&v), vec!["Second", "Third", "Other Alpha"], "{v}");
+        // An artist: the artists of the songs that share genres, never the artist itself
+        let artist = s
+            .library
+            .lock()
+            .unwrap()
+            .get_track(pm_model::TrackId(seed))
+            .unwrap()
+            .unwrap()
+            .artists[0]
+            .id
+            .unwrap();
+        let (_, v) = call(&app, "GET", &format!("/v1/item/artist/lib-{artist}/extras"), None).await;
+        // (Alpha has a Jazz song too, so Delta shares a genre; equals come in any order)
+        let got = titles(&v);
+        assert_eq!(got[0], "Beta", "the most shared first: {v}");
+        let mut rest = got[1..].to_vec();
+        rest.sort();
+        assert_eq!(rest, vec!["Delta", "Gamma"], "{v}");
+    }
 }

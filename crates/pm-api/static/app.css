@@ -345,6 +345,9 @@ input[type=range]:hover::-moz-range-thumb, input[type=range]:focus-visible::-moz
 .section-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 12px; }
 .section-head .link { background: none; border: 0; color: var(--muted); cursor: pointer; font-size: 13px; padding: 4px 0; }
 .section-head .link:hover { color: var(--fg); }
+/* Similar on item pages: the library's own, Last.fm's, Pubky's, one under the other */
+.simpart + .simpart { margin-top: 16px; }
+.simhead { font-weight: 600; margin: 0 0 8px; text-transform: none; }
 .back { display: inline-flex; align-items: center; gap: 4px; background: none; border: 0; color: var(--muted); cursor: pointer; padding: 4px 8px 4px 2px; border-radius: 8px; margin-bottom: 14px; }
 .back:hover { color: var(--fg); background: var(--surface-2); }
 .hero { display: grid; grid-template-columns: 220px 1fr; gap: 28px; align-items: end; }

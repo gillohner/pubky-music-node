@@ -235,7 +235,7 @@ async fn one_source(s: &Arc<NodeState>, src: &str, q: &str, limit: u32) -> Resul
 }
 
 /// A library song as a search row.
-fn song_hit(t: &pm_model::Track) -> Option<SearchHit> {
+pub(crate) fn song_hit(t: &pm_model::Track) -> Option<SearchHit> {
     let tid = t.id?;
     let mut keys = Vec::new();
     if let Some(i) = &t.isrc {
@@ -267,6 +267,37 @@ fn song_hit(t: &pm_model::Track) -> Option<SearchHit> {
         album_id: t.album.as_ref().and_then(|a| a.id).map(|i| format!("lib-{i}")),
         duration_ms: t.duration_ms,
         keys,
+        ..Default::default()
+    })
+}
+
+/// A library artist as a result.
+pub(crate) fn artist_hit(a: &pm_library::ArtistSummary) -> SearchHit {
+    SearchHit {
+        kind: "artist".into(),
+        title: a.name.clone(),
+        subtitle: Some(format!("{} · your library", crate::plural(a.albums, "album"))),
+        id: format!("lib-{}", a.id),
+        keys: a.mbid.map(|m| vec![format!("mb:{m}")]).unwrap_or_default(),
+        ..Default::default()
+    }
+}
+
+/// A library album as a result.
+pub(crate) fn album_hit(a: &pm_model::Album) -> Option<SearchHit> {
+    let id = a.id?;
+    Some(SearchHit {
+        kind: "album".into(),
+        title: a.title.clone(),
+        subtitle: a.album_artist.clone(),
+        image: Some(format!("/v1/library/albums/{id}/cover")),
+        id: format!("lib-{id}"),
+        year: a.year,
+        keys: a
+            .upc
+            .as_ref()
+            .map(|u| vec![format!("upc:{u}")])
+            .unwrap_or_default(),
         ..Default::default()
     })
 }
@@ -341,31 +372,10 @@ fn library(s: &NodeState, q: &str, limit: u32) -> pm_library::Result<Vec<SearchH
         .filter(|a| a.name.to_lowercase().contains(&needle))
         .take(8)
     {
-        out.push(SearchHit {
-            kind: "artist".into(),
-            title: a.name.clone(),
-            subtitle: Some(format!("{} · your library", crate::plural(a.albums, "album"))),
-            id: format!("lib-{}", a.id),
-            keys: a.mbid.map(|m| vec![format!("mb:{m}")]).unwrap_or_default(),
-            ..Default::default()
-        });
+        out.push(artist_hit(&a));
     }
     for a in lib.search_albums(q, 12)? {
-        let Some(id) = a.id else { continue };
-        out.push(SearchHit {
-            kind: "album".into(),
-            title: a.title.clone(),
-            subtitle: a.album_artist.clone(),
-            image: Some(format!("/v1/library/albums/{id}/cover")),
-            id: format!("lib-{id}"),
-            year: a.year,
-            keys: a
-                .upc
-                .as_ref()
-                .map(|u| vec![format!("upc:{u}")])
-                .unwrap_or_default(),
-            ..Default::default()
-        });
+        out.extend(album_hit(&a));
     }
     for t in lib.search_tracks(q, limit)? {
         out.extend(song_hit(&t));
