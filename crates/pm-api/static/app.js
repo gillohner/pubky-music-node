@@ -2817,20 +2817,29 @@
   // One song row: title → song page, artist → artist page, album → album page, ⋯ = the item menu.
   // A collection item that doesn't play (a web page, a post): its Pinakes card in the list, with
   // Open instead of Play; filled in by fillCards (GET /v1/cards).
-  const cardRow = (t, k, opts) => `<div class="list-row srow card-row${opts.rowClass ? ' ' + opts.rowClass(t, k) : ''}" data-srow="${k}" data-card="${esc(t.page)}"><span class="num muted small">${opts.numbers === 'index' ? k + 1 : (t.no ?? k + 1)}</span><span class="thumb card-thumb" aria-hidden="true">${icon('compass')}</span><div class="grow"><div class="name">${esc(t.title)}</div><div class="sub card-sub">Reading the page…</div></div>${webUrl(t.page) ? `<a class="btn ghost sm" href="${esc(webUrl(t.page))}" target="_blank" rel="noopener">${icon('external')} Open</a>` : ''}${opts.extra ? opts.extra(t, k) : ''}</div>`;
-  const fillCards = (box) => $$('[data-card]', box).forEach(async (row) => {
-    for (let tries = 0; tries < 3; tries++) {
-      let c; try { c = await api('GET', `/cards?uri=${encodeURIComponent(row.dataset.card)}`); } catch { return; }
-      if (!row.isConnected) return;
-      if (c.status === 'found' || (c.status === 'reading' && c.name)) {
-        if (c.name) $('.name', row).textContent = c.name;
-        $('.card-sub', row).textContent = [c.site, c.description].filter(Boolean).join(' · ');
-        const img = webUrl(c.image); if (img) $('.card-thumb', row).outerHTML = `<img class="thumb" src="${esc(img)}" alt="" loading="lazy" data-err="hide">`;
+  const cardRow = (t, k, opts) => `<div class="list-row srow card-row${opts.rowClass ? ' ' + opts.rowClass(t, k) : ''}" data-srow="${k}" data-card="${esc(t.page)}"><span class="num muted small">${opts.numbers === 'index' ? k + 1 : (t.no ?? k + 1)}</span><span class="thumb card-thumb" aria-hidden="true">${icon('compass')}</span><div class="grow"><div class="name">${esc(t.title)}</div><div class="sub card-sub">Reading the page…</div></div>${webUrl(t.page) ? `<a class="btn ghost sm" href="${esc(webUrl(t.page))}" target="_blank" rel="noopener" aria-label="Open ${esc(t.title)} (new tab)">${icon('external')} Open</a>` : ''}${opts.extra ? opts.extra(t, k) : ''}<button class="icon-btn" data-cmore="${k}" title="More" aria-label="More: ${esc(t.title)}">${icon('more')}</button></div>`;
+  // At most two at a time: the node's other calls (play, the zone) must not wait behind them
+  const fillCards = (box) => {
+    const rows = $$('[data-card]', box); let next = 0;
+    const one = async (row) => {
+      const sub = $('.card-sub', row);
+      for (let tries = 0; tries < 3; tries++) {
+        let c; try { c = await api('GET', `/cards?uri=${encodeURIComponent(row.dataset.card)}`); } catch { break; }
+        if (!row.isConnected) return;
+        if (c.status === 'found' || (c.status === 'reading' && c.name)) {
+          if (c.name) $('.name', row).textContent = c.name;
+          sub.textContent = [c.site, c.description].filter(Boolean).join(' · ');
+          const img = webUrl(c.image); if (img) $('.card-thumb', row).outerHTML = `<img class="thumb" src="${esc(img)}" alt="" loading="lazy" data-err="hide">`;
+        }
+        if (c.status !== 'reading') { if (c.status === 'unknown') sub.textContent = 'A link'; return; }
+        await new Promise((r) => setTimeout(r, 3000));
       }
-      if (c.status !== 'reading') { if (c.status === 'unknown') $('.card-sub', row).textContent = 'A link'; return; }
-      await new Promise((r) => setTimeout(r, 3000));
-    }
-  });
+      // Never read (or the node didn't answer): say what it is, not "Reading" for good
+      if (row.isConnected && sub.textContent === 'Reading the page…') sub.textContent = 'A link';
+    };
+    const worker = async () => { while (next < rows.length) { const row = rows[next++]; if (row.isConnected) await one(row); } };
+    worker(); worker();
+  };
   const songRows = (songs, opts = {}) => `<div class="list">${songs.map((t, k) => t.card ? cardRow(t, k, opts) : `<div class="list-row clickable srow${opts.rowClass ? ' ' + opts.rowClass(t, k) : ''}" data-srow="${k}"><span class="num muted small">${opts.numbers === 'index' ? k + 1 : (t.no ?? k + 1)}</span><button class="icon-btn" data-splay="${k}" title="Play from here">${icon('play')}</button>${t.image && opts.covers !== false ? `<span class="thumbwrap"><img class="thumb" src="${esc(imgSrc(t.image))}" alt="" loading="lazy" data-err="hide">${t.sources ? '' : coverBadge(coverSvc(t))}</span>` : ''}<div class="grow"><div class="name">${t.id ? `<a class="lnk" data-ssong="${k}">${esc(t.title)}</a>` : esc(t.title)}</div><div class="sub">${[t.artist ? (t.artist_id ? `<a class="lnk" data-sartist="${k}">${esc(t.artist)}</a>` : `<a class="lnk" data-sartistq="${k}">${esc(t.artist)}</a>`) : '', t.album && opts.showAlbum !== false ? (t.album_id ? `<a class="lnk" data-salbum="${k}">${esc(t.album)}</a>` : esc(t.album)) : ''].filter(Boolean).join(' · ')}</div></div><span class="muted small">${t.duration_ms ? fmt(t.duration_ms) : ''}</span>${opts.extra ? opts.extra(t, k) : ''}<button class="icon-btn" data-smore="${k}" title="More">${icon('more')}</button></div>`).join('')}</div>`;
   // Multi-select (UX review, next tier): "Select" on a song list turns on checkboxes and a bar
   // with what to do to all of them; Escape or Cancel ends it. `opts.remove(indices)` on playlists.
@@ -2892,6 +2901,13 @@
     $$('[data-splay]', box).forEach((b) => b.onclick = (e) => { e.stopPropagation(); playSongs(songs, at(Number(b.dataset.splay)), 'replace', ctx.plays_from, b, ctx.fallback); });
     $$('[data-srow]:not([data-card])', box).forEach((r) => r.onclick = (e) => { if (e.target.closest('a,button')) return; playSongs(songs, at(Number(r.dataset.srow)), 'replace', ctx.plays_from, r, ctx.fallback); });
     fillCards(box);
+    // A card's ⋯: open it, copy its link, and the row's own moves (on phones the only way to them)
+    $$('[data-cmore]', box).forEach((b) => b.onclick = (e) => {
+      e.stopPropagation(); const k = Number(b.dataset.cmore); const t = all[k]; const web = webUrl(t.page);
+      showMenu(b, [{ title: t.title }, ...(web ? [{ label: 'Open', icon: 'external', run: () => window.open(web, '_blank', 'noopener') }] : []),
+        { label: 'Copy link', icon: 'copy', run: async () => { try { await navigator.clipboard.writeText(t.page); toast('Link copied'); } catch { toast(t.page); } } },
+        ...(ctx.rowExtra ? ctx.rowExtra(k, b.closest('.srow')) : [])]);
+    });
     $$('[data-ssong]', box).forEach((a) => a.onclick = (e) => { e.stopPropagation(); setView('item', { kind: 'song', id: all[Number(a.dataset.ssong)].id }); });
     $$('[data-sartist]', box).forEach((a) => a.onclick = (e) => { e.stopPropagation(); setView('item', { kind: 'artist', id: all[Number(a.dataset.sartist)].artist_id }); });
     $$('[data-sartistq]', box).forEach((a) => a.onclick = (e) => { e.stopPropagation(); search.value = all[Number(a.dataset.sartistq)].artist; runSearch(); });

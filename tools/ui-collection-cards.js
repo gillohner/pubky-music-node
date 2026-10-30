@@ -46,6 +46,13 @@ const api = async (method, path, body) => {
       assert.deepEqual([...new Set(asked)].sort(), [LINK, POST].sort(), 'both cards are asked for');
       assert.match(await list.locator('.card-row').nth(1).locator('.card-sub').textContent(), /A link/);
       assert.match(await page.locator('.hero .sub').textContent(), /1 song · 2 links/);
+      // A card's ⋯ (review of #155, M2): Copy link always; on a phone the row's moves too
+      await card.locator('[data-cmore]').click();
+      const menu = page.locator('.popover.menu:not([hidden])'); await menu.waitFor();
+      const labels = await menu.locator('.pop-item').allTextContents();
+      assert.ok(labels.some((l) => /Copy link/.test(l)), `Copy link: ${labels}`);
+      if (width < 600) assert.ok(labels.some((l) => /Remove from playlist/.test(l)), `a phone reaches the row's moves: ${labels}`);
+      await page.keyboard.press('Escape'); await page.waitForTimeout(200);
       // Clicking a card's row plays nothing and breaks nothing
       await card.locator('.grow').click();
       const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
