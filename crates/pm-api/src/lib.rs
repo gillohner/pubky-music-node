@@ -13840,6 +13840,7 @@ exec sleep 300
         const REL_A: &str = "1a5b6a49-4c4f-4d18-9e3d-1c4d1b0a7a3e";
         const REL_O: &str = "2b6c7b5a-5d5a-4e29-8f4e-2d5e2c1b8b4f";
         const ELSE: &str = "3c7d8c6b-6e6b-4f3a-9a5f-3e6f3d2c9c5a";
+        const REL_V: &str = "4d8e9d7c-7f7c-4a4b-8b6a-4f7a4e3d0d6b";
         let rec = |i: u32| format!("00000000-0000-4000-8000-{i:012}");
         let counter = || Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let (searches, lookups, recordings, acoustid) = (counter(), counter(), counter(), counter());
@@ -13851,9 +13852,10 @@ exec sleep 300
                 "recording": {"id": rec(base + i)}
             })).collect::<Vec<_>>()}]})
         };
-        let (a, o) = (
+        let (a, o, v) = (
             tracklist(REL_A, "Album", "Song", 4, 0),
             tracklist(REL_O, "Other", "Take", 3, 10),
+            tracklist(REL_V, "Summer Mix", "Anthem", 2, 20),
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -13871,18 +13873,22 @@ exec sleep 300
                         move |Query(q): Query<std::collections::HashMap<String, String>>| {
                             searches.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                             let query = q.get("query").cloned().unwrap_or_default();
-                            let (id, title, count) =
+                            let (id, title, count, credit) =
                                 if query.starts_with("release:\"Album\" AND artist:\"Band\"") {
-                                    (REL_A, "Album", 4)
+                                    (REL_A, "Album", 4, "Band")
                                 } else if query.starts_with("release:\"Other\" AND artist:\"Band\"") {
-                                    (REL_O, "Other", 3)
+                                    (REL_O, "Other", 3, "Band")
+                                } else if query
+                                    .starts_with("release:\"Summer Mix\" AND artist:\"Various Artists\"")
+                                {
+                                    (REL_V, "Summer Mix", 2, "Various Artists")
                                 } else {
                                     panic!("unexpected release search {query}")
                                 };
                             async move {
                                 Json(
                                     serde_json::json!({"releases": [{"id": id, "score": 100, "title": title,
-                                "track-count": count, "artist-credit": [{"name": "Band"}]}]}),
+                                "track-count": count, "artist-credit": [{"name": credit}]}]}),
                                 )
                             }
                         },
@@ -13892,7 +13898,11 @@ exec sleep 300
                     "/ws/2/release/{id}",
                     get(move |Path(id): Path<String>| {
                         lookups.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                        let r = if id == REL_A { a.clone() } else { o.clone() };
+                        let r = match id.as_str() {
+                            REL_A => a.clone(),
+                            REL_O => o.clone(),
+                            _ => v.clone(),
+                        };
                         async move { Json(r) }
                     }),
                 )
@@ -13981,14 +13991,15 @@ exec sleep 300
             4,
             150_000,
         ));
-        // A compilation folder of mixed artists
+        // A compilation folder of mixed artists, as the scanner stores it ("Various Artists"); a
+        // compilation of that name on MusicBrainz has other songs
         let mix: Vec<(i64, std::path::PathBuf)> = (1..=2)
             .map(|i| {
                 add(
                     "Mix",
                     &format!("Hit {i}"),
                     &format!("Artist {i}"),
-                    ("Summer Mix", None),
+                    ("Summer Mix", Some("Various Artists")),
                     i,
                     180_000,
                 )
@@ -14022,8 +14033,9 @@ exec sleep 300
             .await
             .expect("the status keeps answering and the run ends");
 
-        // One search and one lookup per album; no fingerprint for a song its folder settled
-        assert_eq!((n(&searches), n(&lookups)), (2, 2));
+        // One search and one lookup per album (the mix too); no fingerprint for a song its
+        // folder settled
+        assert_eq!((n(&searches), n(&lookups)), (3, 3));
         assert_eq!(n(&acoustid), 3, "the bonus track and the compilation's two songs");
         // The search by tags for what nothing found (with the length, then without)
         assert_eq!(n(&recordings), 6);
@@ -14057,8 +14069,17 @@ exec sleep 300
                 format!("https://musicbrainz.org/recording/{}", rec(11 + i as u32))
             );
         }
+        // The bonus track and the mix: fingerprinted, searched for by their tags, nothing found
+        // (looked at, no suggestion: only a retry looks again)
+        let ids = |retry: bool| -> Vec<i64> {
+            let lib = s.library.lock().unwrap();
+            let todo = lib.tracks_to_identify(retry).unwrap();
+            todo.iter().filter_map(|t| t.id.map(|i| i.0)).collect()
+        };
+        let (again, new) = (ids(true), ids(false));
         for (id, _) in other.iter().skip(3).chain(&mix) {
             assert!(track(*id).canonical.is_none());
+            assert!(again.contains(id) && !new.contains(id), "{id} ends unknown");
         }
         // The folder and the fingerprint disagree on song 1: the owner decides
         assert!(track(album[0].0).canonical.is_none());

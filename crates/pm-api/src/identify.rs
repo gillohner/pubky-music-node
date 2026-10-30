@@ -436,6 +436,15 @@ async fn album_lane(
     // A disc per folder asks for its album once
     let mut searches: HashMap<String, Option<serde_json::Value>> = HashMap::new();
     let mut releases: HashMap<Mbid, Option<serde_json::Value>> = HashMap::new();
+    // An earlier run's fingerprints are a second opinion, read by file content; with none
+    // cached, no file is read for one
+    let second_opinion = s
+        .library
+        .lock()
+        .expect("library poisoned")
+        .has_cached_lookups()
+        .unwrap_or(true);
+    let workers = fingerprint_workers();
     for w in albums {
         let fit = match fit_folder(mb, &w, &mut searches, &mut releases).await {
             Ok(f) => f,
@@ -445,18 +454,27 @@ async fn album_lane(
             }
         };
         let mut left = Vec::new();
-        for t in w.tracks {
-            let id = t.id.map(|i| i.0).unwrap_or_default();
-            match fit
-                .as_ref()
-                .and_then(|f| f.matched.iter().find(|m| m.track == id).map(|m| (f, m)))
-            {
-                Some((f, m)) => {
-                    let outcome = album_outcome(s, &t, &w.album, f, m).await;
-                    settle(s, &t, outcome, found)?;
+        if let Some(f) = fit.as_ref() {
+            let mut matched = Vec::new();
+            for t in w.tracks {
+                let id = t.id.map(|i| i.0).unwrap_or_default();
+                match f.matched.iter().find(|m| m.track == id) {
+                    Some(m) => matched.push((t, m.clone())),
+                    None => left.push(t),
                 }
-                None => left.push(t),
             }
+            let album = &w.album;
+            let mut decided = std::pin::pin!(futures_util::stream::iter(matched)
+                .map(|(t, m)| async move {
+                    let outcome = album_outcome(s, &t, album, f, &m, second_opinion).await;
+                    (t, outcome)
+                })
+                .buffered(workers));
+            while let Some((t, outcome)) = decided.next().await {
+                settle(s, &t, outcome, found)?;
+            }
+        } else {
+            left = w.tracks;
         }
         if !left.is_empty() {
             let _ = next.send(Folder {
@@ -531,8 +549,13 @@ async fn album_outcome(
     album: &FolderAlbum,
     fit: &AlbumFit,
     m: &Matched,
+    second_opinion: bool,
 ) -> Outcome {
-    let results = cached_results(s, t).await.unwrap_or_default();
+    let results = if second_opinion {
+        cached_results(s, t).await.unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     let strong: Vec<(f32, &str, &pm_library::identify::AcRecording)> = results
         .iter()
         .filter(|r| r.score >= Confidence::FINGERPRINT_ACCEPT)

@@ -7,11 +7,12 @@ Newest first. Dates are when the change landed on `main`.
 ### 2026-10-30
 
 - **Identify library is much faster: a ladder per song, cheapest first.** It took one song at a time (decode two minutes of audio, wait for AcoustID, then for MusicBrainz), even for songs whose folder is a clean album.
-  - A folder whose files name one album by one artist is looked up once: one MusicBrainz release search and one lookup, and each file is matched to the release's track at its disc and track number when its length (±3 s) and title agree. A missing track doesn't stop the rest. A bonus track, a compilation folder of mixed artists, or a file that doesn't fit goes on to the next step.
+  - A folder whose files name one album by one artist is looked up once: one MusicBrainz release search and one lookup, and each file is matched to the release's track at its disc and track number when its length (±3 s) and title agree. A missing track doesn't stop the rest. A bonus track, a file that doesn't fit, or a mix whose "Various Artists" album MusicBrainz doesn't have goes on to the next step.
   - Only what is left is fingerprinted: decoded on every core (up to 8 at once) while AcoustID is asked three times a second (it takes one fingerprint per lookup). Without an AcoustID key, nothing is decoded.
   - The search by tags (suggestions only) comes last, once the folders are done with MusicBrainz.
   - The steps run at the same time, so fingerprinting starts on the folders that aren't albums while the album step asks MusicBrainz.
-  - An earlier run's fingerprint that agrees with the album raises the confidence. One that names another song leaves both for you to confirm.
+  - An earlier run's fingerprint that agrees with the album raises the confidence. One that names another song leaves both for you to confirm. Files are read for it only when there are earlier fingerprints, several at once.
+  - A song its folder identified keeps that identity when its file changes and is read again, and "Write IDs", Write now and Fix my files' tags write its IDs like a fingerprint's.
   - Each song keeps how it was identified (`album_fit` is new). Settings shows how many songs were identified by their tags, their folder, how they sound or by you, and the last run's songs by method. Confirm matches says "the folder as an album".
   - It still resumes, keeps its caches and the shared MusicBrainz pace (1 a second, Retry-After) and the mirror (`PM_MUSICBRAINZ_URL`), and writes nothing into your files unless "Write IDs" is on.
 - **Fixes to listens, comments, collections, smart playlists and Live sharing:**

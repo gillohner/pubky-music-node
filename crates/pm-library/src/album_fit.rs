@@ -361,7 +361,35 @@ mod tests {
 
     #[test]
     fn a_compilation_folder_of_mixed_artists_is_no_album() {
-        // No album artist, every song by someone else: a mix, not an album
+        // A local mix as the scanner stores it ("Various Artists"): searched for as one, but a
+        // release of that name has other songs, so each goes on to the fingerprint
+        let mix: Vec<FolderFile> = (1..=6)
+            .map(|i| FolderFile {
+                title: format!("Hit {i}"),
+                artist: format!("Artist {i}"),
+                album_artist: Some("Various Artists".into()),
+                album: Some("Summer Mix".into()),
+                duration_ms: Some(180_000),
+                ..file(i)
+            })
+            .collect();
+        let a = folder_album(&mix).unwrap();
+        assert_eq!(
+            release_query(&a),
+            "release:\"Summer Mix\" AND artist:\"Various Artists\""
+        );
+        assert_eq!(fit_release(&mix, &release(6)), None);
+        // A compilation MusicBrainz has (its songs, its lengths) fits like any album
+        let various: Vec<FolderFile> = (1..=6)
+            .map(|i| FolderFile {
+                artist: format!("Artist {i}"),
+                album_artist: Some("Various Artists".into()),
+                ..file(i)
+            })
+            .collect();
+        assert_eq!(fit_release(&various, &release(6)).unwrap().matched.len(), 6);
+        // No album artist (a remote share, whose folders the scanner doesn't read), every song
+        // by someone else: a mix, not an album
         let files: Vec<FolderFile> = (1..=6)
             .map(|i| FolderFile {
                 artist: format!("Artist {i}"),
