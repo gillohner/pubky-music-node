@@ -21,7 +21,7 @@ services:
       PM_CONTACT: "you@example.org"
       PM_NAME: "TrueNAS"
       PM_FOLDERS: "/music"
-      # TIDAL developer app (optional); register http://<nas>:7788/tidal/callback on it.
+      # Your own TIDAL app instead of the built-in one (optional; Settings › Service apps does the same).
       PM_TIDAL_CLIENT_ID: ""
       PM_TIDAL_CLIENT_SECRET: ""
       RUST_LOG: "info"
