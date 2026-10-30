@@ -379,8 +379,9 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
       await p.goto(BASE + '/playlists'); await p.waitForSelector('#smartnew'); await p.click('#smartnew'); await p.waitForSelector('[name="smreach"]');
       const opts = await p.$$eval('[name="smreach"]', (els) => els.map((e) => `${e.value}${e.checked ? '*' : ''}`));
       check(opts.join(',') === 'me*,following,friends,all' && (await p.getAttribute('.reachopts', 'role')) === 'radiogroup', `Tags from: Just me by default, then people you follow, friends, everyone (${opts.join(',')})`);
-      await p.check('[name="smreach"][value="following"]'); await p.waitForSelector('#smtags');
-      check(await p.evaluate(() => document.activeElement && document.activeElement.value === 'following'), 'the choice keeps the keyboard focus');
+      // the arrow keys move the choice, and the focus stays on it after the form redraws
+      await p.focus('[name="smreach"][value="me"]'); await p.keyboard.press('ArrowRight'); await p.waitForSelector('#smtags');
+      check(await p.evaluate(() => document.activeElement && document.activeElement.value === 'following' && document.activeElement.checked), 'the arrow keys pick the next reach and keep the focus on it');
       await p.fill('#smname', 'Techno friends'); await p.fill('#smtags', '#techno, night');
       await p.waitForSelector('[data-net="1"]', { timeout: 8000 }).catch(() => {});
       const last = sent[sent.length - 1] || {};

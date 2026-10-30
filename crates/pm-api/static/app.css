@@ -1370,3 +1370,4 @@ html[data-art] #nowplaying { background: radial-gradient(1100px 700px at 30% 0%,
 .reachopt:focus-within { outline: 2px solid var(--accent); outline-offset: 2px; }
 .smreach { margin-top: 14px; }
 .nethead { font-weight: 600; margin: 16px 0 8px; }
+.reachby { font-style: normal; color: var(--fg-2); align-self: center; }
