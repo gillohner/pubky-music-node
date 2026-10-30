@@ -254,12 +254,12 @@ impl AudioSink for RecSink {
         *self.rec.drains.lock().unwrap() += 1;
         Ok(())
     }
-    fn pause(&mut self) -> Result<(), SinkError> {
+    fn pause(&mut self) -> Result<bool, SinkError> {
         if !self.rec.device_pause.load(Ordering::SeqCst) {
-            return self.flush();
+            return self.flush().map(|()| false);
         }
         *self.rec.pauses.lock().unwrap() += 1;
-        Ok(())
+        Ok(true)
     }
     fn resume(&mut self) -> Result<(), SinkError> {
         *self.rec.resumes.lock().unwrap() += 1;
@@ -518,10 +518,10 @@ async fn pause_pauses_the_device_and_a_failed_resume_reopens_the_output() {
     );
 }
 
-/// Next (or a queue item) while paused plays on a device that was told to pause: the sink
-/// resumes first, else the device would sit paused while the zone writes into it.
+/// Next (or a queue item) or a seek while paused: the paused device holds audio from before,
+/// so its sink closes and the next play starts on a fresh one, never resuming the old buffer.
 #[tokio::test]
-async fn a_track_started_while_paused_resumes_the_device() {
+async fn a_track_or_seek_while_paused_starts_on_a_fresh_sink() {
     let r = rig(&[("a", RATE, 1000), ("b", RATE, 300)]);
     r.rec.device_pause.store(true, Ordering::SeqCst);
     r.zone
@@ -534,19 +534,31 @@ async fn a_track_started_while_paused_resumes_the_device() {
     r.gate.allow(1);
     let mut w = r.zone.watch();
     w.wait_for(|s| s.transport == Transport::Paused).await.unwrap();
+    // Seek while paused, then play: a fresh sink from the new position
+    r.zone.seek_ms(70);
+    r.zone.play();
+    w.wait_for(|s| s.transport == Transport::Playing).await.unwrap();
+    assert_eq!(*r.rec.opens.lock().unwrap(), 2, "a fresh sink after the seek");
+    r.gate.allow(1);
+    wait_for(|| r.rec.samples.lock().unwrap().len() == 400).await;
+    r.gate.blocked().await;
+    r.zone.pause();
+    r.gate.allow(1);
+    w.wait_for(|s| s.transport == Transport::Paused).await.unwrap();
+    // Next while paused: the next track on a fresh sink, playing
     r.zone.next();
     w.wait_for(|s| s.transport == Transport::Playing && s.queue_index == Some(1))
         .await
         .unwrap();
-    assert_eq!(*r.rec.resumes.lock().unwrap(), 1, "the device plays again");
+    assert_eq!(*r.rec.opens.lock().unwrap(), 3, "a fresh sink for the next track");
+    assert_eq!(*r.rec.resumes.lock().unwrap(), 0, "no stale buffer resumed");
     r.gate.allow(1000);
     let st = r.zone.wait_stopped().await;
     assert_eq!(st.error, None);
-    assert_eq!(
-        *r.rec.opens.lock().unwrap(),
-        1,
-        "the same sink went on with the next track"
-    );
+    let mut want = frames(0, 300);
+    want.extend(frames(700, 900));
+    want.extend(frames(0, 300));
+    assert_eq!(*r.rec.samples.lock().unwrap(), want);
 }
 
 #[tokio::test]

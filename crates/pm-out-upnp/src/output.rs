@@ -227,6 +227,8 @@ impl Output for UpnpOutput {
         let (pull, generation) = (self.pull.clone(), self.pull.generation());
         let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let stop_retrying = cancelled.clone();
+        let pause_refused = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let refused = pause_refused.clone();
         std::thread::Builder::new()
             .name("upnp-play".into())
             .spawn(move || {
@@ -238,18 +240,26 @@ impl Output for UpnpOutput {
                 let started = result.is_ok();
                 let _ = played_tx.send(result);
                 // Then the zone's pauses and resumes, in the order it gave them
-                let av = target_set.lock().expect("target").clone();
                 for c in controls {
                     if stop_retrying.load(std::sync::atomic::Ordering::SeqCst) {
                         break;
                     }
-                    match (av.as_deref(), started) {
-                        (Some(av), true) => control_call(av, c, &played_tx),
-                        // Nothing started: a Play has nothing to go on with
-                        _ => {
-                            if matches!(c, Control::Play) {
-                                let _ = played_tx.send(Err("the renderer never started the stream".into()));
+                    let av = target_set.lock().expect("target").clone();
+                    match c {
+                        Control::Pause => {
+                            if !(started && av.as_deref().is_some_and(pause_renderer)) {
+                                refused.store(true, std::sync::atomic::Ordering::SeqCst);
                             }
+                        }
+                        Control::Play => {
+                            let r = match av {
+                                Some(av) if started => {
+                                    play_after_pause(&av, &renderer, &url, &meta, &target_set, &stop_retrying)
+                                }
+                                // Nothing started: a Play has nothing to go on with
+                                _ => Err("the renderer never started the stream".into()),
+                            };
+                            let _ = played_tx.send(r);
                         }
                     }
                 }
@@ -264,6 +274,7 @@ impl Output for UpnpOutput {
             cancelled,
             control: Some(control),
             paused: false,
+            pause_refused,
         }))
     }
 
@@ -341,21 +352,33 @@ enum Control {
     Play,
 }
 
-/// Send one [`Control`] to the renderer (on the sink's control thread); Play's answer goes to
-/// `answers`.
-fn control_call(av: &str, c: Control, answers: &std::sync::mpsc::Sender<Result<(), String>>) {
-    match c {
-        Control::Pause => {
-            // A renderer without Pause for this stream keeps playing its buffer out, as before
-            if let Err(e) = soap::call(av, AV_TRANSPORT, "Pause", &[("InstanceID", "0")]) {
-                tracing::warn!("renderer Pause refused, it plays out its buffer: {e}");
-            }
+/// The renderer's own Pause (on the sink's control thread). False when it refused: it plays
+/// its buffer out, as before.
+fn pause_renderer(av: &str) -> bool {
+    match soap::call(av, AV_TRANSPORT, "Pause", &[("InstanceID", "0")]) {
+        Ok(_) => true,
+        Err(e) => {
+            tracing::warn!("renderer Pause refused, it plays out its buffer: {e}");
+            false
         }
-        Control::Play => {
-            let r = soap::call(av, AV_TRANSPORT, "Play", &[("InstanceID", "0"), ("Speed", "1")])
-                .map(drop)
-                .map_err(|e| format!("the renderer refused Play after the pause: {e}"));
-            let _ = answers.send(r);
+    }
+}
+
+/// Play after a pause. A renderer that dropped the stream meanwhile (stopped, "no media")
+/// refuses: it is pointed at the same stream again, as at the start.
+fn play_after_pause(
+    av: &str,
+    renderer: &Renderer,
+    url: &str,
+    meta: &str,
+    target: &Mutex<Option<String>>,
+    cancelled: &std::sync::atomic::AtomicBool,
+) -> Result<(), String> {
+    match soap::call(av, AV_TRANSPORT, "Play", &[("InstanceID", "0"), ("Speed", "1")]) {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            tracing::info!("renderer refused Play after the pause ({e}); setting the stream again");
+            start(renderer, url, meta, target, cancelled)
         }
     }
 }
@@ -420,6 +443,8 @@ struct UpnpSink {
     control: Option<std::sync::mpsc::Sender<Control>>,
     /// The renderer was told to pause.
     paused: bool,
+    /// The renderer refused that Pause: it played its buffer out.
+    pause_refused: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl UpnpSink {
@@ -464,14 +489,15 @@ impl AudioSink for UpnpSink {
     }
     /// The renderer's own Pause, in order after its start (on the Play thread, so a renderer
     /// slow to answer does not hold the zone).
-    fn pause(&mut self) -> Result<(), SinkError> {
+    fn pause(&mut self) -> Result<bool, SinkError> {
         if let Some(c) = &self.control {
             if c.send(Control::Pause).is_ok() {
                 self.paused = true;
-                return self.inner.pause();
+                self.inner.pause()?;
+                return Ok(true);
             }
         }
-        self.inner.flush()
+        self.inner.flush().map(|()| false)
     }
     /// Play again; a refusal shows on the next write, as a refused start does.
     fn resume(&mut self) -> Result<(), SinkError> {
@@ -485,7 +511,15 @@ impl AudioSink for UpnpSink {
             }
             self.pending += 1;
         }
-        self.inner.resume()
+        self.inner.resume()?;
+        // A renderer that refused the Pause played its buffer out: fill it again from now
+        if self
+            .pause_refused
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            self.inner.flush()?;
+        }
+        Ok(())
     }
     fn frames_written(&self) -> u64 {
         self.inner.frames_written()
@@ -532,6 +566,14 @@ mod tests {
 
     /// [`fake_renderer`] that takes `stop` to answer Stop.
     fn fake_renderer_slow(stop: std::time::Duration) -> (String, Arc<Mutex<Vec<String>>>) {
+        fake_renderer_with(stop, Arc::default())
+    }
+
+    /// [`fake_renderer_slow`] that refuses the next `refuse_play` Plays (UPnP error, HTTP 500).
+    fn fake_renderer_with(
+        stop: std::time::Duration,
+        refuse_play: Arc<std::sync::atomic::AtomicUsize>,
+    ) -> (String, Arc<Mutex<Vec<String>>>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let log = Arc::new(Mutex::new(Vec::new()));
@@ -579,6 +621,12 @@ mod tests {
                 });
                 if action == "Stop" {
                     std::thread::sleep(stop);
+                }
+                if action == "Play" && refuse_play.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+                    refuse_play.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                    let body = "<s:Envelope><s:Body><s:Fault><detail><UPnPError><errorCode>701</errorCode></UPnPError></detail></s:Fault></s:Body></s:Envelope>";
+                    let _ = write!(s, "HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+                    continue;
                 }
                 let body = if action == "GetVolume" {
                     "<s:Envelope><s:Body><u:GetVolumeResponse><CurrentVolume>40</CurrentVolume></u:GetVolumeResponse></s:Body></s:Envelope>"
@@ -679,8 +727,8 @@ mod tests {
     }
 
     /// Pause sends the renderer's own Pause after its start (it stops at once and keeps its
-    /// buffer, instead of playing seconds of it out), and resume its Play, in that order; a Play
-    /// it refuses after the pause is the sink's next write error (NUC, 2026-10-30).
+    /// buffer, instead of playing seconds of it out), and resume its Play, in that order (NUC,
+    /// 2026-10-30).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn pause_and_resume_tell_the_renderer_in_order() {
         let (base, log) = fake_renderer();
@@ -707,9 +755,9 @@ mod tests {
         let block = AudioBlock::pcm_i32(fmt, vec![1, -1, 2, -2]);
         let sink = std::thread::spawn(move || {
             sink.write(&block).unwrap();
-            sink.pause().unwrap();
+            assert!(sink.pause().unwrap(), "the renderer holds its buffer");
             sink.resume().unwrap();
-            sink.pause().unwrap();
+            let _ = sink.pause().unwrap();
             sink
         })
         .join()
@@ -732,6 +780,89 @@ mod tests {
         std::thread::spawn(move || drop(sink)).join().unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         assert_eq!(log.lock().unwrap().last().map(String::as_str), Some("Stop"));
+    }
+
+    /// A renderer that dropped the stream during a long pause refuses Play: the sink points it
+    /// at the same stream again (Stop, SetAVTransportURI, Play) instead of failing the zone.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_play_refused_after_a_pause_sets_the_stream_again() {
+        let refuse = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (base, log) = fake_renderer_with(std::time::Duration::ZERO, refuse.clone());
+        let renderer = Renderer {
+            udn: "uuid:refuse".into(),
+            friendly_name: "Fake DSM".into(),
+            manufacturer: None,
+            model: None,
+            av_transport: format!("{base}/av"),
+            rendering_control: None,
+            connection_manager: None,
+            zone_group_topology: None,
+            location: format!("{base}/desc.xml"),
+        };
+        let pull = Arc::new(PullOutput::controlled("refuse"));
+        let out = UpnpOutput::new(
+            renderer,
+            pull.clone(),
+            "http://node/v1/outputs/pull/refuse/stream.wav".into(),
+        );
+        let fmt = AudioFormat::pcm(44_100, 16, 2);
+        let mut sink = out.open(fmt).await.unwrap();
+        let mut live = pull.take_stream(std::time::Duration::from_secs(2)).await.unwrap();
+        let block = AudioBlock::pcm_i32(fmt, vec![1, -1, 2, -2]);
+        let b2 = block.clone();
+        let mut sink = std::thread::spawn(move || {
+            sink.write(&b2).unwrap();
+            sink
+        })
+        .join()
+        .unwrap();
+        assert!(live.next_chunk().await.is_some());
+        // Wait for the start to finish, then the renderer refuses the next Play
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while log.lock().unwrap().len() < 3 && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        refuse.store(1, std::sync::atomic::Ordering::SeqCst);
+        let sink = std::thread::spawn(move || {
+            assert!(sink.pause().unwrap());
+            sink.resume().unwrap();
+            sink
+        })
+        .join()
+        .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while log.lock().unwrap().len() < 8 && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let actions: Vec<String> = log
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|a| a.split(' ').next().unwrap_or("").to_string())
+            .collect();
+        assert_eq!(
+            actions,
+            [
+                "Stop",
+                "SetAVTransportURI",
+                "Play",
+                "Pause",
+                "Play",
+                "Stop",
+                "SetAVTransportURI",
+                "Play"
+            ]
+        );
+        // The second start's Play was accepted: the next write is no error
+        let mut sink = sink;
+        let reader = tokio::spawn(async move { while live.next_chunk().await.is_some() {} });
+        std::thread::spawn(move || {
+            sink.write(&block).expect("no refusal reported");
+            drop(sink);
+        })
+        .join()
+        .unwrap();
+        reader.abort();
     }
 
     /// A sink closed while the start is still on its first Stop sends neither the URI nor Play

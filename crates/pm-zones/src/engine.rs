@@ -117,7 +117,8 @@ struct Engine {
     runtime: Option<tokio::runtime::Handle>,
     /// The sequence number of the command being handled (for a panic in it).
     handling: u64,
-    /// The sink was paused ([`AudioSink::pause`]): it resumes before anything plays on it.
+    /// The sink's device was paused holding its buffer ([`AudioSink::pause`] returned true): it
+    /// resumes before anything plays on it, or closes when that buffer is stale.
     sink_paused: bool,
 }
 
@@ -407,11 +408,13 @@ impl Engine {
         // The sink silences the device itself where it buffers (UPnP, BluOS): only stopping the
         // writes left a renderer playing its seconds of buffer after the press.
         if let Some(s) = self.sink.as_mut() {
-            if let Err(e) = s.pause() {
-                self.fail(format!("pause: {e}"));
-                return;
+            match s.pause() {
+                Ok(held) => self.sink_paused = held,
+                Err(e) => {
+                    self.fail(format!("pause: {e}"));
+                    return;
+                }
             }
-            self.sink_paused = true;
         }
         if let Some(c) = self.current.as_mut() {
             c.paused_at_ms = Some(pos);
@@ -426,6 +429,10 @@ impl Engine {
             return;
         };
         if !self.unpause_sink(fmt) {
+            return;
+        }
+        // A seek while paused closed the paused device's sink: a fresh one starts here
+        if self.sink.is_none() && !self.ensure_sink(fmt, false) {
             return;
         }
         let Some(c) = self.current.as_mut() else {
@@ -444,9 +451,10 @@ impl Engine {
         self.emit(ZoneEvent::Resumed);
     }
 
-    /// Resume a paused sink before it plays again (resume, or a track started while paused).
-    /// One that cannot carry on (its device dropped the stream during a long pause) opens
-    /// again. False when it could not: the error is recorded and the zone stopped.
+    /// Resume a paused sink before it plays again. One that cannot carry on (its device
+    /// dropped the stream during a long pause) opens again, from what was last heard: the
+    /// paused position less what the device held unplayed. False when it could not open: the
+    /// error is recorded and the zone stopped.
     fn unpause_sink(&mut self, fmt: AudioFormat) -> bool {
         if !std::mem::take(&mut self.sink_paused) {
             return true;
@@ -455,15 +463,37 @@ impl Engine {
             return true;
         };
         tracing::info!(zone = %self.id, "resume: opening the output again ({e})");
+        let unheard = self
+            .sink
+            .as_ref()
+            .map(|s| frames_to_ms(fmt, s.buffer_level().queued_frames))
+            .unwrap_or(0);
+        if let Some(c) = self.current.as_mut() {
+            c.paused_at_ms = c.paused_at_ms.map(|p| p.saturating_sub(unheard));
+        }
         if let Some(mut s) = self.sink.take() {
             let _ = s.flush();
         }
         self.ensure_sink(fmt, false)
     }
 
+    /// A sink paused on its device holds audio from before: a new track or a seek while
+    /// paused closes it (the device stops and drops that audio), and the next play opens a
+    /// fresh one.
+    fn close_paused_sink(&mut self) {
+        if std::mem::take(&mut self.sink_paused) {
+            if let Some(mut s) = self.sink.take() {
+                let _ = s.flush();
+            }
+        }
+    }
+
     fn seek(&mut self, ms: u64) {
         let before = self.position_ms();
         self.cancel_crossfade();
+        if self.transport == Transport::Paused {
+            self.close_paused_sink();
+        }
         let Some(c) = self.current.as_mut() else {
             return;
         };
@@ -577,10 +607,12 @@ impl Engine {
         proc: Box<dyn Processor>,
     ) -> bool {
         let fmt = proc.output_format();
+        // A track started while paused (next, a queue item) starts on a fresh sink: the paused
+        // device's buffer is the old track's
+        self.close_paused_sink();
         let gapless = self.sink.as_ref().is_some_and(|s| s.format() == fmt) && self.current.is_some();
         self.output.now_playing(Some(&item));
-        // A track started while paused (next, a queue item): the device plays again first
-        if !self.unpause_sink(fmt) || !self.ensure_sink(fmt, true) {
+        if !self.ensure_sink(fmt, true) {
             return false;
         }
         let start_frame = self.sink.as_ref().map(|s| s.frames_written()).unwrap_or(0);

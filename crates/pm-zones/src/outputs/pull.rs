@@ -530,15 +530,22 @@ impl AudioSink for PullSink {
         Ok(())
     }
 
+    /// Nothing queued while playing (the renderer's pace sets the position); while paused, what
+    /// the renderer held unplayed, so a reopen after a failed resume goes on from what was heard.
     fn buffer_level(&self) -> BufferLevel {
+        let held = self
+            .held
+            .map(|h| (h.as_secs_f64() * f64::from(self.fmt.rate_hz.max(1))) as u64)
+            .unwrap_or(0);
         BufferLevel {
-            queued_frames: 0,
+            queued_frames: held,
             capacity_frames: 0,
         }
     }
 
     fn flush(&mut self) -> Result<(), SinkError> {
         self.clock = None;
+        self.held = None;
         Ok(())
     }
 
@@ -548,10 +555,11 @@ impl AudioSink for PullSink {
     /// pacing then does not let it take another [`PACE_AHEAD`] on top, which would make the end
     /// of the queue stop it before it played its last seconds. A plain listener plays its
     /// buffer out meanwhile, so it starts afresh.
-    fn pause(&mut self) -> Result<(), SinkError> {
+    fn pause(&mut self) -> Result<bool, SinkError> {
         self.held = self.controlled.then(|| self.ahead());
         self.clock = None;
-        Ok(())
+        // Only the renderer's own sink knows whether the device paused
+        Ok(false)
     }
 
     /// A renderer may hang up during a long pause and fetch the stream again when told to play
@@ -923,7 +931,10 @@ mod tests {
                 for _ in 0..5 {
                     sink.write(&AudioBlock::pcm_i32(fmt, vec![0; 44_100])).unwrap();
                 }
-                sink.pause().unwrap();
+                assert!(
+                    !sink.pause().unwrap(),
+                    "only the renderer's sink pauses the device"
+                );
                 sink.resume().unwrap();
                 let t = std::time::Instant::now();
                 sink.write(&AudioBlock::pcm_i32(fmt, vec![0; 44_100])).unwrap();
@@ -952,7 +963,7 @@ mod tests {
             for i in 0..CHANNEL_CHUNKS as i32 {
                 sink.write(&block(fmt, i * 4)).unwrap();
             }
-            sink.pause().unwrap();
+            let _ = sink.pause().unwrap();
             sink
         });
         let mut sink = filled.join().unwrap();
