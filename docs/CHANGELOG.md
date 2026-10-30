@@ -6,6 +6,7 @@ Newest first. Dates are when the change landed on `main`.
 
 ### 2026-10-30
 
+- **Smart playlists with tags from your network, on screen**. On the New smart playlist screen, **Tags from** (Just me, People I follow, Friends, Everyone) sits under the rules; with a reach you give up to 5 tags (any or all of them), the preview lists what people tagged with who tagged it (Play where it plays here, a link where not), and the smart playlist shows it under its songs as "From Pubky".
 - **Fixes to listens, comments, collections, smart playlists and Live sharing:**
   - Listens moved to private while a sync ran no longer keep their public copies. A history deleted on one node is deleted on your other nodes too. The listen stats no longer hold up the node with a long history.
   - What you type in a comment survives the song page refreshing.
