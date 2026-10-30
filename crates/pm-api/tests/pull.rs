@@ -547,6 +547,7 @@ async fn a_stale_linn_request_does_not_take_the_new_stream() {
     let path = "/v1/outputs/pull/klimax/live.wav";
     // The last session ended; the stopped Linn asks again for its old URI
     drop(pm_stream::block_on(pull.open(fmt)).unwrap());
+    let old = pull.generation();
     let stale = tokio::task::spawn_blocking(move || {
         let t = std::time::Instant::now();
         let (status, _, _) = linn_get(addr, path, false);
@@ -569,8 +570,20 @@ async fn a_stale_linn_request_does_not_take_the_new_stream() {
         took < std::time::Duration::from_secs(2),
         "answered at once: {took:?}"
     );
+    // It asks again at once, now after the new stream opened: its URL names the old stream, so
+    // it is answered again (review of #181)
+    let again = tokio::task::spawn_blocking(move || {
+        let t = std::time::Instant::now();
+        let (status, _, _) = linn_get(addr, &format!("{path}?g={old}"), false);
+        (status, t.elapsed())
+    })
+    .await
+    .unwrap();
+    assert!(again.0.contains(" 410"), "{again:?}");
+    assert!(again.1 < std::time::Duration::from_secs(2), "{again:?}");
+    let new = pull.generation();
     let first = tokio::task::spawn_blocking(move || {
-        let (status, _, mut body) = linn_get(addr, path, false);
+        let (status, _, mut body) = linn_get(addr, &format!("{path}?g={new}"), false);
         assert!(
             status.starts_with("HTTP/1.0 200"),
             "the fresh fetch plays: {status}"

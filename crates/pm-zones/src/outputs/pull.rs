@@ -194,7 +194,7 @@ impl PullOutput {
     }
 
     /// A pull output whose fetcher the node tells when to fetch (a UPnP renderer after
-    /// SetAVTransportURI, a Squeezebox after `strm`). A stopped Linn keeps polling its old URI
+    /// SetAVTransportURI; Cast, MPD and BluOS likewise). A stopped Linn keeps polling its old URI
     /// every 15 s, and such a request, waiting when the next stream opens, took that stream and
     /// dropped it (NUC, 2026-10-30): here it is answered instead ([`Missed::Superseded`]).
     pub fn controlled(name: &str) -> Self {
@@ -234,14 +234,22 @@ impl PullOutput {
     /// Take the live stream for an HTTP listener, waiting until a sink opens one (or a listener
     /// that left gives it back).
     pub async fn take_stream(&self, wait: Duration) -> Option<LiveStream> {
-        self.take_stream_for(wait).await.ok()
+        self.take_stream_for(wait, None).await.ok()
     }
 
-    /// [`Self::take_stream`], saying why there is none. On a [`Self::controlled`] output, a
-    /// stream opened after this request began waiting is not for it.
-    pub async fn take_stream_for(&self, wait: Duration) -> Result<LiveStream, Missed> {
+    /// [`Self::take_stream`], saying why there is none. `generation`: the stream the request is
+    /// for (the node puts it in the URL it gives a renderer, [`Self::generation`]); a newer one
+    /// is not for it, whenever the request comes (a renderer polling its old URI). Without one,
+    /// on a [`Self::controlled`] output, a stream opened after the request began waiting is not
+    /// for it.
+    pub async fn take_stream_for(
+        &self,
+        wait: Duration,
+        generation: Option<u64>,
+    ) -> Result<LiveStream, Missed> {
         let deadline = tokio::time::Instant::now() + wait;
-        let since = self.shared.slot.lock().expect("pull lock").generation;
+        let since = generation.unwrap_or_else(|| self.shared.slot.lock().expect("pull lock").generation);
+        let checked = self.controlled || generation.is_some();
         loop {
             // Registered before the check, so a stream parked in between wakes us
             let notified = self.shared.notify.notified();
@@ -249,7 +257,7 @@ impl PullOutput {
             notified.as_mut().enable();
             {
                 let mut slot = self.shared.slot.lock().expect("pull lock");
-                if self.controlled && slot.generation > since {
+                if checked && slot.generation > since {
                     return Err(Missed::Superseded);
                 }
                 // A stream whose sink closed with nothing left to hear is no stream
@@ -664,7 +672,8 @@ mod tests {
         drop(live);
         // The renderer polls while stopped; then the node opens the next stream
         let o = out.clone();
-        let stale = tokio::spawn(async move { o.take_stream_for(Duration::from_secs(5)).await.map(|_| ()) });
+        let stale =
+            tokio::spawn(async move { o.take_stream_for(Duration::from_secs(5), None).await.map(|_| ()) });
         tokio::time::sleep(Duration::from_millis(100)).await;
         let mut sink = out.open_now(fmt).unwrap();
         let w = std::thread::spawn(move || {
@@ -676,13 +685,14 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(missed.err(), Some(Missed::Superseded));
-        let mut fresh = out.take_stream_for(Duration::from_secs(2)).await.unwrap();
+        let mut fresh = out.take_stream_for(Duration::from_secs(2), None).await.unwrap();
         assert_eq!(fresh.next_chunk().await.unwrap(), pack_pcm(&block(fmt, 40)));
         drop(w.join().unwrap());
         // The Stream zone: a player that waited gets the stream it waited for
         let open = Arc::new(PullOutput::new("open"));
         let o = open.clone();
-        let waiting = tokio::spawn(async move { o.take_stream_for(Duration::from_secs(5)).await.is_ok() });
+        let waiting =
+            tokio::spawn(async move { o.take_stream_for(Duration::from_secs(5), None).await.is_ok() });
         tokio::time::sleep(Duration::from_millis(100)).await;
         let sink = open.open_now(fmt).unwrap();
         assert!(waiting.await.unwrap(), "the waiting player gets it");

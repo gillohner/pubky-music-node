@@ -1154,7 +1154,13 @@ async fn pull_stream(
         };
         return Ok(with_headers(mime, axum::body::Body::empty()));
     }
-    let live = match out.take_stream_for(pm_zones::outputs::LISTENER_TIMEOUT).await {
+    // `g`: the stream the node gave the renderer this URL for (pm-out-upnp); an older one's poll
+    // never takes a newer stream
+    let generation = q.get("g").and_then(|g| g.parse::<u64>().ok());
+    let live = match out
+        .take_stream_for(pm_zones::outputs::LISTENER_TIMEOUT, generation)
+        .await
+    {
         Ok(live) => live,
         Err(pm_zones::outputs::Missed::Timeout) => {
             return Err(ApiError::new(

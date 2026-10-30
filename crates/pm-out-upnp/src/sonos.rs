@@ -423,7 +423,7 @@ mod tests {
             l,
             vec![
                 "A Stop",
-                "A SetAVTransportURI http://node/v1/outputs/pull/b/stream.wav?k=1",
+                "A SetAVTransportURI http://node/v1/outputs/pull/b/stream.wav?k=1&g=1",
                 "A Play",
                 "A Stop"
             ],
@@ -454,7 +454,7 @@ mod tests {
             vec![
                 "B SetAVTransportURI x-rincon:RINCON_A",
                 "A Stop",
-                "A SetAVTransportURI http://node/v1/outputs/pull/a/stream.wav?k=2",
+                "A SetAVTransportURI http://node/v1/outputs/pull/a/stream.wav?k=2&g=1",
                 "A Play",
                 "A Stop",
                 "B BecomeCoordinatorOfStandaloneGroup"
