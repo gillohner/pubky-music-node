@@ -215,6 +215,8 @@ async fn playlist(
                 album: r.album.clone(),
                 uri: None,
                 path: r.path.clone(),
+                isrc: None,
+                mbid: None,
             })
         })
         .collect();

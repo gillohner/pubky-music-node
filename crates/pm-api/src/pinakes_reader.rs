@@ -89,6 +89,9 @@ impl PinakesReader {
 /// resolve. Never an error: an unreachable Pinakes is `Unknown`.
 pub async fn card(s: &std::sync::Arc<NodeState>, uri: &str) -> Card {
     let uri = uri.trim().to_string();
+    if crate::activity::is_search_link(&uri) {
+        return Card::Unknown;
+    }
     if let Some(c) = s.pinakes_reader.cached(&uri) {
         return c;
     }
@@ -116,6 +119,9 @@ pub async fn card(s: &std::sync::Arc<NodeState>, uri: &str) -> Card {
 /// links never holds the browser's connections while the reads wait their turn.
 pub async fn card_now(s: &std::sync::Arc<NodeState>, uri: &str) -> Card {
     let uri = uri.trim().to_string();
+    if crate::activity::is_search_link(&uri) {
+        return Card::Unknown;
+    }
     if let Some(c) = s.pinakes_reader.cached(&uri) {
         return c;
     }
@@ -139,8 +145,12 @@ pub async fn card_now(s: &std::sync::Arc<NodeState>, uri: &str) -> Card {
     }
 }
 
-/// Ask Pinakes to read `uri`, once at a time per link.
+/// Ask Pinakes to read `uri`, once at a time per link. Never an import's search link: its
+/// words are a private playlist's.
 pub async fn resolve(s: &std::sync::Arc<NodeState>, uri: &str) -> Card {
+    if crate::activity::is_search_link(uri) {
+        return Card::Unknown;
+    }
     let fut = {
         let mut inflight = s.pinakes_reader.inflight.lock().expect("reader inflight");
         if let Some(f) = inflight.get(uri) {
@@ -231,6 +241,18 @@ pub(crate) async fn get_card(
     let uri = q.uri.trim().to_string();
     if uri.is_empty() {
         return Err(crate::ApiError::bad_request("uri is required"));
+    }
+    // An import's search link holds a private playlist's words: never asked of Pinakes
+    if crate::activity::is_search_link(&uri) {
+        return Ok(axum::Json(CardView {
+            uri,
+            status: "unknown",
+            kind: None,
+            name: None,
+            description: None,
+            image: None,
+            site: None,
+        }));
     }
     let web = |u: Option<String>| u.filter(|u| u.starts_with("https://") || u.starts_with("http://"));
     let view = |status, r: Option<Box<ResourceDetail>>| {

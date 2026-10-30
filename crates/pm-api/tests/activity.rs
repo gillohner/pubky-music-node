@@ -147,7 +147,9 @@ async fn record_and_import_resolve_through_the_library() {
         .iter()
         .any(|e| e["source"]["kind"] == "service" && e["source"]["name"] == "spotify"));
 
-    // Import: one resolves, one has a URL, one is lost.
+    // Import (TASK-pinakes-social-ux.md B4): one resolves in the library, one has a URL, one an
+    // ISRC, one a MusicBrainz id, one a service link; a library song not identified yet stays
+    // unresolved (review of #156), so importing again after identification finds it.
     let (st, imp) = call(
         &app,
         "POST",
@@ -157,36 +159,66 @@ async fn record_and_import_resolve_through_the_library() {
             "tracks": [
                 {"title": "Get Lucky", "artist": "Daft Punk", "album": "Random Access Memories"},
                 {"title": "Elsewhere", "uri": "https://musicbrainz.org/isrc/USQX91300108"},
-                {"title": "Mystery Song", "artist": "Nobody"}
+                {"title": "Mystery Song", "artist": "Nobody"},
+                {"title": "By ISRC", "isrc": "gbayE9701376"},
+                {"title": "By MBID", "mbid": "833f00e1-781f-4edd-90e4-e52712618862"},
+                {"title": "On TIDAL", "uri": "https://tidal.com/browse/track/50850120"}
             ]
         })),
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{imp}");
-    assert_eq!(imp["imported"], 2);
+    assert_eq!(
+        (imp["imported"].as_u64(), imp["kept"].as_u64()),
+        (Some(5), Some(0)),
+        "{imp}"
+    );
     assert_eq!(imp["unresolved"].as_array().unwrap().len(), 1);
     assert_eq!(imp["unresolved"][0]["title"], "Mystery Song");
+    let (_, mixed) = call(
+        &app,
+        "GET",
+        &format!("/v1/collections/{}", imp["id"].as_str().unwrap()),
+        None,
+    )
+    .await;
+    let uris: Vec<&str> = mixed["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["uri"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        &uris[1..],
+        [
+            "https://musicbrainz.org/isrc/USQX91300108",
+            "https://musicbrainz.org/isrc/GBAYE9701376",
+            "https://musicbrainz.org/recording/833f00e1-781f-4edd-90e4-e52712618862",
+            "https://tidal.com/track/50850120",
+        ],
+        "{mixed}"
+    );
     let id = imp["id"].as_str().unwrap();
     let (st, pl) = call(&app, "GET", &format!("/v1/playlists/{id}"), None).await;
     assert_eq!(st, StatusCode::OK);
     assert_eq!(pl["summary"]["name"], "From Roon");
     assert_eq!(pl["tracks"][0]["title"], "Get Lucky");
     assert!(pl["tracks"][1].is_null());
-    // Nothing resolvable at all is a 422.
+    // A line with nothing to keep (no words, no address) is left out; only such lines is a 422
     let (st, _) = call(
         &app,
         "POST",
         "/v1/playlists/import",
-        Some(serde_json::json!({"name": "x", "tracks": [{"title": "Mystery Song"}]})),
+        Some(serde_json::json!({"name": "x", "tracks": [{"title": "  "}]})),
     )
     .await;
     assert_eq!(st, StatusCode::UNPROCESSABLE_ENTITY);
 
-    // A playlist file: the exact path, the same file under another mount
-    // (matched by file name), a title-only entry, and a miss.
+    // A playlist file: the exact path, the same file under another mount (matched by file name),
+    // a title-only entry, a miss (kept as a search), a stream on Spotify, and a web page (kept)
     let a = music.join("a.wav");
     let m3u = format!(
-        "#EXTM3U\n#PLAYLIST:From elsewhere\n{}\n/mnt/old-nas/Daft Punk/a.wav\n#EXTINF:369,Daft Punk - Get Lucky\n/nowhere/x.flac\n#EXTINF:1,Nobody - Missing\n/nowhere/missing.flac\n",
+        "#EXTM3U\n#PLAYLIST:From elsewhere\n{}\n/mnt/old-nas/Daft Punk/a.wav\n#EXTINF:369,Daft Punk - Get Lucky\n/nowhere/x.flac\n#EXTINF:1,Nobody - Missing\n/nowhere/missing.flac\nhttps://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC\nhttps://example.com/mixtape-notes\n",
         a.display()
     );
     let req = Request::builder()
@@ -201,10 +233,37 @@ async fn record_and_import_resolve_through_the_library() {
     let imp: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(st, StatusCode::OK, "{imp}");
     assert_eq!(imp["name"], "From elsewhere");
-    assert_eq!(imp["parsed"], 4);
-    assert_eq!(imp["imported"], 3, "{imp}");
+    assert_eq!(imp["parsed"], 6);
+    assert_eq!(
+        (imp["imported"].as_u64(), imp["kept"].as_u64()),
+        (Some(4), Some(2)),
+        "{imp}"
+    );
     assert_eq!(imp["unresolved"][0]["title"], "Missing");
     assert_eq!(imp["unresolved"][0]["path"], "/nowhere/missing.flac");
+    let (_, file) = call(
+        &app,
+        "GET",
+        &format!("/v1/collections/{}", imp["id"].as_str().unwrap()),
+        None,
+    )
+    .await;
+    let kinds: Vec<&str> = file["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        kinds,
+        ["track", "track", "track", "link", "track", "link"],
+        "{file}"
+    );
+    assert_eq!(
+        file["entries"][4]["uri"],
+        "https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC"
+    );
+    assert_eq!(file["entries"][5]["uri"], "https://example.com/mixtape-notes");
     // Explicit name wins; an unknown format is a 400; garbage CSV is a 422.
     let req = Request::builder()
         .method("POST")
@@ -235,10 +294,70 @@ async fn record_and_import_resolve_through_the_library() {
         app.clone().oneshot(req).await.unwrap().status(),
         StatusCode::UNPROCESSABLE_ENTITY
     );
+    // A media server's playlist (review of #156): streams with their sign-in in them, on the
+    // LAN, or longer than a v1 reference are never kept; the lines fall back to their words,
+    // and the import still works. Lines without `#EXTINF` take their words from the address's
+    // path only, never its sign-in; one with no path is unresolved. A share link (the secret in
+    // its path), a stream mount, another port or a home router's name is never kept either.
+    let m3u = format!(
+        "#EXTM3U\n#EXTINF:1,Nobody - Token Song\nhttp://media.example.com/Audio/x/stream.mp3?api_key=hunter2\n#EXTINF:1,Nobody - Password Song\nhttps://admin:hunter2@stream.example.com/live.mp3\n#EXTINF:1,Nobody - Nas Song\nhttp://nas:8096/a.mp3\n#EXTINF:1,Nobody - Long Song\nhttps://cdn.example.com/{}.mp3\nhttp://jf.example.com/Audio/x/universal?UserId=u&api_key=hunter2\nhttp://admin:hunter2@radio.example.com:8000\n#EXTINF:1,Nobody - Shared Song\nhttps://cloud.example.com/s/hunter2/download\n#EXTINF:-1,Radio Paradise\nhttps://stream.radioparadise.com/mp3-192\n#EXTINF:1,Nobody - Port Song\nhttps://music.example.com:4533/x\n#EXTINF:1,Nobody - Router Song\nhttp://nas.fritz.box/x\n",
+        "a".repeat(3000)
+    );
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/playlists/import/file?file=server.m3u")
+        .body(Body::from(m3u))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let st = resp.status();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let imp: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(st, StatusCode::OK, "{imp}");
+    assert_eq!(imp["kept"], 9, "{imp}");
+    assert_eq!(
+        (
+            imp["imported"].as_u64(),
+            imp["unresolved"].as_array().map(Vec::len)
+        ),
+        (Some(0), Some(10)),
+        "nothing matched; the radio line without words is unresolved, not kept: {imp}"
+    );
+    let (_, server) = call(
+        &app,
+        "GET",
+        &format!("/v1/collections/{}", imp["id"].as_str().unwrap()),
+        None,
+    )
+    .await;
+    assert!(
+        !server.to_string().contains("hunter2"),
+        "no sign-in in the collection: {server}"
+    );
+    let uris: Vec<&str> = server["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["uri"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        uris,
+        [
+            "https://musicbrainz.org/search?type=recording&query=Nobody+Token+Song",
+            "https://musicbrainz.org/search?type=recording&query=Nobody+Password+Song",
+            "https://musicbrainz.org/search?type=recording&query=Nobody+Nas+Song",
+            "https://musicbrainz.org/search?type=recording&query=Nobody+Long+Song",
+            "https://musicbrainz.org/search?type=recording&query=universal",
+            "https://musicbrainz.org/search?type=recording&query=Nobody+Shared+Song",
+            "https://musicbrainz.org/search?type=recording&query=Radio+Paradise",
+            "https://musicbrainz.org/search?type=recording&query=Nobody+Port+Song",
+            "https://musicbrainz.org/search?type=recording&query=Nobody+Router+Song",
+        ],
+        "{server}"
+    );
     let (_, lists) = call(&app, "GET", "/v1/playlists", None).await;
     assert!(lists
         .as_array()
         .unwrap()
         .iter()
-        .any(|p| p["name"] == "From elsewhere" && p["items"] == 3));
+        .any(|p| p["name"] == "From elsewhere" && p["items"] == 6));
 }

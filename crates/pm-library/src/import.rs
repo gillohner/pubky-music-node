@@ -138,7 +138,31 @@ pub fn parse(bytes: &[u8], format: ImportFormat, base: Option<&Path>) -> Result<
     }
 }
 
-fn title_from_path(p: &str) -> String {
+/// An entry's address without the parts that can carry a sign-in (a media server's stream link
+/// names its token there): a URL loses its user and password, its query and its fragment; a file
+/// path comes back as it is. Every address passes it before it becomes a title or search words.
+pub fn without_secrets(address: &str) -> std::borrow::Cow<'_, str> {
+    let Some((scheme, rest)) = address.split_once("://") else {
+        return address.into();
+    };
+    let rest = &rest[..rest.find(['?', '#']).unwrap_or(rest.len())];
+    let (authority, path) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
+    let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    format!("{scheme}://{host}{path}").into()
+}
+
+/// A title from an entry's address: its file name without the extension and track number. A
+/// URL's words come from its decoded path only ([`without_secrets`]), never its host or sign-in;
+/// empty
+/// when it has no path.
+pub fn title_from_path(p: &str) -> String {
+    let clean = match without_secrets(p).split_once("://") {
+        Some((_, rest)) => rest
+            .find('/')
+            .map_or(String::new(), |i| percent_decode(&rest[i..])),
+        None => p.to_string(),
+    };
+    let p = clean.as_str();
     let stem = Path::new(p)
         .file_stem()
         .and_then(|s| s.to_str())
@@ -601,5 +625,42 @@ mod tests {
         assert_eq!(title_from_path("/m/08 - Get Lucky.flac"), "Get Lucky");
         assert_eq!(title_from_path("03.Instant_Crush.dsf"), "Instant Crush");
         assert_eq!(title_from_path("2001.flac"), "2001");
+        // A stream's sign-in never becomes its title (review of #156)
+        assert_eq!(
+            title_from_path("http://jf.example.com/Audio/x/universal?UserId=u&api_key=SECRET"),
+            "universal"
+        );
+        assert_eq!(title_from_path("http://admin:hunter2@radio.example.com:8000"), "");
+        assert_eq!(
+            title_from_path("https://u:p@cdn.example.com/03%20Song.mp3#token=SECRET"),
+            "Song"
+        );
+    }
+
+    #[test]
+    fn addresses_lose_their_sign_in() {
+        for (raw, clean) in [
+            (
+                "https://user:pass@host.example.com/a.mp3",
+                "https://host.example.com/a.mp3",
+            ),
+            ("https://token@host.example.com", "https://host.example.com"),
+            (
+                "http://nas:8096/stream.mp3?token=SECRET",
+                "http://nas:8096/stream.mp3",
+            ),
+            (
+                "https://host.example.com/a#access_token=SECRET",
+                "https://host.example.com/a",
+            ),
+            (
+                "https://a:b@host.example.com/x?t=1#f",
+                "https://host.example.com/x",
+            ),
+            ("/music/a@b?.flac", "/music/a@b?.flac"),
+            ("Just words", "Just words"),
+        ] {
+            assert_eq!(without_secrets(raw), clean, "{raw}");
+        }
     }
 }

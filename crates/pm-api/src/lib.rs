@@ -12654,6 +12654,8 @@ exec sleep 300
     /// `unknown`, never an error.
     #[tokio::test]
     async fn a_web_link_has_its_pinakes_card() {
+        // Whether Pinakes was ever asked about an import's search link (it must not be)
+        static ASKED_SEARCH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let mock = Router::new()
@@ -12661,6 +12663,9 @@ exec sleep 300
                 "/v1/resources/by-uri",
                 get(
                     |Query(q): Query<std::collections::HashMap<String, String>>| async move {
+                        if q["uri"].contains("musicbrainz.org/search") {
+                            ASKED_SEARCH.store(true, std::sync::atomic::Ordering::SeqCst);
+                        }
                         match q["uri"].as_str() {
                             "https://example.com/liner-notes" => Json(serde_json::json!({
                                 "id": "c1", "uri": q["uri"], "status": "ok", "type": "Article",
@@ -12683,8 +12688,20 @@ exec sleep 300
                 ),
             )
             .route(
+                "/v1/resources/lookup",
+                post(|body: String| async move {
+                    if body.contains("musicbrainz.org/search") {
+                        ASKED_SEARCH.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    Json(serde_json::json!([]))
+                }),
+            )
+            .route(
                 "/v1/resolve",
-                post(|| async {
+                post(|body: String| async move {
+                    if body.contains("musicbrainz.org/search") {
+                        ASKED_SEARCH.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
                     (
                         StatusCode::UNPROCESSABLE_ENTITY,
                         Json(serde_json::json!({"error": "cannot read"})),
@@ -12734,6 +12751,47 @@ exec sleep 300
         assert_eq!(
             call(&app, "GET", "/v1/cards?uri=", None).await.0,
             StatusCode::BAD_REQUEST
+        );
+        // An import's search link holds a private playlist's words: answered here, never asked of
+        // Pinakes (review of #156)
+        let search = "https://musicbrainz.org/search?type=recording&query=Nobody+Missing";
+        let (st, c) = call(
+            &app,
+            "GET",
+            &format!(
+                "/v1/cards?uri={}",
+                url::form_urlencoded::byte_serialize(search.as_bytes()).collect::<String>()
+            ),
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{c}");
+        assert_eq!(c, serde_json::json!({"uri": search, "status": "unknown"}));
+        // Nor when a playlist that has one is opened: its sources are found without it (review
+        // of #156 at ed1ff43: /play-from looked it up, then had Pinakes read it)
+        let (st, pl) = call(
+            &app,
+            "POST",
+            "/v1/playlists",
+            Some(serde_json::json!({"name": "Imported", "uris": [search, "https://example.com/nothing"]})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{pl}");
+        let id = pl["summary"]["id"].as_str().unwrap().to_string();
+        let (st, pf) = call(&app, "GET", &format!("/v1/playlists/{id}/play-from"), None).await;
+        assert_eq!(st, StatusCode::OK, "{pf}");
+        assert_eq!(pf["items"].as_array().map(Vec::len), Some(2), "{pf}");
+        let (_, _) = call(
+            &app,
+            "POST",
+            "/v1/discover/describe",
+            Some(serde_json::json!({"uris": [search]})),
+        )
+        .await;
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(
+            !ASKED_SEARCH.load(std::sync::atomic::Ordering::SeqCst),
+            "Pinakes saw the search words"
         );
     }
 

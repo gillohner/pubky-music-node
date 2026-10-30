@@ -1610,11 +1610,20 @@ pub struct TidalPlaylist {
     pub url: String,
 }
 
+fn is_zero(n: &usize) -> bool {
+    *n == 0
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ImportReport {
-    /// Entries that became canonical URIs (ISRC, else the TIDAL link).
+    /// Entries that became canonical URIs (ISRC, else the service link).
     pub imported: usize,
+    /// Entries left out (nothing to name them by).
     pub skipped: usize,
+    /// Unidentified entries kept in the playlist as a MusicBrainz search for their words
+    /// (TASK-pinakes-social-ux.md B4).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub kept: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub playlist: Option<PlaylistDetail>,
 }
@@ -2082,6 +2091,7 @@ pub(crate) async fn import_playlist(
         imported,
         skipped,
         playlist: Some(detail),
+        ..Default::default()
     }))
 }
 
