@@ -1443,6 +1443,7 @@ async fn expand_link(
             album,
             duration_ms: duration_secs.map(|d| d * 1000),
             image: it.image.clone(),
+            limit: None,
         }]);
     }
     if l.kind == "artist" {
@@ -1462,6 +1463,7 @@ async fn expand_link(
                     album: None,
                     duration_ms: h.duration_ms,
                     image: h.image,
+                    limit: None,
                 })
             })
             .collect());
@@ -1478,6 +1480,7 @@ async fn expand_link(
             album: Some(album.title.clone()),
             duration_ms: t.duration_ms,
             image: album.image.clone().or_else(|| it.image.clone()),
+            limit: None,
         })
         .collect())
 }

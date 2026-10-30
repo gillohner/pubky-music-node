@@ -36,6 +36,8 @@ use pm_zones::ZoneState;
 
 /// How often the node pings each socket.
 pub const SERVER_PING: Duration = Duration::from_secs(20);
+/// How often a listener's socket checks its token is still good, at most (when events come).
+const RECHECK: Duration = Duration::from_secs(5);
 /// A pinging controller that is silent this long is gone.
 pub const IDLE_TIMEOUT: Duration = Duration::from_secs(45);
 
@@ -140,9 +142,12 @@ enum ClientMsg {
 pub(crate) async fn events_ws(
     State(s): State<Arc<NodeState>>,
     Extension(c): Extension<Caller>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
     ws: WebSocketUpgrade,
 ) -> Response {
-    ws.on_upgrade(move |socket| event_stream(socket, s, c))
+    let token = crate::bearer(&headers, &q);
+    ws.on_upgrade(move |socket| event_stream(socket, s, c, token))
 }
 
 fn snapshot(s: &NodeState, c: &Caller, seq: u64) -> SnapshotMsg {
@@ -175,10 +180,12 @@ fn for_caller(s: &NodeState, c: &Caller, ev: &ApiEvent) -> Option<ApiEvent> {
     }
 }
 
-async fn event_stream(socket: WebSocket, s: Arc<NodeState>, c: Caller) {
+async fn event_stream(socket: WebSocket, s: Arc<NodeState>, c: Caller, token: Option<String>) {
     let (mut tx, mut rx) = socket.split();
     let (mut events, seq) = s.events.subscribe_at();
-    if send_json(&mut tx, &snapshot(&s, &c, seq)).await.is_err() {
+    // A listener sees file names, not where the owner keeps files (as in every JSON answer)
+    let hide = c.role != crate::accounts::Role::Owner;
+    if send_for(&mut tx, hide, &snapshot(&s, &c, seq)).await.is_err() {
         return;
     }
     let mut ping = tokio::time::interval(SERVER_PING);
@@ -190,6 +197,16 @@ async fn event_stream(socket: WebSocket, s: Arc<NodeState>, c: Caller) {
     // The owner came in with the API token: when it is replaced, this socket ends with it
     let with_token = c.role == crate::accounts::Role::Owner && s.token().is_some();
     let mut token_changed = s.token_changed.subscribe();
+    // A listener signed out or lost music access: the socket goes with the token (checked on
+    // each server ping, and before an event at most every few seconds)
+    let mut checked = tokio::time::Instant::now();
+    let still_valid = |at: &mut tokio::time::Instant, now: bool| {
+        if c.role == crate::accounts::Role::Owner || !(now || at.elapsed() >= RECHECK) {
+            return true;
+        }
+        *at = tokio::time::Instant::now();
+        crate::accounts::caller(&s, token.as_deref()).is_some_and(|now| now == c)
+    };
     loop {
         let idle = tokio::time::sleep_until(last_heard + IDLE_TIMEOUT);
         tokio::select! {
@@ -198,9 +215,13 @@ async fn event_stream(socket: WebSocket, s: Arc<NodeState>, c: Caller) {
                 break;
             }
             ev = events.recv() => match ev {
+                Ok(_) if !still_valid(&mut checked, false) => {
+                    let _ = tx.send(Message::Close(None)).await;
+                    break;
+                }
                 Ok(ev) => {
                     let sent = match for_caller(&s, &c, &ev.event) {
-                        Some(event) => send_json(&mut tx, &EventMsg { seq: ev.seq, event: &event }).await,
+                        Some(event) => send_for(&mut tx, hide, &EventMsg { seq: ev.seq, event: &event }).await,
                         None => send_json(&mut tx, &serde_json::json!({"seq": ev.seq, "type": "hidden"})).await,
                     };
                     if sent.is_err() {
@@ -211,7 +232,7 @@ async fn event_stream(socket: WebSocket, s: Arc<NodeState>, c: Caller) {
                     tracing::debug!(n, "event stream lagged; resending snapshot");
                     let (fresh, seq) = s.events.subscribe_at();
                     events = fresh;
-                    if send_json(&mut tx, &snapshot(&s, &c, seq)).await.is_err() {
+                    if send_for(&mut tx, hide, &snapshot(&s, &c, seq)).await.is_err() {
                         break;
                     }
                 }
@@ -232,7 +253,7 @@ async fn event_stream(socket: WebSocket, s: Arc<NodeState>, c: Caller) {
                         Ok(ClientMsg::Resync) => {
                             let (fresh, seq) = s.events.subscribe_at();
                             events = fresh;
-                            if send_json(&mut tx, &snapshot(&s, &c, seq)).await.is_err() {
+                            if send_for(&mut tx, hide, &snapshot(&s, &c, seq)).await.is_err() {
                                 break;
                             }
                         }
@@ -247,6 +268,10 @@ async fn event_stream(socket: WebSocket, s: Arc<NodeState>, c: Caller) {
                 }
             }
             _ = ping.tick() => {
+                if !still_valid(&mut checked, true) {
+                    let _ = tx.send(Message::Close(None)).await;
+                    break;
+                }
                 if tx.send(Message::Ping(Vec::new().into())).await.is_err() {
                     break;
                 }
@@ -256,6 +281,24 @@ async fn event_stream(socket: WebSocket, s: Arc<NodeState>, c: Caller) {
                 break;
             }
         }
+    }
+}
+
+/// [`send_json`], with the owner's file paths hidden when `hide` (a listener).
+async fn send_for<T: Serialize>(
+    tx: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    hide: bool,
+    v: &T,
+) -> Result<(), axum::Error> {
+    if !hide {
+        return send_json(tx, v).await;
+    }
+    match serde_json::to_value(v) {
+        Ok(mut j) => {
+            crate::accounts::hide_file_paths(&mut j);
+            send_json(tx, &j).await
+        }
+        Err(_) => send_json(tx, v).await,
     }
 }
 

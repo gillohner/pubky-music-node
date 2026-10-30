@@ -152,11 +152,11 @@ pub struct NodeState {
     pub contact: std::sync::RwLock<String>,
     /// A sign-in in progress (POST /v1/pubky/login).
     pub login: tokio::sync::Mutex<Option<pm_pubky::homeserver::LoginFlow>>,
-    /// Controller sign-ins in progress: id → (flow, started).
     /// Bulk uploads to the homeserver's private storage, by job id (files.rs).
     pub upload_jobs: std::sync::Mutex<std::collections::HashMap<String, crate::types::UploadProgress>>,
+    /// Controller sign-ins in progress: id → (flow, started, who asked: `lib::login_origin`).
     pub controller_logins: tokio::sync::Mutex<
-        std::collections::HashMap<String, (pm_pubky::homeserver::LoginFlow, std::time::Instant)>,
+        std::collections::HashMap<String, (pm_pubky::homeserver::LoginFlow, std::time::Instant, String)>,
     >,
     /// The zones' source factory, also the per-output DSP registry.
     pub sources: Arc<NodeSources>,
