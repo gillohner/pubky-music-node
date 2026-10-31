@@ -1514,14 +1514,16 @@ impl NodeState {
     }
 
     pub fn set_sync(&self, sync: Option<Arc<crate::sync::PubkySync>>) {
-        // The owner's browser sessions belong to this identity from now on (Kimi review of #209)
-        if let Some(z32) = sync.as_ref().map(|s| s.z32().to_string()) {
+        let derived = sync.as_ref().map(|s| profile_url(s.z32()));
+        let z32 = sync.as_ref().map(|s| s.z32().to_string());
+        *self.sync.lock().expect("sync lock") = sync;
+        // The owner's browser sessions belong to this identity from now on (Kimi review of #209).
+        // After the swap: a session minted meanwhile was checked against the identity then
+        if let Some(z32) = z32 {
             if let Err(e) = crate::accounts::keep_owner_sessions_of(self, &z32) {
                 tracing::warn!("ending another identity's browser sessions failed: {}", e.message);
             }
         }
-        let derived = sync.as_ref().map(|s| profile_url(s.z32()));
-        *self.sync.lock().expect("sync lock") = sync;
         // The owner's pubky.app profile is a public URL that reaches them,
         // which is all MusicBrainz, Wikipedia and Pinakes ask of a contact:
         // use it when nothing was set, so discovery works without any form.

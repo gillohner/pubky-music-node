@@ -730,13 +730,14 @@ async fn the_owner_logs_in_and_out_and_a_wrong_identity_is_named() {
     assert_eq!(st, StatusCode::OK);
 
     // While the node has no identity loaded (its homeserver didn't answer at start), no browser
-    // session is the owner; the API token is. Loaded again, the owner's session works again
+    // session is the owner (a 503, so the page keeps it); the API token is. Loaded again, the
+    // owner's session works again
     let v = ring_sign_in(&app, &owner).await;
     let session = v["token"].as_str().unwrap().to_string();
     let loaded = s.sync_handle().unwrap();
     s.set_sync(None);
     let (st, _) = call_auth(&app, "GET", "/v1/me", &session, None).await;
-    assert_eq!(st, StatusCode::UNAUTHORIZED);
+    assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE);
     let (st, _) = call_auth(&app, "GET", "/v1/me", API, None).await;
     assert_eq!(st, StatusCode::OK);
     s.set_sync(Some(loaded));

@@ -1,6 +1,6 @@
 // Real-browser check for a Pubky session approved for fewer folders than the node uses
 // (STEWARD-FIX-resign.md, then TASK-login-ux): there is no separate "Sign in again" any more; the
-// owner's Log out on its notice makes the next log in ask for the folders. So, with the node's
+// owner's next log in after a Log out asks for the folders. So, with the node's
 // status answer set in the browser:
 //   * folders missing: Settings › My accounts and Your library say so with a Log out button (Save
 //     now disabled, the notice as its tooltip); Home and item pages show no banner;
@@ -13,7 +13,7 @@ const errors = [];
 const fails = [];
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const check = (ok, what) => { console.log(`${ok ? 'ok  ' : 'FAIL'} ${what}`); if (!ok) fails.push(what); };
-const NOTICE = 'This node needs your approval for new folders on your homeserver. Use Log out here and log in again with Pubky Ring to give it.';
+const NOTICE = 'This node needs your approval for new folders on your homeserver. Log out and log in again with Pubky Ring to give it.';
 (async () => {
   const browser = await chromium.launch();
   const shot = async (p, name) => { if (OUT) await p.screenshot({ path: `${OUT}/${name}.png` }); };
@@ -30,7 +30,7 @@ const NOTICE = 'This node needs your approval for new folders on your homeserver
     for (const missing of [true, false]) {
       const { ctx, p } = await open(width, missing);
       const what = missing ? 'folders missing' : 'renewed';
-      await p.goto(BASE + '/settings/accounts'); await p.waitForSelector('#main .set-group', { timeout: 20000 });
+      await p.goto(BASE + '/settings/accounts'); await p.waitForSelector('#main .set-group >> visible=true', { timeout: 20000 });
       check(missing ? await p.isVisible('#pkresign [data-resign]') : !(await p.$('#pkresign')), `${width}, ${what}: Settings ${missing ? 'says so, with Log out' : 'has no notice'}`);
       check(!(await p.$('#pklogin')), `${width}, ${what}: no "Sign in again"`);
       await shot(p, `resign-settings-${width}-${missing ? 'missing' : 'renewed'}`);

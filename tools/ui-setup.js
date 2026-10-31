@@ -812,7 +812,7 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
 
       // The node's own session lacks folders: a Log out line in Settings, no banner on Home
       c = await loginCtx({ viewport: { width: 1280, height: 900 } }, TOKEN); p = await c.newPage();
-      await c.route(/\/v1\/pubky$/, (r) => r.fulfill({ json: { user: 'pubky' + OWNER_K, unsynced: 0, needs_resign: true, missing: ['/pub/music/v1/'], notice: 'This node needs your approval for new folders on your homeserver. Use Log out here and log in again with Pubky Ring to give it.', sync: null } }));
+      await c.route(/\/v1\/pubky$/, (r) => r.fulfill({ json: { user: 'pubky' + OWNER_K, unsynced: 0, needs_resign: true, missing: ['/pub/music/v1/'], notice: 'This node needs your approval for new folders on your homeserver. Log out and log in again with Pubky Ring to give it.', sync: null } }));
       await p.goto(BASE + '/settings/accounts');
       check(await visible(p, '#pkresign [data-resign]', 20000), 'Settings says the node needs approval, with Log out');
       check(!(await p.$('#pklogin')), 'no separate "Sign in again"');
@@ -821,11 +821,11 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
       await c.route(/\/v1\/auth\/pubky\/start$/, (r) => { renewBodies.push(r.request().postData()); return r.fulfill({ json: { id: 'renew1', url: 'pubkyauth:///?caps=/pub/pubky.app/:r&secret=c2VjcmV0&relay=https://relay.example/link', owner: OWNER_K, owner_face: { id: OWNER_K, name: 'Alice' }, node_name: 'CI node', renews: true, qr_svg: QR } }); });
       await c.route(/\/v1\/auth\/pubky\/poll/, (r) => r.fulfill({ json: { status: 'pending' } }));
       await p.click('#pkresign [data-resign]');
-      check(await visible(p, '#loginpage', 15000) && await waitText(p, '#loginbody', 'new folders'), 'its Log out leads to a log in that asks for the new folders');
+      check(await visible(p, '#loginpage', 15000) && await p.waitForFunction(() => /approve the new folders this node needs/.test(document.querySelector('#loginbody').textContent), null, { timeout: 10000 }).then(() => true).catch(() => false), 'its Log out leads to a log in that asks for the new folders');
       check(renewBodies.length === 1 && JSON.parse(renewBodies[0] || '{}').renew === true, `the log in asks the node for a renewal (${renewBodies.join(' ')})`);
       await c.close();
       c = await ctx(); p = await c.newPage();
-      await c.route(/\/v1\/pubky$/, (r) => r.fulfill({ json: { user: 'pubky' + OWNER_K, unsynced: 0, needs_resign: true, missing: ['/pub/music/v1/'], notice: 'This node needs your approval for new folders on your homeserver. Use Log out here and log in again with Pubky Ring to give it.', sync: null } }));
+      await c.route(/\/v1\/pubky$/, (r) => r.fulfill({ json: { user: 'pubky' + OWNER_K, unsynced: 0, needs_resign: true, missing: ['/pub/music/v1/'], notice: 'This node needs your approval for new folders on your homeserver. Log out and log in again with Pubky Ring to give it.', sync: null } }));
       await p.goto(BASE + '/'); await p.waitForSelector('#h-setup', { timeout: 20000 }).catch(() => {}); await p.waitForTimeout(800);
       check(!(await p.$('#main .notice.resign')), 'Home has no sign-in banner');
       await c.close();
