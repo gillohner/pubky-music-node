@@ -339,7 +339,6 @@ pub fn list(s: &NodeState, base: &str) -> Vec<NodeApp> {
                  to its partners and can stop accepting one at any time; an app from TIDAL's developer \
                  site doesn't work here.",
             ),
-            builtin: crate::project_apps::tidal_device_client().is_some(),
             ..app(
                 "tidal-full",
                 "TIDAL full tracks",

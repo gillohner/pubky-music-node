@@ -1077,7 +1077,7 @@
     const out = el.querySelector('[data-sg="out"]'); if (out) out.onclick = async () => { try { await api('DELETE', `/sources/${cfg.source}/signin`); toast(`Signed out of ${cfg.name}`); m.change = false; state.sources = null; render(); } catch (e) { toast(e.message, 'error'); } };
     if (cfg.after) cfg.after(si, h, el);
   };
-  // TIDAL: the official app in the browser, tidal-dl-ng's device code, your own client; quality and
+  // TIDAL: the official app in the browser, a device code with your own client; quality and
   // health under the device way, which is what the Full tracks switch used to turn on (STEWARD-TIDAL-FULL.md).
   const tidalBrowserSignIn = async (btn) => { if (btn) btn.disabled = true; try { const r = await api('GET', '/sources/tidal/login'); location.href = r.url; let tries = 0; const t = setInterval(async () => { tries++; try { const st = await api('GET', '/sources/tidal/status'); if (st.signed_in) { clearInterval(t); toast('TIDAL signed in'); render(); } } catch { /* keep polling */ } if (tries > 60) clearInterval(t); }, 3000); } catch (e) { toast(e.message, 'error'); if (btn) btn.disabled = false; } };
   const tidalSigninCfg = (el) => ({
@@ -1086,7 +1086,7 @@
       const u = si.details.unofficial || {}; const st = si.details.status || {}; const w = h.wayOf(pick);
       if (pick === 'app') return st.signed_in ? h.useButton(w, st.user_id ? ' as user ' + esc(st.user_id) : '') : `<div class="toolbar"><button class="btn primary" id="tidalin">${icon('zone')} Sign in at TIDAL</button><span class="muted small">Opens TIDAL’s sign-in in this browser and comes back here.</span></div>${st.redirect_uri && !/^Pubky Music/.test(w.label || '') ? `<details class="small"><summary>Your app’s settings</summary><p class="muted small">It must list <code>${esc(st.redirect_uri)}</code> as a redirect URI and have these scopes enabled (<code>[tidal] scopes</code> in the node config):</p><div class="toolbar"><code class="path">${esc(st.requested_scopes || '')}</code></div></details>` : ''}${pasteBack('tidal')}`;
       if (pick === 'device') {
-        const client = u.client_from && u.client_from !== 'builtin' ? `<p class="muted small">Device client: ${u.client_from === 'config' ? 'set in the node config.' : 'entered here.'} ${u.client_from === 'settings' ? `<button class="btn ghost sm" id="tfclientforget">${u.builtin ? 'Use tidal-dl-ng’s instead' : 'Forget it'}</button>` : ''}</p>` : '';
+        const client = u.client_from ? `<p class="muted small">Device client: ${u.client_from === 'config' ? 'set in the node config.' : 'entered here.'} ${u.client_from === 'settings' ? '<button class="btn ghost sm" id="tfclientforget">Forget it</button>' : ''}</p>` : '';
         if (u.pending) return `<p class="muted small">On a phone or computer, open link.tidal.com and enter this code. This page notices when you are done.</p><div class="toolbar"><code class="tf-code">${esc(u.pending.user_code)}</code><a class="btn primary" href="${esc(webUrl(u.pending.uri))}" target="_blank" rel="noopener">${icon('external')} Open link.tidal.com</a></div>`;
         if (u.signed_in) return h.useButton(w, u.user ? ' as user ' + esc(u.user) : '') + client;
         return `<div class="toolbar"><button class="btn primary" id="tfin">Sign in with a code</button><span class="muted small">A code to enter at link.tidal.com on any device; no password goes through this node.</span></div>${client}`;
@@ -1102,7 +1102,7 @@
       wirePasteBack('tidal', 'TIDAL signed in');
       const d = $('#tfin'); if (d) d.onclick = async () => { d.disabled = true; if (await h.choose('device')) { try { await api('POST', '/sources/tidal/unofficial/login'); } catch (e) { toast(e.message, 'error'); } } h.refill(); };
       const cf = $('#tfclient'); if (cf) cf.onsubmit = async (e) => { e.preventDefault(); const f = new FormData(cf); cf.querySelector('button').disabled = true; try { await api('PUT', '/sources/tidal/unofficial', { client_id: f.get('id'), client_secret: f.get('secret') }); toast('Device client saved'); if (await h.choose('device')) await api('POST', '/sources/tidal/unofficial/login'); } catch (er) { toast(er.message, 'error'); } h.refill(); };
-      const cfg = $('#tfclientforget'); if (cfg) cfg.onclick = async () => { try { await api('PUT', '/sources/tidal/unofficial', { client_id: '' }); toast(u.builtin ? 'Using tidal-dl-ng’s device client' : 'Device client forgotten'); } catch (e) { toast(e.message, 'error'); } h.refill(); };
+      const cfg = $('#tfclientforget'); if (cfg) cfg.onclick = async () => { try { await api('PUT', '/sources/tidal/unofficial', { client_id: '' }); toast('Device client forgotten'); } catch (e) { toast(e.message, 'error'); } h.refill(); };
     },
     extra: (si) => {
       const u = si.details.unofficial || {}; const st = si.details.status || {}; const rows = [];

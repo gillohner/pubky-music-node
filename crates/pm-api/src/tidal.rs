@@ -1319,10 +1319,7 @@ pub(crate) fn sign_in(s: &NodeState, headers: Option<&axum::http::HeaderMap>) ->
         )
     };
     let app = app_label(&c);
-    let device_label = match device_client.as_ref().map(|d| d.from.as_str()) {
-        Some("builtin") => "tidal-dl-ng's client",
-        _ => "Your own device client",
-    };
+    let device_label = "Your own device client";
     // Other apps' files are looked at for the tab, not for the overview line
     let found = if headers.is_some() {
         crate::imports::scan_tidal()
@@ -1392,7 +1389,7 @@ pub(crate) fn sign_in(s: &NodeState, headers: Option<&axum::http::HeaderMap>) ->
             recommended: false,
             available: device_client.is_some(),
             reason: device_client.is_none().then(|| {
-                "This build has no built-in device client; enter one under Your own app.".to_string()
+                "Add a device client to play full tracks: enter one under Your own app.".to_string()
             }),
         },
         Way {

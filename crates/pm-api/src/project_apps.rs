@@ -9,29 +9,10 @@
 //! A build without them simply has no built-in apps. A node's own `[tidal]`, `[jamendo]` or
 //! `[acoustid]` values always win.
 //!
-//! The one built-in secret is the **TIDAL device client** for Full tracks (STEWARD-TIDAL-DEFAULT.md:
-//! the client python-tidal publishes, supplied by the owner), compiled in from
-//! `PM_TIDAL_DEVICE_CLIENT_ID` / `PM_TIDAL_DEVICE_CLIENT_SECRET` as masked bytes (build.rs), so the
-//! plain values are in neither the source nor the binary's strings. It is not a security boundary;
-//! it keeps the values out of casual sight. A device client the owner enters always wins.
-
-mod device {
-    include!(concat!(env!("OUT_DIR"), "/tidal_device.rs"));
-}
-
-const MASK: &[u8] = b"pubky-music-node:tidal-device";
-
-fn unmask(b: &[u8]) -> String {
-    b.iter()
-        .enumerate()
-        .map(|(i, x)| (x ^ MASK[i % MASK.len()] ^ (i as u8)) as char)
-        .collect()
-}
-
-/// The built-in TIDAL device client `(id, secret)` for Full tracks, when the build carries one.
-pub fn tidal_device_client() -> Option<(String, String)> {
-    device::DEVICE.map(|(id, secret)| (unmask(id), unmask(secret)))
-}
+//! No secret is built in. In particular there is no built-in TIDAL device client (owner,
+//! 2026-10-31: the one python-tidal publishes was issued by TIDAL to someone else): full tracks
+//! need a device client the owner enters (Sources › TIDAL › Sign in › Your own app, or
+//! `[tidal] unofficial_client_id` / `_secret`).
 
 /// The project's TIDAL app (public client id).
 pub fn tidal_client_id() -> Option<&'static str> {
@@ -99,25 +80,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_device_client_unmasks_what_the_build_masked() {
-        // The same arithmetic as build.rs
-        let mask = |v: &str| -> Vec<u8> {
-            v.bytes()
-                .enumerate()
-                .map(|(i, b)| b ^ MASK[i % MASK.len()] ^ (i as u8))
-                .collect()
-        };
-        let m = mask("zU4JXAiEUnGhXp4d");
-        assert_ne!(&m[..], b"zU4JXAiEUnGhXp4d");
-        assert!(!String::from_utf8_lossy(&m).contains("zU4J"));
-        assert_eq!(unmask(&m), "zU4JXAiEUnGhXp4d");
-        // A build without the values carries none
-        if std::env::var("PM_TIDAL_DEVICE_CLIENT_ID").is_err() {
-            assert!(tidal_device_client().is_none());
-        }
-    }
-
-    #[test]
     fn state_carries_the_nonce_and_the_callback() {
         let st = return_state("n0nce", "http://127.0.0.1:7788/tidal/callback");
         assert_eq!(state_nonce(&st), "n0nce");
@@ -127,5 +89,26 @@ mod tests {
             .unwrap();
         assert_eq!(back, b"http://127.0.0.1:7788/tidal/callback");
         assert_eq!(state_nonce("plain"), "plain");
+    }
+
+    /// No TIDAL device client is built in (owner, 2026-10-31): neither the build script, the
+    /// release workflow nor the image takes one, and a node with no client of the owner's has
+    /// none, so TIDAL plays the official way until the owner enters one.
+    #[test]
+    fn no_tidal_device_client_is_built_in() {
+        for (name, text) in [
+            ("build.rs", include_str!("../build.rs")),
+            (
+                "release.yml",
+                include_str!("../../../.github/workflows/release.yml"),
+            ),
+            ("Dockerfile", include_str!("../../../Dockerfile")),
+        ] {
+            assert!(!text.contains("TIDAL_DEVICE"), "{name} feeds in a device client");
+        }
+        if std::env::var("PM_TIDAL_UNOFFICIAL_CLIENT_ID").is_err() {
+            let lib = pm_library::Library::open_in_memory().unwrap();
+            assert!(crate::tidal_unofficial::client_of(&lib).is_none());
+        }
     }
 }
