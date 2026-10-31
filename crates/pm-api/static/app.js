@@ -1022,7 +1022,8 @@
   const stepCard = (no, title, done, sub, body) => `<div class="setup-step card-step ${done ? 'done' : ''}" data-step="${no}"><span class="stepmark" aria-hidden="true">${done ? icon('check') : no}</span><div class="grow"><div class="name">${no}. ${title}${done ? '<span class="sr-only"> (done)</span>' : ''}</div><div class="sub">${sub}</div>${body}</div></div>`;
   // A secret field with Show / Hide: a password until shown
   const secretInput = (name, label, placeholder, autocomplete = 'off', disabled = false) => `<span class="secretwrap"><input class="input" name="${name}" type="password" placeholder="${esc(placeholder)}" autocomplete="${autocomplete}" aria-label="${esc(label)}" spellcheck="false" required ${disabled ? 'disabled' : ''}><button class="icon-btn showpw" type="button" aria-label="Show ${esc(label)}" aria-pressed="false" title="Show">${icon('eye')}</button></span>`;
-  const wireSecretToggles = (root) => $$('.showpw', root).forEach((b) => b.onclick = () => { const i = b.previousElementSibling; const show = i.type === 'password'; i.type = show ? 'text' : 'password'; b.setAttribute('aria-pressed', String(show)); b.title = show ? 'Hide' : 'Show'; b.setAttribute('aria-label', b.getAttribute('aria-label').replace(/^(Show|Hide)/, show ? 'Hide' : 'Show')); b.innerHTML = icon(show ? 'eye-off' : 'eye'); });
+  // One name ("Show …") and the pressed state say it all; only the picture and the tooltip change
+  const wireSecretToggles = (root) => $$('.showpw', root).forEach((b) => b.onclick = () => { const i = b.previousElementSibling; const show = i.type === 'password'; i.type = show ? 'text' : 'password'; b.setAttribute('aria-pressed', String(show)); b.title = show ? 'Hide' : 'Show'; b.innerHTML = icon(show ? 'eye-off' : 'eye'); });
   // A pasted block (`app_id=… app_secret=…`, a config section, JSON) split into its two values
   const splitAppPaste = (text, kind) => {
     const t = String(text || ''); if (!/[=:]/.test(t)) return null;
@@ -1036,7 +1037,7 @@
     [idF, secF].forEach((f) => f && f.addEventListener('paste', (e) => {
       const got = splitAppPaste(e.clipboardData && e.clipboardData.getData('text'), kind); if (!got) return;
       e.preventDefault(); if (got.id) idF.value = got.id; if (got.secret) secF.value = got.secret;
-      (got.id && got.secret ? form.querySelector('button[type=button]') || form.querySelector('button[type=submit]') : got.id ? secF : idF).focus();
+      (got.id && got.secret ? form.querySelector('.btn[type=button]') || form.querySelector('button[type=submit]') : got.id ? secF : idF).focus();
       toast('Split into ID and secret');
     }));
   };
@@ -1167,7 +1168,7 @@
       const tr = $('#tfretry'); if (tr) tr.onclick = () => putU({ enabled: true }, 'Trying full tracks again');
       const tq = $('#tfq'); if (tq) tq.onchange = () => putU({ quality: tq.value }, 'Quality saved');
       const a2 = $('#tsiapp2'); if (a2) a2.onclick = () => tidalBrowserSignIn(a2);
-      const out = $('#tfout'); if (out) out.onclick = async () => { try { await api('DELETE', '/sources/tidal/unofficial/login'); toast('Signed out of TIDAL full tracks'); h.m.change = false; state.sources = null; render(); } catch (e) { toast(e.message, 'error'); } };
+      const out = $('#tfout'); if (out) out.onclick = async () => { try { await api('DELETE', '/sources/tidal/unofficial/login'); toast('Signed out of TIDAL full tracks'); h.m.change = false; h.m.codeExpired = false; state.sources = null; render(); } catch (e) { toast(e.message, 'error'); } };
       clearTimeout(state.tidalFullPoll); clearInterval(state.tidalCountdown);
       if (u.pending) {
         // The time left, each second; gone, the page says so and offers a new code
@@ -1175,7 +1176,7 @@
         const tick = () => { if (!count || !count.isConnected) { clearInterval(state.tidalCountdown); return; } const left = Math.max(0, Math.round((ends - Date.now()) / 1000)); count.textContent = left > 0 ? `The code is good for ${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}` : 'The code expired'; if (left <= 0) { clearInterval(state.tidalCountdown); h.m.codeExpired = true; } };
         tick(); state.tidalCountdown = setInterval(tick, 1000);
         // The node notices the approval; this page asks every few seconds and continues by itself
-        state.tidalFullPoll = setTimeout(async () => { let now; try { now = await api('GET', '/sources/tidal/signin'); } catch { return; } const nu = now.details.unofficial || {}; if (now.in_use && now.in_use.way === 'device' && !(si.in_use && si.in_use.way === 'device')) { toast('TIDAL signed in: full tracks'); h.done(); } else { if (!nu.pending && !nu.signed_in) h.m.codeExpired = true; h.refill(now); } }, 3000);
+        state.tidalFullPoll = setTimeout(async () => { let now; try { now = await api('GET', '/sources/tidal/signin'); } catch { return; } const nu = now.details.unofficial || {}; if (now.in_use && now.in_use.way === 'device' && !(si.in_use && si.in_use.way === 'device')) { h.m.codeExpired = false; toast('TIDAL signed in: full tracks'); h.done(); } else { if (!nu.pending && !nu.signed_in) h.m.codeExpired = true; h.refill(now); } }, 3000);
       }
     },
   });

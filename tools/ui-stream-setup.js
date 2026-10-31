@@ -1,5 +1,5 @@
-// The guided setup pages for Qobuz and TIDAL full tracks (TASK-qobuz-tidal-setup-ux), every state
-// at desktop and phone width. The node's answers are mocked here (no Qobuz or TIDAL account, no app
+// The guided setup pages for Qobuz and TIDAL full tracks (TASK-qobuz-tidal-setup-ux): each state
+// of both at desktop and phone width. The node's answers are mocked here (no Qobuz or TIDAL account, no app
 // credentials); pm-api's Rust tests cover the checks and sign-ins against mock servers.
 //   node tools/ui-stream-setup.js <api token> <node URL> [screenshot directory]
 const assert = require('node:assert/strict');
@@ -206,10 +206,16 @@ const tidalMocks = async (p, log, si0) => {
         check(await until(async () => (await pillOf(p, root)) === 'Working', 8000), `${w} TIDAL: signed in by itself, Working`);
         check(/up to 24-bit\/192 kHz/.test(await p.textContent(`${root} .set-row`)) && await p.isVisible('#tfout'), `${w} TIDAL: the quality and Sign out`);
         await shot('tidal-working');
-        // Sign out, then a code that runs out
+        // Off, a problem, sign out, then a code that runs out
+        // (signed in, the chooser shows its status rows, not the ways)
+        T.U.enabled = false; await p.reload(); await p.waitForSelector(`${root} .set-name .pill`, { timeout: 20000 });
+        check(await pillOf(p, root) === 'Off', `${w} TIDAL: signed in but switched off`);
+        T.U.health = { ok: false, detail: 'TIDAL refused the client', at: 1 }; await p.reload(); await p.waitForSelector(`${root} .set-name .pill`, { timeout: 20000 });
+        check(await pillOf(p, root) === 'Problem' && await p.isVisible('#tfretry'), `${w} TIDAL: a failure is a Problem with Try again`);
+        delete T.U.health;
         await p.click('#tfout');
         check(await until(async () => (await pillOf(p, root)) === 'Needs sign-in'), `${w} TIDAL: signed out, needs the sign-in again`);
-        T.U.client_from = 'settings'; T.codeSeconds = 2;
+        T.codeSeconds = 2;
         await p.locator(`${root} input[value="device"]`).check(); await p.waitForSelector('#tfin', { timeout: 5000 }); await p.click('#tfin');
         check(await until(async () => await p.isVisible('#tfcount')), `${w} TIDAL: a new code`);
         check(await until(async () => /expired/.test(await p.textContent('#tfcount')), 5000), `${w} TIDAL: the countdown says when it expired`);

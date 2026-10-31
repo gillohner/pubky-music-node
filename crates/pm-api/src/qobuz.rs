@@ -758,10 +758,13 @@ fn judge_app_check(status: u16, v: &Value) -> CheckResult {
             false,
             "Qobuz doesn't know this app ID. Check it, or ask Qobuz for API access.".to_string(),
         ),
-        // Without an account Qobuz stops here: the app itself was accepted
+        // Without an account Qobuz stops here, having looked at the app ID and the signature first
+        // (what streamrip and qobuz-dl rely on too); the first stream after the sign-in proves the
+        // secret once more, and a wrong one then switches the mode off with its own words
         401 => (
             true,
-            "OK: Qobuz accepts this app ID and secret. Your Qobuz account is next.".to_string(),
+            "OK: Qobuz accepts this app ID and the secret's signature. Your Qobuz account is next."
+                .to_string(),
         ),
         200..=299 | 403 => (true, "OK: Qobuz accepts this app ID and secret.".to_string()),
         _ => (
