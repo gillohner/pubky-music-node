@@ -60,16 +60,24 @@ pub fn encode(s: &str) -> String {
     out
 }
 
+/// How long a pause or resume waits for the player: the zone's audio thread waits with it.
+const CONTROL_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// One API call (`/Status`, `/Play?url=…`), blocking. Returns the XML body of a `200`.
 pub fn get(host: &str, port: u16, path: &str) -> Result<String, BluosError> {
+    get_within(host, port, path, TIMEOUT)
+}
+
+/// [`get`] with its own connect and read timeout.
+fn get_within(host: &str, port: u16, path: &str, timeout: Duration) -> Result<String, BluosError> {
     let name = path.split('?').next().unwrap_or(path);
     let addr = (host, port)
         .to_socket_addrs()?
         .next()
         .ok_or_else(|| BluosError::Http(format!("{name}: no address for {host}")))?;
-    let mut s = TcpStream::connect_timeout(&addr, TIMEOUT)?;
-    s.set_read_timeout(Some(TIMEOUT))?;
-    s.set_write_timeout(Some(TIMEOUT))?;
+    let mut s = TcpStream::connect_timeout(&addr, timeout)?;
+    s.set_read_timeout(Some(timeout))?;
+    s.set_write_timeout(Some(timeout))?;
     let host_header = if host.contains(':') {
         format!("[{host}]")
     } else {
@@ -242,6 +250,7 @@ impl BluosOutput {
             inner: Some(inner),
             stop: Some((self.player.host.clone(), self.player.port)),
             ungroup,
+            paused: false,
         })
     }
 
@@ -383,6 +392,8 @@ struct BluosSink {
     stop: Option<(String, u16)>,
     /// The leader and its followers' query, for a group to end.
     ungroup: Option<(String, u16, String)>,
+    /// The player was told to pause.
+    paused: bool,
 }
 
 impl BluosSink {
@@ -409,6 +420,36 @@ impl AudioSink for BluosSink {
     }
     fn drain(&mut self) -> Result<(), SinkError> {
         self.sink_mut().drain()
+    }
+    /// The player's own `/Pause`: it stops at once and keeps its buffer (it plays seconds of
+    /// it out otherwise). A group's leader pauses its followers with it.
+    fn pause(&mut self) -> Result<bool, SinkError> {
+        let Some((host, port)) = self.stop.clone() else {
+            return self.sink_mut().flush().map(|()| false);
+        };
+        match get_within(&host, port, "/Pause", CONTROL_TIMEOUT) {
+            Ok(_) => {
+                self.paused = true;
+                self.sink_mut().pause()?;
+                Ok(true)
+            }
+            // It may have paused all the same (a late answer): the resume sends /Play either
+            // way, and the stream fills the buffer again from then
+            Err(e) => {
+                tracing::warn!("BluOS pause not confirmed, the player may play out its buffer: {e}");
+                self.paused = true;
+                self.sink_mut().flush().map(|()| true)
+            }
+        }
+    }
+    /// `/Play` carries on from the pause (the player fetches the stream again if it hung up).
+    fn resume(&mut self) -> Result<(), SinkError> {
+        if std::mem::take(&mut self.paused) {
+            if let Some((host, port)) = self.stop.clone() {
+                get_within(&host, port, "/Play", CONTROL_TIMEOUT).map_err(device_err)?;
+            }
+        }
+        self.sink_mut().resume()
     }
     fn frames_written(&self) -> u64 {
         self.sink().frames_written()
@@ -523,6 +564,34 @@ mod tests {
                     .into(),
                 "/Stop".into(),
             ]
+        );
+    }
+
+    /// Pause is the player's own `/Pause` (it stopped only after ~5 s of buffer before, NUC
+    /// 2026-10-30) and resume its `/Play`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pause_and_resume_use_the_players_own_calls() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let port = fake_player("Den", "00:11:22:33:44:77", log.clone());
+        let out = BluosOutput::new(
+            sync_status("127.0.0.1", port).unwrap(),
+            Arc::new(PullOutput::controlled("bluos-pause")),
+            "http://node/s".into(),
+        );
+        let mut sink = out.open(fmt()).await.unwrap();
+        std::thread::spawn(move || {
+            assert!(sink.pause().unwrap(), "the player holds its buffer");
+            sink.resume().unwrap();
+            // Not paused: nothing to tell the player
+            sink.resume().unwrap();
+            drop(sink);
+        })
+        .join()
+        .unwrap();
+        let log = log.lock().unwrap().clone();
+        assert_eq!(
+            log[1..],
+            ["/Play?url=http%3A%2F%2Fnode%2Fs", "/Pause", "/Play", "/Stop"]
         );
     }
 
