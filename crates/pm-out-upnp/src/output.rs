@@ -299,6 +299,7 @@ impl Output for UpnpOutput {
             refill,
             pause_results,
             pauses_pending: 0,
+            pause_outcome: None,
         }))
     }
 
@@ -533,6 +534,8 @@ struct UpnpSink {
     pause_results: std::sync::mpsc::Receiver<Paused>,
     /// Pauses whose outcome hasn't been read.
     pauses_pending: usize,
+    /// How the last pause went, once read (see [`UpnpSink::read_pause_outcomes`]).
+    pause_outcome: Option<Paused>,
 }
 
 impl UpnpSink {
@@ -585,38 +588,30 @@ impl AudioSink for UpnpSink {
             if c.send(Control::Pause).is_ok() {
                 self.paused = true;
                 self.pauses_pending += 1;
+                self.pause_outcome = None;
                 self.inner.pause()?;
                 return Ok(true);
             }
         }
         self.inner.flush().map(|()| false)
     }
+    /// Whether the renderer held its buffer: one stopped for the pause can't carry on (a group
+    /// asks before any member resumes).
+    fn ready_to_resume(&mut self) -> Result<(), SinkError> {
+        self.read_pause_outcomes();
+        if self.paused && self.pause_outcome == Some(Paused::Stopped) {
+            return Err(stopped_for_pause());
+        }
+        Ok(())
+    }
     /// Play again; a refusal shows on the next write, as a refused start does.
     fn resume(&mut self) -> Result<(), SinkError> {
-        // How the pause went (a quick resume waits for it, briefly). Stopped for it: the renderer
-        // dropped its buffer, so the zone opens the output again from what was last heard
-        let deadline = std::time::Instant::now() + PAUSE_OUTCOME_WAIT;
-        let mut outcome = None;
-        while self.pauses_pending > 0 {
-            let left = deadline.saturating_duration_since(std::time::Instant::now());
-            match self.pause_results.recv_timeout(left) {
-                Ok(how) => {
-                    self.pauses_pending -= 1;
-                    outcome = Some(how);
-                }
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                    self.pauses_pending = 0;
-                    break;
-                }
-                // Still coming: the next resume reads it first
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
-            }
-        }
-        if outcome == Some(Paused::Stopped) {
+        // Stopped for the pause: the renderer dropped its buffer, so the zone opens the output
+        // again from what was last heard
+        self.read_pause_outcomes();
+        if self.pause_outcome.take() == Some(Paused::Stopped) {
             self.paused = false;
-            return Err(SinkError::Device(
-                "the renderer was stopped for the pause; starting it again".into(),
-            ));
+            return Err(stopped_for_pause());
         }
         if std::mem::take(&mut self.paused) {
             let sent = self
@@ -633,6 +628,33 @@ impl AudioSink for UpnpSink {
     fn frames_written(&self) -> u64 {
         self.inner.frames_written()
     }
+}
+
+impl UpnpSink {
+    /// How the pauses went, from the control thread (a quick resume waits for it, briefly); the
+    /// last one is kept in `pause_outcome`.
+    fn read_pause_outcomes(&mut self) {
+        let deadline = std::time::Instant::now() + PAUSE_OUTCOME_WAIT;
+        while self.pauses_pending > 0 {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            match self.pause_results.recv_timeout(left) {
+                Ok(how) => {
+                    self.pauses_pending -= 1;
+                    self.pause_outcome = Some(how);
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    self.pauses_pending = 0;
+                    break;
+                }
+                // Still coming: the next resume reads it first
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
+            }
+        }
+    }
+}
+
+fn stopped_for_pause() -> SinkError {
+    SinkError::Device("the renderer was stopped for the pause; starting it again".into())
 }
 
 impl Drop for UpnpSink {
@@ -1037,7 +1059,12 @@ mod tests {
             let mut sink = sink;
             wait(3);
             assert!(sink.pause().unwrap());
-            // Resumed at once: the resume waits for how the pause went
+            // Resumed at once: a group asks first, and both wait for how the pause went
+            let ready = sink.ready_to_resume();
+            assert!(
+                ready.is_err(),
+                "stopped for the pause, it can't carry on: {ready:?}"
+            );
             let err = sink.resume().unwrap_err();
             (sink, err)
         })

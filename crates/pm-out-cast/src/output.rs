@@ -270,14 +270,27 @@ impl AudioSink for CastSink {
         self.inner.pause()?;
         Ok(true)
     }
-    /// Whether the receiver held its buffer (it wasn't stopped for the pause).
+    /// Whether the receiver can carry on from the pause: it held its buffer (it wasn't stopped
+    /// for the pause), and the session still has it (not lost, taken over, or its media failed).
     fn ready_to_resume(&mut self) -> Result<(), SinkError> {
         if !self.paused {
             return Ok(());
         }
-        match cannot_carry_on(self.pause_outcome()) {
-            Some(why) => reopen(why),
-            None => Ok(()),
+        if let Some(why) = cannot_carry_on(self.pause_outcome()) {
+            return reopen(why);
+        }
+        let status = self
+            .session
+            .lock()
+            .expect("session")
+            .as_ref()
+            .map(Session::status);
+        match status {
+            None => reopen("the session ended during the pause"),
+            Some(st) if st.lost => reopen("the link to the receiver was lost during the pause"),
+            Some(st) if st.taken_over => reopen("another app took the receiver during the pause"),
+            Some(st) if st.stale => reopen("the receiver's media failed during the pause"),
+            Some(_) => Ok(()),
         }
     }
     /// PLAY after a PAUSE. A receiver stopped for the pause (or a session that ended meanwhile)
@@ -400,5 +413,30 @@ mod tests {
         let e = resumed.unwrap_err().to_string();
         assert!(e.contains("didn't play again"), "{e}");
         drop(sink);
+    }
+
+    /// A pause the receiver held can still not carry on when the session lost it meanwhile (its
+    /// media failed, another app took it): a group learns it before any member resumes.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_session_that_lost_the_media_during_the_pause_is_not_ready() {
+        use crate::session::tests::Ctl;
+        for ctl_msg in [Ctl::MediaError, Ctl::TakeOver] {
+            let (session, _fake, ctl) = setup().await;
+            let mut sink = sink(session, "cast-lost").await;
+            let mut sink = std::thread::spawn(move || {
+                assert!(sink.pause().unwrap());
+                assert!(sink.ready_to_resume().is_ok(), "held");
+                sink
+            })
+            .join()
+            .unwrap();
+            ctl.send(ctl_msg.clone()).unwrap();
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            let (ready, sink) = std::thread::spawn(move || (sink.ready_to_resume(), sink))
+                .join()
+                .unwrap();
+            assert!(ready.is_err(), "{ctl_msg:?}: {ready:?}");
+            drop(sink);
+        }
     }
 }
