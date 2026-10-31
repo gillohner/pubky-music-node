@@ -111,6 +111,14 @@ fn cache() -> &'static Cache {
     C.get_or_init(Default::default)
 }
 
+/// Make every cached answer `by` older (tests: an answer past its time).
+#[cfg(test)]
+pub(crate) fn age_answers(by: Duration) {
+    for (at, _) in cache().lock().expect("network cache").values_mut() {
+        *at = at.checked_sub(by).unwrap_or(*at);
+    }
+}
+
 fn raw_key(z32: &str) -> &str {
     z32.strip_prefix("pubky").filter(|k| k.len() == 52).unwrap_or(z32)
 }
@@ -118,9 +126,33 @@ fn raw_key(z32: &str) -> &str {
 /// Who tagged an item, each with the labels they used.
 type TaggedBy = Vec<(String, Vec<String>)>;
 
+/// Why the network gave no answer now, in plain words, and what it answered last time (empty
+/// when it never did).
+#[derive(Debug, Default)]
+pub(crate) struct NoAnswer {
+    pub note: String,
+    pub last_known: Vec<NetworkItem>,
+}
+
+impl From<String> for NoAnswer {
+    fn from(note: String) -> Self {
+        NoAnswer {
+            note,
+            last_known: Vec::new(),
+        }
+    }
+}
+
+impl From<&str> for NoAnswer {
+    fn from(note: &str) -> Self {
+        note.to_string().into()
+    }
+}
+
 /// The music people in the rules' reach tagged with the rules' tags; `Err` says in plain words
-/// why there is none (no Pubky sign-in for a personal reach, Pinakes unreachable).
-pub(crate) async fn network(s: &Arc<NodeState>, r: &Rules) -> Result<Vec<NetworkItem>, String> {
+/// why there is none now (no Pubky sign-in for a personal reach, Pinakes unreachable), with the
+/// last answer when Pinakes didn't answer.
+pub(crate) async fn network(s: &Arc<NodeState>, r: &Rules) -> Result<Vec<NetworkItem>, NoAnswer> {
     if r.reach == "me" || r.tags.is_empty() {
         return Ok(Vec::new());
     }
@@ -156,11 +188,23 @@ pub(crate) async fn network(s: &Arc<NodeState>, r: &Rules) -> Result<Vec<Network
         limit: Some(100),
         ..Default::default()
     };
-    let found = d
-        .pinakes()
-        .search(&query)
-        .await
-        .map_err(|e| format!("Pinakes didn't answer: {e}"))?;
+    let found = match d.pinakes().search(&query).await {
+        Ok(f) => f,
+        Err(e) => {
+            // What it said last time (however old) beats nothing: the playlist doesn't empty
+            let last = cache().lock().expect("network cache").get(&key).cloned();
+            return Err(match last {
+                Some((at, items)) => NoAnswer {
+                    note: format!(
+                        "Pinakes didn't answer ({e}): this is what it found {} minutes ago",
+                        at.elapsed().as_secs() / 60
+                    ),
+                    last_known: items.into_iter().take(limit).collect(),
+                },
+                None => format!("Pinakes didn't answer: {e}").into(),
+            });
+        }
+    };
     let cards: Vec<_> = found.items.into_iter().filter(|c| c.is_music()).collect();
     let items = crate::discover::items_for(s, cards);
     // Who tagged each, with which of the labels (Nexus, by URI)

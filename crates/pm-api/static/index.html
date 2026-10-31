@@ -63,7 +63,7 @@
         <span class="sprog" id="sprog" hidden><span></span></span>
       </label>
       <div class="topbar-right" id="status"></div>
-      <button class="icon-btn me-btn" id="me" aria-label="You and settings" title="You and settings"><svg class="ic"><use href="#i-artist"/></svg></button>
+      <button class="icon-btn me-btn" id="me" aria-label="You, settings and Log out" title="You, settings and Log out" aria-haspopup="menu"><svg class="ic"><use href="#i-artist"/></svg></button>
     </header>
     <main id="main" class="main" tabindex="-1"></main>
   </div>
@@ -90,6 +90,7 @@
     <div class="player-right">
       <button class="jobchip" id="jobchip" hidden aria-label="Files job"></button>
       <button class="quality" id="quality" title="Sound: where it plays from, how it gets to you, DSP and volume" aria-label="Sound" aria-haspopup="dialog" aria-expanded="false"><span class="qsrc" aria-hidden="true"></span><span class="qdot"></span><span class="qtext">—</span><span class="qdsp" hidden>DSP</span><span class="qshort" aria-hidden="true"></span></button>
+      <button class="icon-btn volbtn" id="volbtn" aria-label="Volume" title="Volume" aria-haspopup="dialog" aria-expanded="false"><svg class="ic"><use href="#i-volume"/></svg></button>
       <div class="volume">
         <svg class="ic"><use href="#i-volume"/></svg>
         <input type="range" id="vol" min="-60" max="0" value="-20" aria-label="Volume in dB">
@@ -103,8 +104,11 @@
     <button class="bnav" data-bnav="home"><svg class="ic"><use href="#i-home"/></svg><span>Home</span></button>
     <button class="bnav" data-bnav="search"><svg class="ic"><use href="#i-search"/></svg><span>Search</span></button>
     <button class="bnav" data-bnav="library"><svg class="ic"><use href="#i-disc"/></svg><span>Library</span></button>
+    <button class="bnav rail-only" data-bnav="sources"><svg class="ic"><use href="#i-archive"/></svg><span>Sources</span></button>
+    <button class="bnav rail-only" data-bnav="queue"><svg class="ic"><use href="#i-queue"/></svg><span>Queue</span></button>
     <button class="bnav" data-bnav="zones"><svg class="ic"><use href="#i-zone"/></svg><span>Zones</span></button>
-    <button class="bnav rail-only" data-bnav="settings"><svg class="ic"><use href="#i-settings"/></svg><span>Settings</span></button>
+    <button class="bnav rail-only nav-offline" data-bnav="downloads"><svg class="ic"><use href="#i-download"/></svg><span>Downloads</span></button>
+    <button class="bnav rail-only rail-foot" data-bnav="settings"><svg class="ic"><use href="#i-settings"/></svg><span>Settings</span></button>
   </nav>
 </div>
 
@@ -119,20 +123,23 @@
 <div id="toast" class="toast" role="status" aria-live="polite"></div>
 <audio id="browser" preload="none"></audio>
 
-<dialog id="login" class="dialog">
-  <form method="dialog">
-    <h2>Connect to your node</h2>
-    <div id="ringbox">
-      <p class="muted">Sign in with Pubky Ring: the node checks that it is you and connects this browser by itself.</p>
-      <div class="dialog-actions"><button class="btn primary" type="button" id="ringstart">Sign in with Pubky Ring</button></div>
-      <div id="ringout" class="muted small"></div>
-    </div>
-    <details style="margin-top:12px"><summary class="muted small">Or paste the API token</summary>
-    <p class="muted small">The node makes one and keeps it in the <code>api-token</code> file in its data folder (Docker: <code>docker exec pubky-music cat /data/api-token</code>). One set by hand is <code>[api] token</code> in node.toml or <code>PM_TOKEN</code>. <a class="lnk" href="https://github.com/gillohner/pubky-music-node/blob/main/docs/guides/troubleshooting.md#it-asks-for-a-token-or-the-token-is-refused" target="_blank" rel="noopener">Where to find it</a>. It stays in this browser.</p>
-    <label class="field"><span>API token</span><input id="tok" type="password" autocomplete="off"></label>
-    <div class="dialog-actions"><button class="btn primary" value="ok">Connect</button></div></details>
-  </form>
-</dialog>
+<main id="loginpage" class="loginpage" hidden aria-labelledby="loginh">
+  <div class="logincard">
+    <div class="loginface" id="loginface" aria-hidden="true"></div>
+    <h1 id="loginh" tabindex="-1">Log in</h1>
+    <p class="muted" id="loginsub">With Pubky Ring, the app that holds your Pubky identity.</p>
+    <p class="notice" id="loginwhy" role="status" hidden></p>
+    <div id="loginbody" aria-live="polite"></div>
+    <details class="logintoken" id="logintoken"><summary class="muted small">Use the node’s API token instead</summary>
+      <form id="tokform">
+        <p class="muted small">The node makes one and keeps it in the <code>api-token</code> file in its data folder (Docker: <code>docker exec pubky-music cat /data/api-token</code>). One set by hand is <code>[api] token</code> in node.toml or <code>PM_TOKEN</code>. <a class="lnk" href="https://github.com/gillohner/pubky-music-node/blob/main/docs/guides/troubleshooting.md#it-asks-for-a-token-or-the-token-is-refused" target="_blank" rel="noopener">Where to find it</a>. It stays in this browser.</p>
+        <label class="field"><span>API token</span><input id="tok" type="password" autocomplete="off" aria-describedby="tokerr"></label>
+        <p class="warn-text small" id="tokerr" role="alert"></p>
+        <div class="dialog-actions"><button class="btn" type="submit">Log in with the token</button></div>
+      </form>
+    </details>
+  </div>
+</main>
 
 <svg width="0" height="0" style="position:absolute" aria-hidden="true">
   <defs>
@@ -176,6 +183,7 @@
     <symbol id="i-upload" viewBox="0 0 24 24"><path d="M12 16V5m-4 4 4-4 4 4M5 19h14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
     <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 11v6M12 7.5v.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
     <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M15 9V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+    <symbol id="i-logout" viewBox="0 0 24 24"><path d="M14 4.5H6.5a1 1 0 0 0-1 1v13a1 1 0 0 0 1 1H14M10 12h10m-3.5-3.5L20 12l-3.5 3.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
     <symbol id="i-external" viewBox="0 0 24 24"><path d="M14 5h5v5M19 5l-8 8M18 14v5H5V6h5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
   </defs>
 </svg>

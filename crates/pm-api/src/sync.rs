@@ -135,7 +135,7 @@ const TAGS_ON_V1: &str = "pubky.tags_social_v1";
 const TAGS_NOT_MUSIC: &str = "pubky.tags_not_music";
 
 /// What the owner reads when the session cannot reach every folder the node uses.
-pub const RESIGN_NOTICE: &str = "This node needs permission for new folders on your homeserver. Sign in again with Pubky Ring to approve them.";
+pub const RESIGN_NOTICE: &str = "This node needs your approval for new folders on your homeserver. Log out and log in again with Pubky Ring to give it.";
 
 impl PubkySync {
     /// Restore a session from an exported secret and prepare to sync.
@@ -1304,8 +1304,16 @@ impl PubkySync {
     /// Snapshot the owner's settings into the private folder (after every
     /// sync and every change the API makes). Best effort; errors are logged.
     pub async fn backup_settings(&self, s: &crate::state::NodeState) {
+        // A history delete another node made since this one last synced is adopted first, so
+        // this copy doesn't write over it
+        let theirs = self.cleared_elsewhere().await;
         let backup = {
             let lib = s.library.lock().expect("library poisoned");
+            if let Some(theirs) = theirs {
+                if let Err(e) = crate::listens::adopt_cleared(&lib, theirs) {
+                    tracing::warn!(error = %e.message, "history deleted on another node");
+                }
+            }
             // The whole file is replaced, so a copy an older node wrote with sign-ins in it
             // loses them on the next sync
             let settings = backed_up_settings(&lib);
@@ -1392,6 +1400,20 @@ impl PubkySync {
             }
             // Only what the node backs up now: a sign-in an older node put in the copy stays out
             for (k, val) in backup.settings.iter().filter(|(k, _)| is_backed_up(k)) {
+                // A history delete: the later one counts, and the listens here written before
+                // it go, as on the node that deleted them
+                if k == crate::listens::CLEARED {
+                    let before = crate::listens::cleared_before(&lib);
+                    if let Ok(theirs) = val.parse() {
+                        if let Err(e) = crate::listens::adopt_cleared(&lib, theirs) {
+                            tracing::warn!(error = %e.message, "history deleted on another node");
+                        }
+                    }
+                    if crate::listens::cleared_before(&lib) != before {
+                        out.settings += 1;
+                    }
+                    continue;
+                }
                 let keep = lib
                     .get_setting(k)
                     .ok()

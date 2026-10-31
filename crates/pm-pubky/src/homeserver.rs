@@ -36,6 +36,17 @@ pub fn is_full(e: &HomeserverError) -> bool {
     )
 }
 
+/// The HTTP status the homeserver answered with, when it answered (not a timeout, a refused
+/// connection or a local error).
+pub fn status(e: &HomeserverError) -> Option<u16> {
+    match e {
+        HomeserverError::Pubky(pubky::Error::Request(pubky::errors::RequestError::Server {
+            status, ..
+        })) => Some(status.as_u16()),
+        _ => None,
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum HomeserverError {
     #[error(transparent)]
@@ -1057,5 +1068,10 @@ mod full_tests {
         assert!(!is_full(&server(404)));
         assert!(!is_full(&server(413)));
         assert!(!is_full(&HomeserverError::Transport("reset".into())));
+        assert_eq!(status(&server(413)), Some(413));
+        assert_eq!(
+            status(&HomeserverError::Transport("https://hs:403/x".into())),
+            None
+        );
     }
 }

@@ -383,6 +383,9 @@ mod client {
 
     pub const DEFAULT_BASE: &str = "https://api.acoustid.org";
 
+    /// AcoustID's error code for an application key it doesn't know ("invalid API key").
+    const INVALID_KEY: i64 = 4;
+
     #[derive(Debug, Clone)]
     pub struct AcoustIdConfig {
         pub base_url: String,
@@ -423,6 +426,11 @@ mod client {
                 config,
                 last: Arc::new(Mutex::new(None)),
             })
+        }
+
+        /// The application key this client sends.
+        pub fn api_key(&self) -> &str {
+            &self.config.api_key
         }
 
         /// Look a fingerprint up. Returns the raw JSON (for the cache) and
@@ -470,13 +478,23 @@ mod client {
             let parsed: LookupResponse =
                 serde_json::from_str(&body).map_err(|e| LibraryError::AcoustId(format!("{status}: {e}")))?;
             if parsed.status != "ok" {
-                let msg = parsed
-                    .error
-                    .map(|e| format!("{} (code {})", e.message, e.code))
-                    .unwrap_or_else(|| status.to_string());
-                return Err(LibraryError::AcoustId(msg));
+                return Err(match parsed.error {
+                    Some(e) if e.code == INVALID_KEY => LibraryError::AcoustIdKey(e.message),
+                    Some(e) => LibraryError::AcoustId(format!("{} (code {})", e.message, e.code)),
+                    None => LibraryError::AcoustId(status.to_string()),
+                });
             }
             Ok((body, parsed.results))
+        }
+
+        /// Whether AcoustID refuses this client's key: one lookup of a fingerprint too short to
+        /// match anything. `Some(why)` only for that answer; an AcoustID out of reach, or any
+        /// other answer, says nothing about the key.
+        pub async fn key_refused(&self) -> Option<String> {
+            match self.lookup("AQAAAA", 30).await {
+                Err(LibraryError::AcoustIdKey(why)) => Some(why),
+                _ => None,
+            }
         }
     }
 }

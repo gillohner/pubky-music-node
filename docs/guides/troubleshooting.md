@@ -18,7 +18,7 @@ First look at the node's log; most problems are named there.
 
 ## It asks for a token, or the token is refused
 
-Click **Or paste the API token** and paste the token. Unless one is set, the node makes one on
+On the Log in screen, open **Use the node’s API token instead** and paste the token. Unless one is set, the node makes one on
 its first start and keeps it in the `api-token` file in its data folder. Where it is:
 
 | Install | Token |
@@ -27,16 +27,20 @@ its first start and keeps it in the `api-token` file in its data folder. Where i
 | Docker bundle | `PM_TOKEN` in `deploy/bundle/.env` |
 | Linux without Docker | `token` in `/etc/pubky-music/node.toml` |
 
-- **Sign in with Pubky Ring** says the node is not signed in yet: use the token the first time,
-  then sign the node in under **Settings › My accounts**.
+- The Log in screen says the node isn't linked to a Pubky identity yet: use the token the first
+  time, then sign the node in under **Settings › My accounts**. After that, **Open in Pubky Ring**
+  (or the QR code) logs you in.
+- It says "This node belongs to … You approved as …": Pubky Ring approved with another of your
+  identities. Pick the node's owner in Pubky Ring and press **Try again**.
 - You set `PM_TOKEN` after the first start and it has no effect: the config is written only once.
   Add `PM_REWRITE_CONFIG: "1"`, run `docker compose up -d`, then remove the line again.
-- **Settings › About and updates › Use a different token in this browser** changes only the
-  token this browser uses, not the node's.
+- **Log out** (the account button, top right, or **Settings › About and updates**) ends this
+  browser's session and shows the Log in screen; the node's token stays as it is.
 - To give the node a new token: with a token the node made, **Settings › About and updates ›
   Make a new token** (shown once; the old one stops working at once). With `PM_TOKEN` or on
   Linux, change the token there and restart (Docker also needs `PM_REWRITE_CONFIG`, as above).
-  Every app and browser then needs the new one.
+  Every app then needs the new one, and every browser of yours is logged out (log in again with
+  Pubky Ring); people you invited stay logged in.
 
 ## The library stays empty
 

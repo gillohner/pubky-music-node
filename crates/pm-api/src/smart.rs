@@ -145,7 +145,7 @@ pub struct SmartResult {
     /// cards.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub network: Vec<crate::smart_network::NetworkItem>,
-    /// Why `network` is empty when it was asked for, in plain words.
+    /// Why `network` is empty (or an old answer) when it was asked for, in plain words.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub network_note: Option<String>,
 }
@@ -564,7 +564,7 @@ pub(crate) async fn preview(State(s): State<Arc<NodeState>>, Json(r): Json<Rules
 async fn with_network(s: &Arc<NodeState>, r: &Rules) -> Result<SmartResult, ApiError> {
     let (network, network_note) = match crate::smart_network::network(s, r).await {
         Ok(items) => (items, None),
-        Err(note) => (Vec::new(), Some(note)),
+        Err(no) => (no.last_known, Some(no.note)),
     };
     let tagged: Option<HashSet<String>> =
         (!r.tags.is_empty()).then(|| network.iter().map(|i| i.uri.clone()).collect());

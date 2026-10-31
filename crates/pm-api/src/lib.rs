@@ -809,6 +809,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
                 .route("/jamendo/callback", get(jamendo::callback))
                 .route("/v1/auth/pubky/start", post(controller_login_start))
                 .route("/v1/auth/pubky/poll", get(controller_login_poll))
+                .route("/v1/auth/pubky/owner/avatar", get(profiles::owner_avatar))
                 // A party guest's link: the page, and joining it (party.rs)
                 .route("/party/{code}", get(party_page))
                 .route("/v1/party/join", post(party::join))
@@ -891,7 +892,29 @@ async fn auth(
     next: middleware::Next,
 ) -> Response {
     // The owner's API token, or a listener's personal one (accounts.rs)
-    let Some(caller) = accounts::caller(&state, bearer(&headers, &query).as_deref()) else {
+    let token = bearer(&headers, &query);
+    let Some(caller) = accounts::caller(&state, token.as_deref()) else {
+        // An owner's browser session while the node has no identity loaded: not refused for good
+        // (the page keeps it), it works again once the identity is. Log out still ends it, so the
+        // browser can get to Log in (and the API token) meanwhile
+        if let Some(t) = token
+            .as_deref()
+            .filter(|t| t.starts_with(accounts::OWNER_PREFIX))
+            .filter(|_| state.sync_handle().is_none())
+        {
+            // (Paths here are inside `/v1`)
+            if req.method() == axum::http::Method::DELETE && req.uri().path() == "/me/token" {
+                return match accounts::end_owner_session(&state, t) {
+                    Ok(ended) => {
+                        Json(serde_json::json!({"signed_out": true, "ended": ended})).into_response()
+                    }
+                    Err(e) => e.into_response(),
+                };
+            }
+            return ApiError::new(StatusCode::SERVICE_UNAVAILABLE, accounts::IDENTITY_NOT_LOADED)
+                .into_response();
+        }
+        // The web page knows this answer (app.js NODE_REFUSED): it means "log in again"
         return ApiError::new(StatusCode::UNAUTHORIZED, "missing or wrong bearer token").into_response();
     };
     let refusal = match caller.role {
@@ -3053,33 +3076,55 @@ pub(crate) fn qr_svg(text: &str) -> Option<String> {
     ))
 }
 
-/// `POST /v1/auth/pubky/start`: a controller or browser asks to sign in with
-/// Pubky Ring. Only the node's owner (the identity the node itself is signed
-/// in as) is accepted; approval hands out the API token, so nothing is typed
-/// or pasted. 412 until the node has a Pubky session.
+/// What a Pubky Ring log in asks for: the node's own folders only when the owner's page asked for
+/// a renewal (`{renew: true}`, from its "Log out" on the notice) and the node does lack them.
+/// Anyone may start a log in, so a listener scanning the QR code is never asked to give the node
+/// write access to their own homeserver.
+fn login_capabilities(renew_asked: bool, needs_resign: bool) -> (bool, &'static str) {
+    if renew_asked && needs_resign {
+        (true, pm_pubky::homeserver::LOGIN_CAPABILITIES)
+    } else {
+        (false, pm_pubky::homeserver::CONTROLLER_CAPABILITIES)
+    }
+}
+
+/// `POST /v1/auth/pubky/start [{renew}]`: a controller or browser asks to log in with Pubky
+/// Ring. The node tells the owner and listeners apart by who approves; `renew` (the owner's own
+/// page, when the node needs new folders) also asks for the node's folders. 412 until the node
+/// has a Pubky session.
 async fn controller_login_start(
     State(s): State<Arc<NodeState>>,
     req: axum::extract::Request,
 ) -> ApiResult<ControllerLoginStarted> {
     // Anyone may start one (it hands the token out), so few at a time: from one address, and in all
     let origin = login_origin(&req);
+    let body = axum::body::to_bytes(req.into_body(), 1024)
+        .await
+        .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, e.to_string()))?;
+    let renew_asked = if body.iter().all(u8::is_ascii_whitespace) {
+        false
+    } else {
+        serde_json::from_slice::<ControllerLoginStart>(&body)
+            .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, e.to_string()))?
+            .renew
+    };
     // Held from the check to the insert: sign-ins started at once can't pass the caps together
     let mut logins = s.controller_logins.lock().await;
     logins.retain(|_, (_, at, _)| at.elapsed() < CONTROLLER_LOGIN_TTL);
     let Some(owner) = s.sync_handle().map(|h| h.z32().to_string()) else {
         return Err(ApiError::new(
             StatusCode::PRECONDITION_FAILED,
-            "the node is not signed in to Pubky yet: sign it in once (Settings → Pubky, or `pm-node login`)",
+            "the node has no Pubky session loaded: sign it in (Settings → Pubky, or `pm-node login`), or restart it once its homeserver answers",
         ));
     };
     let hs = s
         .homeserver()
         .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, e.to_string()))?;
+    // The node's own session lacks folders and the owner asked: this log in asks for them too, so
+    // the owner's approval renews it (no separate "sign in again")
+    let (renews, caps) = login_capabilities(renew_asked, s.sync_handle().is_some_and(|h| h.needs_resign()));
     let flow = hs
-        .start_login_with(
-            "pubky-music-controller",
-            pm_pubky::homeserver::CONTROLLER_CAPABILITIES,
-        )
+        .start_login_with("pubky-music-controller", caps)
         .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, e.to_string()))?;
     let url = flow.url().to_string();
     let id = tidal::random_urlsafe(24);
@@ -3098,16 +3143,21 @@ async fn controller_login_start(
     logins.insert(id.clone(), (flow, std::time::Instant::now(), origin));
     drop(logins);
     let qr_svg = qr_svg(&url);
+    let owner_face = profiles::login_face(&s, &owner, profiles::FaceFrom::Owner).await;
     Ok(Json(ControllerLoginStarted {
         id,
         url,
         owner,
+        owner_face,
+        node_name: s.name.clone(),
+        renews,
         qr_svg,
     }))
 }
 
-/// `GET /v1/auth/pubky/poll?id=`: `pending` until Ring approves; `ok` with
-/// the API token when the approver is the owner; `denied` otherwise.
+/// `GET /v1/auth/pubky/poll?id=`: `pending` until Ring approves; `ok` with a browser session
+/// of its own when the approver is the owner (renewing the node's session when this log in asked
+/// for its folders); `denied` otherwise, with who approved and whose node it is.
 async fn controller_login_poll(
     State(s): State<Arc<NodeState>>,
     Query(q): Query<std::collections::HashMap<String, String>>,
@@ -3115,31 +3165,17 @@ async fn controller_login_poll(
     let id = q.get("id").cloned().unwrap_or_default();
     let mut logins = s.controller_logins.lock().await;
     let Some((flow, at, _)) = logins.get(&id) else {
-        return Ok(Json(ControllerLoginStatus {
-            status: "expired".into(),
-            token: None,
-            user: None,
-            role: None,
-        }));
+        return Ok(Json(ControllerLoginStatus::of("expired")));
     };
     if at.elapsed() > CONTROLLER_LOGIN_TTL {
         logins.remove(&id);
-        return Ok(Json(ControllerLoginStatus {
-            status: "expired".into(),
-            token: None,
-            user: None,
-            role: None,
-        }));
+        return Ok(Json(ControllerLoginStatus::of("expired")));
     }
     match flow.poll().await {
-        Ok(None) => Ok(Json(ControllerLoginStatus {
-            status: "pending".into(),
-            token: None,
-            user: None,
-            role: None,
-        })),
+        Ok(None) => Ok(Json(ControllerLoginStatus::of("pending"))),
         Ok(Some(session)) => {
             logins.remove(&id);
+            drop(logins);
             let who = session.public_key().to_string();
             let owner = s.sync_handle().map(|h| h.z32().to_string()).unwrap_or_default();
             if who != owner {
@@ -3148,26 +3184,48 @@ async fn controller_login_poll(
                     let token = accounts::mint(&s, &who)?;
                     tracing::info!(%who, "listener signed in with Pubky Ring");
                     return Ok(Json(ControllerLoginStatus {
-                        status: "ok".into(),
                         token: Some(token),
                         user: Some(who),
                         role: Some("listener".into()),
+                        ..ControllerLoginStatus::of("ok")
                     }));
                 }
-                tracing::warn!(%who, %owner, "controller sign-in by a different identity refused");
+                let key = who.trim_start_matches("pubky");
+                let known = people::load(&s).people.iter().any(|p| p.key == key);
+                tracing::warn!(%who, %owner, known, "controller sign-in by a different identity refused");
+                // The approver may be anyone: their profile from the cache or Nexus only, never
+                // fetched from a homeserver they name
+                let (approver, owner_face) = tokio::join!(
+                    profiles::login_face(&s, &who, profiles::FaceFrom::Nexus),
+                    profiles::login_face(&s, &owner, profiles::FaceFrom::Owner)
+                );
                 return Ok(Json(ControllerLoginStatus {
-                    status: "denied".into(),
-                    token: None,
                     user: Some(who),
-                    role: None,
+                    reason: Some(if known { "no_access" } else { "not_owner" }.into()),
+                    approver: Some(approver),
+                    owner_face: Some(owner_face),
+                    ..ControllerLoginStatus::of("denied")
                 }));
             }
-            tracing::info!(%who, "controller signed in with Pubky Ring");
+            // A log in that asked for the node's folders, approved by the owner: the node's
+            // session is renewed with it
+            let granted = pm_pubky::homeserver::session_capabilities(&session);
+            let renew = s.sync_handle().is_some_and(|h| h.needs_resign())
+                && pm_pubky::homeserver::missing_capabilities(
+                    &granted,
+                    pm_pubky::homeserver::LOGIN_CAPABILITIES,
+                )
+                .is_empty();
+            if renew {
+                adopt_session(&s, session).await?;
+            }
+            let token = accounts::mint_owner(&s, &who)?;
+            tracing::info!(%who, renew, "controller signed in with Pubky Ring");
             Ok(Json(ControllerLoginStatus {
-                status: "ok".into(),
-                token: s.token(),
+                token: Some(token),
                 user: Some(who),
                 role: Some("owner".into()),
+                ..ControllerLoginStatus::of("ok")
             }))
         }
         Err(e) => {
@@ -3175,6 +3233,33 @@ async fn controller_login_poll(
             Err(ApiError::new(StatusCode::BAD_GATEWAY, e.to_string()))
         }
     }
+}
+
+/// The node signs in to Pubky with `session`: its secret goes to the configured file, sync
+/// starts with it, and the node record, settings and the first sync follow in the background.
+/// Returns the user's z32 key.
+async fn adopt_session(s: &Arc<NodeState>, session: pubky::PubkySession) -> Result<String, ApiError> {
+    let secret = pm_pubky::homeserver::export_session_secret(&session).await;
+    if let (Some(path), Some(secret)) = (&s.session_secret_path, &secret) {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        // Created 0600, never written first and made private after
+        if let Err(e) = imports::write_private(path, secret.as_bytes()) {
+            tracing::warn!(path = %path.display(), "cannot store the session secret: {e}");
+        }
+    }
+    let hs = s
+        .homeserver()
+        .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, e.to_string()))?;
+    let sync = Arc::new(sync::PubkySync::from_session(hs, session));
+    let user = sync.z32().to_string();
+    s.set_sync(Some(sync.clone()));
+    tracing::info!(user = %user, "pubky sign-in: session ready");
+    // "Signed in" now; the node record, settings and the first sync follow in the background
+    // (they took minutes, one request at a time, before the answer)
+    sync::first_sync_in_background(s, sync.clone());
+    Ok(user)
 }
 
 /// Poll the sign-in. When approved: the session is kept, its secret written
@@ -3207,26 +3292,7 @@ async fn pubky_login_poll(State(s): State<Arc<NodeState>>) -> ApiResult<LoginSta
         Ok(Some(session)) => {
             *guard = None;
             drop(guard);
-            let secret = pm_pubky::homeserver::export_session_secret(&session).await;
-            if let (Some(path), Some(secret)) = (&s.session_secret_path, &secret) {
-                if let Some(parent) = path.parent() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
-                // Created 0600, never written first and made private after
-                if let Err(e) = imports::write_private(path, secret.as_bytes()) {
-                    tracing::warn!(path = %path.display(), "cannot store the session secret: {e}");
-                }
-            }
-            let hs = s
-                .homeserver()
-                .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, e.to_string()))?;
-            let sync = Arc::new(sync::PubkySync::from_session(hs, session));
-            let user = sync.z32().to_string();
-            s.set_sync(Some(sync.clone()));
-            tracing::info!(user = %user, "pubky sign-in: session ready");
-            // "Signed in" now; the node record, settings and the first sync follow in the
-            // background (they took minutes, one request at a time, before the answer)
-            sync::first_sync_in_background(&s, sync.clone());
+            let user = adopt_session(&s, session).await?;
             Ok(Json(LoginStatus {
                 status: "signed_in".into(),
                 user: Some(user),
@@ -5279,6 +5345,121 @@ mod tests {
         // The owner's token is the owner
         let (_, me) = send("GET", "/v1/me".into(), "s3cret".into(), None).await;
         assert_eq!(me["role"], "owner");
+        // Log out with the API token ends nothing (apps keep it; the page forgets it)
+        let (st, v) = send("DELETE", "/v1/me/token".into(), "s3cret".into(), None).await;
+        assert_eq!((st, v["ended"].as_bool()), (StatusCode::OK, Some(false)), "{v}");
+        let (st, _) = send("GET", "/v1/me".into(), "s3cret".into(), None).await;
+        assert_eq!(st, StatusCode::OK);
+        // An owner's browser session (the Ring log in, Log out and the identity's own sessions
+        // are in tests/bundled_homeserver.rs). While the node has no identity loaded, none is the
+        // owner: an earlier owner's session can't come back when the node's own session isn't
+        // restored at start (Kimi review of #209); the API token still works
+        const OLD: &str = "o3ftkuxjd9k6zgnc4hhbhbg5jusubr4zqyb1dtzi8hhm3hf5wbmy";
+        const NEW: &str = "gujx6qd8ksydh1makdphd3bxu351d9b8waqka8hfg6q7hnqkxexo";
+        // No identity loaded, so no session is made for anyone
+        assert_eq!(
+            accounts::mint_owner(&s, OLD).unwrap_err().status,
+            StatusCode::CONFLICT
+        );
+        // An earlier owner's session, kept from before: not the owner now. The answer is a 503 of
+        // its own, so the page keeps the session instead of logging out for good
+        let sessions = |keys: &[&str]| {
+            s.library
+                .lock()
+                .unwrap()
+                .set_setting(
+                    "accounts.owner_sessions",
+                    &serde_json::to_string(
+                        &keys
+                            .iter()
+                            .map(|k| serde_json::json!({"hash": blake3::hash(format!("pmo_{k}").as_bytes()).to_hex().to_string(), "key": k, "created_at": 1}))
+                            .collect::<Vec<_>>(),
+                    )
+                    .unwrap(),
+                )
+                .unwrap()
+        };
+        sessions(&[OLD, NEW]);
+        let (st, v) = send("GET", "/v1/me".into(), format!("pmo_{OLD}"), None).await;
+        assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{v}");
+        assert_eq!(v["error"], accounts::IDENTITY_NOT_LOADED);
+        let (st, _) = send("GET", "/v1/me".into(), "s3cret".into(), None).await;
+        assert_eq!(st, StatusCode::OK, "the API token logs in meanwhile");
+        // Log out still works then, so the browser gets to Log in and the API token (Hermes
+        // review of #209 at 6bf5f7d)
+        sessions(&[OLD, NEW, "logsout"]);
+        let (st, v) = send("DELETE", "/v1/me/token".into(), "pmo_logsout".into(), None).await;
+        assert_eq!((st, v["ended"].as_bool()), (StatusCode::OK, Some(true)), "{v}");
+        let (st, v) = send("DELETE", "/v1/me/token".into(), "pmo_logsout".into(), None).await;
+        assert_eq!(
+            (st, v["ended"].as_bool()),
+            (StatusCode::OK, Some(false)),
+            "already ended: {v}"
+        );
+        let (st, _) = send("POST", "/v1/node/token".into(), format!("pmo_{OLD}"), None).await;
+        assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "only Log out goes through");
+        // The node takes on another identity: the old owner's sessions are gone for good, the new
+        // owner's stay
+        accounts::keep_owner_sessions_of(&s, &format!("pubky{NEW}")).unwrap();
+        let kept: Vec<String> = serde_json::from_str::<Vec<serde_json::Value>>(
+            &s.library
+                .lock()
+                .unwrap()
+                .get_setting("accounts.owner_sessions")
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap()
+        .iter()
+        .map(|t| t["key"].as_str().unwrap().to_string())
+        .collect();
+        assert_eq!(kept, [NEW]);
+        // A wrong token is still the 401 the page logs in again on
+        let (st, v) = send("GET", "/v1/me".into(), "pml_madeup".into(), None).await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            v["error"], "missing or wrong bearer token",
+            "the page logs in again on exactly this"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_log_in_screen_gets_names_and_small_pictures_inline() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), Some("s3cret")).await;
+        const ALICE: &str = "gujx6qd8ksydh1makdphd3bxu351d9b8waqka8hfg6q7hnqkxexo";
+        const BOB: &str = "o3ftkuxjd9k6zgnc4hhbhbg5jusubr4zqyb1dtzi8hhm3hf5wbmy";
+        let view = |id: &str, name: &str| {
+            serde_json::from_value::<pm_pubky::nexus::UserView>(serde_json::json!({
+                "details": {"id": id, "name": name, "image": format!("pubky://{id}/pub/pubky.app/files/1")}
+            }))
+            .unwrap()
+        };
+        profiles::cache_view(ALICE, Some(view(ALICE, "Alice")));
+        profiles::cache_view(BOB, Some(view(BOB, "Bob")));
+        let people = s.art_dir.join("people");
+        std::fs::create_dir_all(&people).unwrap();
+        let png = |n: usize| [&[0x89, b'P', b'N', b'G'][..], &vec![0u8; n]].concat();
+        std::fs::write(people.join(ALICE), png(100)).unwrap();
+        std::fs::write(people.join(BOB), png(300 * 1024)).unwrap();
+        // Someone who approved: name and a small picture inline (the screen has no token)
+        let a = profiles::login_face(&s, &format!("pubky{ALICE}"), profiles::FaceFrom::Nexus).await;
+        assert_eq!((a.id.as_str(), a.name.as_str()), (ALICE, "Alice"));
+        assert!(
+            a.avatar
+                .as_deref()
+                .is_some_and(|u| u.starts_with("data:image/png;base64,")),
+            "{a:?}"
+        );
+        // A big picture stays off the screen (initials instead)
+        let b = profiles::login_face(&s, BOB, profiles::FaceFrom::Nexus).await;
+        assert_eq!((b.name.as_str(), b.avatar), ("Bob", None));
+        // The owner's picture by its own address, not inline
+        let o = profiles::login_face(&s, ALICE, profiles::FaceFrom::Owner).await;
+        assert_eq!(o.avatar.as_deref(), Some(profiles::OWNER_AVATAR));
+        // Not a key: its short form, nothing looked up
+        let x = profiles::login_face(&s, "nonsense", profiles::FaceFrom::Nexus).await;
+        assert_eq!(x.avatar, None);
     }
 
     #[tokio::test]
@@ -6524,6 +6705,10 @@ mod tests {
                     let single = single.clone();
                     let calls = c2.clone();
                     async move {
+                        // Saving a key checks it with one lookup
+                        if body.contains("client=OwnKey42") {
+                            return ([(header::CONTENT_TYPE, "application/json")], r#"{"status":"ok","results":[]}"#.to_string());
+                        }
                         calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                         assert!(body.contains("client=test-key") && body.contains("fingerprint=AQ"), "{body}");
                         ([(header::CONTENT_TYPE, "application/json")], single)
@@ -8285,6 +8470,27 @@ mod tests {
         let (st, v) = call(&app, "GET", "/v1/auth/pubky/poll?id=nope", None).await;
         assert_eq!(st, StatusCode::OK, "{v}");
         assert_eq!(v["status"], "expired");
+    }
+
+    /// A log in asks for the node's folders only when the owner's page asks for a renewal and the
+    /// node lacks them: a listener scanning the QR code is never asked to give the node write
+    /// access to their own homeserver (Hermes review of #209, medium 1).
+    #[test]
+    fn only_the_owners_renewal_asks_for_the_nodes_folders() {
+        use pm_pubky::homeserver::{CONTROLLER_CAPABILITIES, LOGIN_CAPABILITIES};
+        assert_eq!(
+            login_capabilities(false, true),
+            (false, CONTROLLER_CAPABILITIES),
+            "the node needs folders, but nobody asked: a plain log in"
+        );
+        assert_eq!(
+            login_capabilities(true, false),
+            (false, CONTROLLER_CAPABILITIES),
+            "asked, but nothing to renew"
+        );
+        assert_eq!(login_capabilities(false, false), (false, CONTROLLER_CAPABILITIES));
+        assert_eq!(login_capabilities(true, true), (true, LOGIN_CAPABILITIES));
+        assert!(!CONTROLLER_CAPABILITIES.contains(":rw"), "a log in only reads");
     }
 
     /// Anyone may start a Pubky Ring sign-in, so few wait at once: six per address (IPv6 per
@@ -12808,20 +13014,27 @@ exec sleep 300
         >::new()));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
+        // Pinakes down: it answers 503
+        let down = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let mock = {
             let searches = searches.clone();
+            let down = down.clone();
             Router::new()
                 .route(
                     "/v1/search",
                     get(move |Query(q): Query<std::collections::HashMap<String, String>>| {
                         let searches = searches.clone();
+                        let down = down.clone();
                         async move {
                             searches.lock().unwrap().push(q);
-                            Json(serde_json::json!({"items": [
+                            if down.load(std::sync::atomic::Ordering::SeqCst) {
+                                return Err(StatusCode::SERVICE_UNAVAILABLE);
+                            }
+                            Ok(Json(serde_json::json!({"items": [
                                 {"id": "c1", "uri": "https://example.org/not-music", "status": "ok", "type": "Article", "name": "Not music"},
                                 {"id": "c2", "uri": "https://musicbrainz.org/recording/833f00e1-781f-4edd-90e4-e52712618862", "status": "ok", "type": "MusicRecording", "name": "On MusicBrainz", "site": "musicbrainz.org"},
                                 {"id": "c3", "uri": "https://tidal.com/track/50850120", "status": "ok", "type": "MusicRecording", "name": "On TIDAL", "site": "tidal.com"}
-                            ], "cursor": null}))
+                            ], "cursor": null})))
                         }
                     }),
                 )
@@ -12881,7 +13094,7 @@ exec sleep 300
         assert_eq!(by[1], serde_json::json!({"key": "tagger1", "labels": ["techno"]}));
         assert_eq!(tidal["page"], "https://tidal.com/track/50850120");
         // The same answer again comes from the cache
-        call(&app, "POST", "/v1/smart/preview", Some(rules)).await;
+        call(&app, "POST", "/v1/smart/preview", Some(rules.clone())).await;
         assert_eq!(searches.lock().unwrap().len(), 1);
         // One query, as the feed says (review of #159): with a rule, what the network found meets
         // it too; a card nothing can check it on (no genre known) is left out
@@ -12897,6 +13110,19 @@ exec sleep 300
         .await;
         assert_eq!(st, StatusCode::OK, "{r}");
         assert!(r.get("network").is_none(), "{r}");
+        // ...because of the rule, not a failed call (review of #192): the network answered
+        assert!(r.get("network_note").is_none(), "{r}");
+        assert_eq!(searches.lock().unwrap().len(), 1);
+        // Pinakes down once the answer is old: the last answer stays, said to be old (review of
+        // #192: the playlist doesn't empty)
+        crate::smart_network::age_answers(std::time::Duration::from_secs(600));
+        down.store(true, std::sync::atomic::Ordering::SeqCst);
+        let (st, r) = call(&app, "POST", "/v1/smart/preview", Some(rules.clone())).await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        assert_eq!(searches.lock().unwrap().len(), 2, "asked again");
+        assert_eq!(r["network"].as_array().map(Vec::len), Some(2), "{r}");
+        assert!(r["network_note"].as_str().unwrap().contains("minutes ago"), "{r}");
+        down.store(false, std::sync::atomic::Ordering::SeqCst);
         // People you follow need a Pubky sign-in: said in plain words, not an error
         let (st, r) = call(
             &app,
@@ -14055,6 +14281,195 @@ exec sleep 300
         );
     }
 
+    /// A key AcoustID refuses (code 4, "invalid API key"): saving it is refused with a plain
+    /// message; a run with it stops fingerprinting after the first refusal (no more decoding),
+    /// carries on with the search by tags, and the status says why.
+    #[tokio::test]
+    async fn an_acoustid_key_acoustid_refuses_is_refused_and_stops_fingerprinting() {
+        let lookups = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mock = {
+            let lookups = lookups.clone();
+            Router::new().route(
+                "/v2/lookup",
+                post(move |body: String| {
+                    lookups.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    async move {
+                        if body.contains("client=GoodKey") {
+                            Json(serde_json::json!({"status": "ok", "results": []}))
+                        } else {
+                            Json(serde_json::json!({"status": "error",
+                                "error": {"code": 4, "message": "invalid API key"}}))
+                        }
+                    }
+                }),
+            )
+        };
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let music = dir.path().join("music");
+        std::fs::create_dir_all(&music).unwrap();
+        let s = state(dir.path(), None).await;
+        *s.acoustid.write().unwrap() = identify::AcoustIdSettings {
+            api_key: String::new(),
+            base_url: format!("http://127.0.0.1:{port}"),
+            configured: String::new(),
+        };
+        let app = router(s.clone());
+        let key = |k: &str| Some(serde_json::json!({ "acoustid_key": k }));
+        let (st, b) = call(&app, "PUT", "/v1/library/identify/settings", key("BadKey1")).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{b}");
+        assert!(
+            b["error"]
+                .as_str()
+                .unwrap()
+                .contains("AcoustID refused this key (invalid API key)"),
+            "{b}"
+        );
+        assert_eq!(s.acoustid.read().unwrap().api_key, "", "not saved");
+        let (st, b) = call(&app, "PUT", "/v1/library/identify/settings", key("GoodKey")).await;
+        assert_eq!(
+            (st, b["acoustid_own"].clone()),
+            (StatusCode::OK, true.into()),
+            "{b}"
+        );
+        assert_eq!(
+            lookups.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "one check per key"
+        );
+
+        // A key that stopped working (or a configured one AcoustID refuses), three songs
+        s.acoustid.write().unwrap().api_key = "BadKey1".into();
+        let mut paths = Vec::new();
+        for i in 1..=3 {
+            let path = music.join(format!("{i:02} song.wav"));
+            tone_wav(&path, 10 + i);
+            let t = untagged_track(path.clone(), &format!("Song {i}"), "Band");
+            s.library.lock().unwrap().upsert_track(&t).unwrap();
+            paths.push(path);
+        }
+        lookups.store(0, std::sync::atomic::Ordering::SeqCst);
+        identify::run(&s, false).await.unwrap();
+        assert_eq!(
+            lookups.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "one refusal, then no more lookups"
+        );
+        // The songs decode in parallel once AcoustID took the key; until then one at a time
+        let decoded = paths
+            .iter()
+            .filter(|p| {
+                let k = Library::file_key(p).unwrap();
+                s.library
+                    .lock()
+                    .unwrap()
+                    .cached_fingerprint(&k)
+                    .unwrap()
+                    .is_some()
+            })
+            .count();
+        assert_eq!(decoded, 1, "only the song that found out was decoded");
+        let (_, st) = call(&app, "GET", "/v1/library/identify", None).await;
+        assert_eq!(st["progress"]["acoustid_refused"], "invalid API key", "{st}");
+        assert_eq!(st["progress"]["errors"], 0, "the songs go on to the search: {st}");
+        assert_eq!(st["progress"]["unknown"], 3, "{st}");
+        // A new key clears it
+        let (_, b) = call(&app, "PUT", "/v1/library/identify/settings", key("GoodKey")).await;
+        assert!(b["progress"]["acoustid_refused"].is_null(), "{b}");
+    }
+
+    /// Identify while a scan holds the library's write lock longer than the busy timeout: the
+    /// first song's state write is turned away, tried again once the scan is done, and the run
+    /// carries on; no song ends in "error" because of the lock, and every song is checked.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn identify_waits_for_a_busy_library_and_checks_every_song() {
+        let dir = tempfile::tempdir().unwrap();
+        let music = dir.path().join("music");
+        std::fs::create_dir_all(&music).unwrap();
+        let s = state(dir.path(), None).await;
+        let mut ids = Vec::new();
+        for i in 1..=3 {
+            let path = music.join(format!("{i:02} song.wav"));
+            tone_wav(&path, 10 + i);
+            // Looked up before (an empty answer): the job's first write is the song's state
+            let key = Library::file_key(&path).unwrap();
+            let t = untagged_track(path, &format!("Song {i}"), "Band");
+            let lib = s.library.lock().unwrap();
+            lib.save_fingerprint(&key, 10 + i as u64, "AQfake").unwrap();
+            lib.save_lookup(&key, r#"{"status":"ok","results":[]}"#).unwrap();
+            ids.push(lib.upsert_track(&t).unwrap().0);
+        }
+        // A scan's connection takes the write lock and keeps it past the busy timeout; the scan
+        // ends a while after it lets go (its last batch is done, the rest is reading)
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+        let held = pm_library::db::BUSY_TIMEOUT + std::time::Duration::from_secs(1);
+        let after = std::time::Duration::from_millis(1500);
+        assert!(s.begin_scan());
+        let other = {
+            let db = dir.path().join("lib.sqlite");
+            let s = s.clone();
+            std::thread::spawn(move || {
+                let other = Library::open(&db).unwrap();
+                other.begin_batch().unwrap();
+                locked_tx.send(()).unwrap();
+                std::thread::sleep(held);
+                other.commit_batch().unwrap();
+                std::thread::sleep(after);
+                s.end_scan();
+                std::time::Instant::now()
+            })
+        };
+        locked_rx.recv().unwrap();
+        identify::run(&s, false).await.unwrap();
+        let finished = std::time::Instant::now();
+        let scan_ended = other.join().unwrap();
+        assert!(
+            finished >= scan_ended,
+            "the retry waits for the scan to end, not for the lock alone"
+        );
+        let p = s.identify.lock().unwrap().clone();
+        assert_eq!((p.done, p.unknown, p.errors), (3, 3, 0), "{p:?}");
+        assert!(s
+            .library
+            .lock()
+            .unwrap()
+            .tracks_to_identify(false)
+            .unwrap()
+            .is_empty());
+    }
+
+    /// Review of #192: an end of the Live post that fails (the homeserver doesn't answer, a
+    /// sign-in being restored) keeps the session, so it is tried again, and a retry is waiting:
+    /// a stopped zone has no next change to try it.
+    #[tokio::test]
+    async fn a_failed_end_of_the_live_post_is_tried_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let now = pm_pubky::ids::now_micros();
+        let post = serde_json::json!({"id": "0034A0Z4013G0", "edit": "0034A0Z4013G0", "zone": "gone",
+            "song": "https://musicbrainz.org/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69",
+            "session_at": now, "started_at": now, "expires_at": now + 600_000_000});
+        {
+            let lib = s.library.lock().unwrap();
+            lib.set_setting("listening.share", r#"{"share":true}"#).unwrap();
+            lib.set_setting("listening.post", &post.to_string()).unwrap();
+        }
+        crate::listening_share::zone_event(&s, "gone", &pm_zones::ZoneEvent::Stopped);
+        for _ in 0..200 {
+            if s.listening_retry.lock().unwrap().is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(s.listening_retry.lock().unwrap().as_deref(), Some("gone"));
+        let kept = s.library.lock().unwrap().get_setting("listening.post").unwrap();
+        assert!(kept.is_some(), "the session stays until its end is written");
+        let (_, share) = call(&router(s.clone()), "GET", "/v1/me/listening", None).await;
+        assert_eq!(share["share"], true, "not refused: sharing stays on");
+    }
+
     /// Identify library as a ladder (owner, 2026-10-30: too slow on the NUC): a folder that is an
     /// album is identified from one MusicBrainz search and one release lookup, without decoding
     /// a file; only what doesn't fit (a bonus track, a compilation folder of mixed artists) is
@@ -14336,5 +14751,126 @@ exec sleep 300
         assert_eq!(st["progress"]["done"], 10, "{st}");
         assert_eq!(st["progress"]["unknown"], 3, "{st}");
         assert_eq!(st["progress"]["suggested"], 1, "{st}");
+    }
+
+    /// A key saved while a run looks songs up with the old one (#205 review): the run's refusal
+    /// of the old key is not reported against the new key, which AcoustID took when it was saved,
+    /// and still stops the run's fingerprinting (it keeps the old key's client).
+    #[tokio::test]
+    async fn a_refusal_of_the_old_key_is_not_reported_for_a_key_saved_meanwhile() {
+        let node: Arc<std::sync::OnceLock<Arc<NodeState>>> = Default::default();
+        let lookups = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mock = {
+            let node = node.clone();
+            let lookups = lookups.clone();
+            Router::new().route(
+                "/v2/lookup",
+                post(move |body: String| {
+                    let node = node.clone();
+                    lookups.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    async move {
+                        if body.contains("client=GoodKey") {
+                            return Json(serde_json::json!({"status": "ok", "results": []}));
+                        }
+                        // The owner saves a new key while the old one's lookup is under way
+                        let s = node.get().unwrap();
+                        s.acoustid.write().unwrap().api_key = "GoodKey".into();
+                        s.identify.lock().unwrap().acoustid_refused = None;
+                        Json(serde_json::json!({"status": "error",
+                            "error": {"code": 4, "message": "invalid API key"}}))
+                    }
+                }),
+            )
+        };
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let music = dir.path().join("music");
+        std::fs::create_dir_all(&music).unwrap();
+        let s = state(dir.path(), None).await;
+        node.set(s.clone()).ok().unwrap();
+        *s.acoustid.write().unwrap() = identify::AcoustIdSettings {
+            api_key: "OldKey1".into(),
+            base_url: format!("http://127.0.0.1:{port}"),
+            configured: String::new(),
+        };
+        for i in 1..=3 {
+            let path = music.join(format!("{i:02} song.wav"));
+            tone_wav(&path, 10 + i);
+            let t = untagged_track(path, &format!("Song {i}"), "Band");
+            s.library.lock().unwrap().upsert_track(&t).unwrap();
+        }
+        identify::run(&s, false).await.unwrap();
+        let p = s.identify.lock().unwrap().clone();
+        assert_eq!(p.acoustid_refused, None, "{p:?}");
+        assert_eq!(s.acoustid.read().unwrap().api_key, "GoodKey");
+        assert_eq!(
+            lookups.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the old key's refusal stops the run's lookups all the same"
+        );
+        assert_eq!((p.done, p.unknown, p.errors), (3, 3, 0), "{p:?}");
+    }
+
+    /// A song whose identity was stored but whose state write then failed (a disk error) still
+    /// gets its IDs written into the file ("Write IDs" on): later runs skip it, so this run is
+    /// its only chance.
+    #[tokio::test]
+    async fn an_identity_stored_before_a_failed_write_still_gets_its_ids_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("music").join("11 bohemian.flac");
+        std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+        std::fs::copy(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../pm-library/tests/fixtures/ietf-60-mono-audio.flac"
+            ),
+            &f,
+        )
+        .unwrap();
+        let s = state(dir.path(), None).await;
+        *s.acoustid.write().unwrap() = identify::AcoustIdSettings {
+            api_key: "test-key".into(),
+            base_url: "http://127.0.0.1:9".into(),
+            configured: String::new(),
+        };
+        let app = router(s.clone());
+        let (st, b) = call(
+            &app,
+            "PUT",
+            "/v1/library/identify/settings",
+            Some(serde_json::json!({"write_ids": true})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{b}");
+        let mbid = "b1a9c0e9-d987-4042-ae91-78d6a3267d69";
+        {
+            let lib = s.library.lock().unwrap();
+            lib.upsert_track(&untagged_track(f.clone(), "Bohemian Rhapsody", "Queen"))
+                .unwrap();
+            // Looked up before: AcoustID knows the song
+            let key = Library::file_key(&f).unwrap();
+            lib.save_fingerprint(&key, 60, "AQfake").unwrap();
+            let answer = serde_json::json!({"status": "ok", "results": [{"id": "9ff43b6a-4f16-427c-93c2-92307ca505e0",
+                "score": 0.95, "recordings": [{"id": mbid, "title": "Bohemian Rhapsody"}]}]});
+            lib.save_lookup(&key, &answer.to_string()).unwrap();
+        }
+        // The song's state write fails after its identity is stored
+        rusqlite::Connection::open(dir.path().join("lib.sqlite"))
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER fail_state BEFORE INSERT ON identify_state
+                 BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END;",
+            )
+            .unwrap();
+        let e = identify::run(&s, false).await.unwrap_err();
+        assert!(e.message.contains("disk I/O error"), "{}", e.message);
+        let (_, tags) = pm_library::probe_and_read(&f).unwrap();
+        assert_eq!(
+            tags.recording_mbid,
+            Some(pm_model::Mbid::parse(mbid).unwrap()),
+            "the stored identity reached the file"
+        );
     }
 }

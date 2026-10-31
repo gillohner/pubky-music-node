@@ -220,6 +220,8 @@ pub struct NodeState {
     pub info_bases: std::sync::RwLock<crate::artist_info::InfoBases>,
     /// `/v1/search`'s answers, cached a few minutes per query and source (search.rs).
     pub(crate) search_answers: crate::search::AnswerCache,
+    /// The zone whose listening post a retry writes, while one waits (`listening_share::retry`).
+    pub(crate) listening_retry: Mutex<Option<String>>,
     /// Who on this node listens where, and the listen-along groups (presence.rs).
     pub presence: crate::presence::Presence,
     /// Shared async HTTP client for upstream lookups, rebuilt when the contact
@@ -445,6 +447,7 @@ impl NodeState {
             pinakes_reader: Default::default(),
             presence: Default::default(),
             search_answers: Default::default(),
+            listening_retry: Mutex::new(None),
             tidal,
             http: Mutex::new(None),
             scanning: Mutex::new(false),
@@ -1515,7 +1518,15 @@ impl NodeState {
 
     pub fn set_sync(&self, sync: Option<Arc<crate::sync::PubkySync>>) {
         let derived = sync.as_ref().map(|s| profile_url(s.z32()));
+        let z32 = sync.as_ref().map(|s| s.z32().to_string());
         *self.sync.lock().expect("sync lock") = sync;
+        // The owner's browser sessions belong to this identity from now on (Kimi review of #209).
+        // After the swap: a session minted meanwhile was checked against the identity then
+        if let Some(z32) = z32 {
+            if let Err(e) = crate::accounts::keep_owner_sessions_of(self, &z32) {
+                tracing::warn!("ending another identity's browser sessions failed: {}", e.message);
+            }
+        }
         // The owner's pubky.app profile is a public URL that reaches them,
         // which is all MusicBrainz, Wikipedia and Pinakes ask of a contact:
         // use it when nothing was set, so discovery works without any form.

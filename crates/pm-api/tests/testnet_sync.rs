@@ -1907,6 +1907,10 @@ async fn the_listen_history_lands_where_the_setting_says() {
     assert!(r.errors.is_empty(), "{:?}", r.errors);
     let (_, h) = call(&router(fresh.clone()), "GET", "/v1/me/listens", None).await;
     assert_eq!(h["listens"].as_array().unwrap().len(), 2, "{h}");
+    // And another, that later only restores the settings copy
+    let late = node(dir.path(), "late");
+    let r = sync_f.sync(&late.library).await.unwrap();
+    assert!(r.errors.is_empty(), "{:?}", r.errors);
     assert!(h["listens"]
         .as_array()
         .unwrap()
@@ -1948,6 +1952,20 @@ async fn the_listen_history_lands_where_the_setting_says() {
     // After the delete, another node imports old plays (ListenBrainz): written now, played a year
     // ago. A second node that has the delete time (from the settings copy) pulls it and keeps it
     sync.backup_settings(&a).await;
+    // Review of #192: a node that hasn't synced since backs its settings up: it adopts the
+    // delete (its listens from before go) rather than writing over it; one that restores the
+    // copy deletes its listens from before too
+    let mine = |n: &Arc<NodeState>| {
+        let n = n.clone();
+        async move {
+            let (_, h) = call(&router(n), "GET", "/v1/me/listens", None).await;
+            h["listens"].as_array().unwrap().len()
+        }
+    };
+    sync_f.backup_settings(&fresh).await;
+    assert_eq!(mine(&fresh).await, 0, "adopted on backup");
+    sync_f.restore_settings(&late, false).await.unwrap().unwrap();
+    assert_eq!(mine(&late).await, 0, "adopted on restore");
     let second = node(dir.path(), "second");
     let sync_2 = Arc::new(PubkySync::from_session(
         homeserver.clone(),
