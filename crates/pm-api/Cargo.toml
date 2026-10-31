@@ -70,6 +70,8 @@ tracing-subscriber = { workspace = true }
 pubky-social-specs = { workspace = true, features = ["migrator"] }
 tempfile = "3"
 pm-endpoint = { workspace = true }
+# A library write made to fail (a trigger), for the identify job's error paths.
+rusqlite = { workspace = true }
 id3 = { workspace = true }
 hound = { workspace = true }
 tower = { version = "0.5", features = ["util"] }

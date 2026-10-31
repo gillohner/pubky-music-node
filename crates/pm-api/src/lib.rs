@@ -14158,9 +14158,9 @@ exec sleep 300
         assert!(b["progress"]["acoustid_refused"].is_null(), "{b}");
     }
 
-    /// Identify while another connection holds the library's write lock longer than the busy
-    /// timeout (a scan writing): the first song's state write is turned away, tried again and
-    /// the run carries on; no song ends in "error" because of the lock, and every song is checked.
+    /// Identify while a scan holds the library's write lock longer than the busy timeout: the
+    /// first song's state write is turned away, tried again once the scan is done, and the run
+    /// carries on; no song ends in "error" because of the lock, and every song is checked.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn identify_waits_for_a_busy_library_and_checks_every_song() {
         let dir = tempfile::tempdir().unwrap();
@@ -14179,22 +14179,34 @@ exec sleep 300
             lib.save_lookup(&key, r#"{"status":"ok","results":[]}"#).unwrap();
             ids.push(lib.upsert_track(&t).unwrap().0);
         }
-        // Another connection takes the write lock and keeps it past the busy timeout
+        // A scan's connection takes the write lock and keeps it past the busy timeout; the scan
+        // ends a while after it lets go (its last batch is done, the rest is reading)
         let (locked_tx, locked_rx) = std::sync::mpsc::channel();
         let held = pm_library::db::BUSY_TIMEOUT + std::time::Duration::from_secs(1);
+        let after = std::time::Duration::from_millis(1500);
+        assert!(s.begin_scan());
         let other = {
             let db = dir.path().join("lib.sqlite");
+            let s = s.clone();
             std::thread::spawn(move || {
                 let other = Library::open(&db).unwrap();
                 other.begin_batch().unwrap();
                 locked_tx.send(()).unwrap();
                 std::thread::sleep(held);
                 other.commit_batch().unwrap();
+                std::thread::sleep(after);
+                s.end_scan();
+                std::time::Instant::now()
             })
         };
         locked_rx.recv().unwrap();
         identify::run(&s, false).await.unwrap();
-        other.join().unwrap();
+        let finished = std::time::Instant::now();
+        let scan_ended = other.join().unwrap();
+        assert!(
+            finished >= scan_ended,
+            "the retry waits for the scan to end, not for the lock alone"
+        );
         let p = s.identify.lock().unwrap().clone();
         assert_eq!((p.done, p.unknown, p.errors), (3, 3, 0), "{p:?}");
         assert!(s
@@ -14490,18 +14502,22 @@ exec sleep 300
     }
 
     /// A key saved while a run looks songs up with the old one (#205 review): the run's refusal
-    /// of the old key is not reported against the new key, which AcoustID took when it was saved.
+    /// of the old key is not reported against the new key, which AcoustID took when it was saved,
+    /// and still stops the run's fingerprinting (it keeps the old key's client).
     #[tokio::test]
     async fn a_refusal_of_the_old_key_is_not_reported_for_a_key_saved_meanwhile() {
         let node: Arc<std::sync::OnceLock<Arc<NodeState>>> = Default::default();
+        let lookups = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let mock = {
             let node = node.clone();
+            let lookups = lookups.clone();
             Router::new().route(
                 "/v2/lookup",
                 post(move |body: String| {
                     let node = node.clone();
+                    lookups.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     async move {
                         if body.contains("client=GoodKey") {
                             return Json(serde_json::json!({"status": "ok", "results": []}));
@@ -14527,13 +14543,82 @@ exec sleep 300
             base_url: format!("http://127.0.0.1:{port}"),
             configured: String::new(),
         };
-        let path = music.join("01 song.wav");
-        tone_wav(&path, 11);
-        let t = untagged_track(path, "Song 1", "Band");
-        s.library.lock().unwrap().upsert_track(&t).unwrap();
+        for i in 1..=3 {
+            let path = music.join(format!("{i:02} song.wav"));
+            tone_wav(&path, 10 + i);
+            let t = untagged_track(path, &format!("Song {i}"), "Band");
+            s.library.lock().unwrap().upsert_track(&t).unwrap();
+        }
         identify::run(&s, false).await.unwrap();
         let p = s.identify.lock().unwrap().clone();
         assert_eq!(p.acoustid_refused, None, "{p:?}");
         assert_eq!(s.acoustid.read().unwrap().api_key, "GoodKey");
+        assert_eq!(
+            lookups.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the old key's refusal stops the run's lookups all the same"
+        );
+        assert_eq!((p.done, p.unknown, p.errors), (3, 3, 0), "{p:?}");
+    }
+
+    /// A song whose identity was stored but whose state write then failed (a disk error) still
+    /// gets its IDs written into the file ("Write IDs" on): later runs skip it, so this run is
+    /// its only chance.
+    #[tokio::test]
+    async fn an_identity_stored_before_a_failed_write_still_gets_its_ids_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("music").join("11 bohemian.flac");
+        std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+        std::fs::copy(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../pm-library/tests/fixtures/ietf-60-mono-audio.flac"
+            ),
+            &f,
+        )
+        .unwrap();
+        let s = state(dir.path(), None).await;
+        *s.acoustid.write().unwrap() = identify::AcoustIdSettings {
+            api_key: "test-key".into(),
+            base_url: "http://127.0.0.1:9".into(),
+            configured: String::new(),
+        };
+        let app = router(s.clone());
+        let (st, b) = call(
+            &app,
+            "PUT",
+            "/v1/library/identify/settings",
+            Some(serde_json::json!({"write_ids": true})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{b}");
+        let mbid = "b1a9c0e9-d987-4042-ae91-78d6a3267d69";
+        {
+            let lib = s.library.lock().unwrap();
+            lib.upsert_track(&untagged_track(f.clone(), "Bohemian Rhapsody", "Queen"))
+                .unwrap();
+            // Looked up before: AcoustID knows the song
+            let key = Library::file_key(&f).unwrap();
+            lib.save_fingerprint(&key, 60, "AQfake").unwrap();
+            let answer = serde_json::json!({"status": "ok", "results": [{"id": "9ff43b6a-4f16-427c-93c2-92307ca505e0",
+                "score": 0.95, "recordings": [{"id": mbid, "title": "Bohemian Rhapsody"}]}]});
+            lib.save_lookup(&key, &answer.to_string()).unwrap();
+        }
+        // The song's state write fails after its identity is stored
+        rusqlite::Connection::open(dir.path().join("lib.sqlite"))
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER fail_state BEFORE INSERT ON identify_state
+                 BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END;",
+            )
+            .unwrap();
+        let e = identify::run(&s, false).await.unwrap_err();
+        assert!(e.message.contains("disk I/O error"), "{}", e.message);
+        let (_, tags) = pm_library::probe_and_read(&f).unwrap();
+        assert_eq!(
+            tags.recording_mbid,
+            Some(pm_model::Mbid::parse(mbid).unwrap()),
+            "the stored identity reached the file"
+        );
     }
 }

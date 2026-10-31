@@ -673,8 +673,7 @@ async fn fingerprint_lane(
     }
     let workers = fingerprint_workers();
     let decoding = tokio::sync::Semaphore::new(workers);
-    // Whether AcoustID answered the key yet (see `lookup`)
-    let answered = tokio::sync::Mutex::new(false);
+    let gate = KeyGate::default();
     let folders =
         futures_util::stream::unfold(folders, |mut rx| async move { rx.recv().await.map(|f| (f, rx)) });
     let looked = folders
@@ -688,9 +687,9 @@ async fn fingerprint_lane(
         })
         .map(|(meta, t)| {
             let decoding = &decoding;
-            let answered = &answered;
+            let gate = &gate;
             async move {
-                let r = lookup(s, client, &t, decoding, answered).await;
+                let r = lookup(s, client, &t, decoding, gate).await;
                 (meta, t, r)
             }
         })
@@ -785,11 +784,13 @@ async fn settle(s: &NodeState, t: &Track, outcome: Outcome, found: &Mutex<Vec<i6
                 lib.set_identity(id, &uri, *confidence, acoustid.as_deref())
             })
             .await?;
+            // Found once its identity is stored: later runs skip it, so a write after this that
+            // fails still leaves its IDs to be written into the file
+            found.lock().expect("found lock").push(id);
             write_waiting(s, |lib| lib.set_identify_state(id, "identified", Some(detail))).await?;
             if let Some(r) = release {
                 write_waiting(s, |lib| lib.set_identify_release(id, r)).await?;
             }
-            found.lock().expect("found lock").push(id);
         }
         Outcome::Suggest(c) => {
             write_waiting(s, |lib| lib.add_suggestions(id, c)).await?;
@@ -832,12 +833,22 @@ enum Outcome {
 /// Fingerprint (cached by file key) and look up (cached answer, else AcoustID when a key is
 /// set). Without a key, or once AcoustID refused it, only an answer looked up before counts:
 /// nothing is decoded for nothing.
+/// What a run's fingerprint lane knows of its AcoustID key.
+#[derive(Default)]
+struct KeyGate {
+    /// AcoustID answered the key (see [`lookup`]).
+    answered: tokio::sync::Mutex<bool>,
+    /// AcoustID refused the run's key: nothing more is fingerprinted. The run's own, not the
+    /// progress shown: a key saved meanwhile clears that, but the run keeps its client.
+    refused: std::sync::atomic::AtomicBool,
+}
+
 async fn lookup(
     s: &NodeState,
     client: Option<&pm_library::identify::AcoustIdClient>,
     t: &Track,
     decoding: &tokio::sync::Semaphore,
-    answered: &tokio::sync::Mutex<bool>,
+    gate: &KeyGate,
 ) -> Result<Vec<AcoustIdResult>, String> {
     let path = t.file.path.clone();
     let key = tokio::task::spawn_blocking({
@@ -858,13 +869,7 @@ async fn lookup(
         return Ok(r.results);
     }
     // Without a key, or once AcoustID refused it (this run), a fingerprint answers nothing
-    let refused = || {
-        s.identify
-            .lock()
-            .expect("identify lock")
-            .acoustid_refused
-            .is_some()
-    };
+    let refused = || gate.refused.load(std::sync::atomic::Ordering::SeqCst);
     let client = client.filter(|_| !refused());
     let Some(client) = client else {
         return Ok(Vec::new());
@@ -872,7 +877,7 @@ async fn lookup(
     // Until AcoustID has answered the key, one song at a time: a key it refuses costs one
     // song's decoding, not one per core
     let mut probe = {
-        let a = answered.lock().await;
+        let a = gate.answered.lock().await;
         (!*a).then_some(a)
     };
     if refused() {
@@ -916,10 +921,12 @@ async fn lookup(
     let (raw, results) = match looked {
         Ok(r) => r,
         Err(pm_library::LibraryError::AcoustIdKey(why)) => {
-            // The key saved meanwhile is a new one, checked when it was saved: not this refusal
+            tracing::warn!("identify: AcoustID refused the key ({why}); nothing more is fingerprinted");
+            gate.refused.store(true, std::sync::atomic::Ordering::SeqCst);
+            // Shown only while it is still the saved key: a key saved meanwhile was checked when
+            // it was saved, and is not this refusal
             let mut p = s.identify.lock().expect("identify lock");
             if s.acoustid.read().expect("acoustid lock").api_key == client.api_key() {
-                tracing::warn!("identify: AcoustID refused the key ({why}); nothing more is fingerprinted");
                 p.acoustid_refused = Some(why);
             }
             return Ok(Vec::new());
