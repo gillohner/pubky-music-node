@@ -3055,36 +3055,53 @@ pub(crate) fn qr_svg(text: &str) -> Option<String> {
     ))
 }
 
-/// `POST /v1/auth/pubky/start`: a controller or browser asks to sign in with
-/// Pubky Ring. Only the node's owner (the identity the node itself is signed
-/// in as) is accepted; approval hands out the API token, so nothing is typed
-/// or pasted. 412 until the node has a Pubky session.
+/// What a Pubky Ring log in asks for: the node's own folders only when the owner's page asked for
+/// a renewal (`{renew: true}`, from its "Log out" on the notice) and the node does lack them.
+/// Anyone may start a log in, so a listener scanning the QR code is never asked to give the node
+/// write access to their own homeserver.
+fn login_capabilities(renew_asked: bool, needs_resign: bool) -> (bool, &'static str) {
+    if renew_asked && needs_resign {
+        (true, pm_pubky::homeserver::LOGIN_CAPABILITIES)
+    } else {
+        (false, pm_pubky::homeserver::CONTROLLER_CAPABILITIES)
+    }
+}
+
+/// `POST /v1/auth/pubky/start [{renew}]`: a controller or browser asks to log in with Pubky
+/// Ring. The node tells the owner and listeners apart by who approves; `renew` (the owner's own
+/// page, when the node needs new folders) also asks for the node's folders. 412 until the node
+/// has a Pubky session.
 async fn controller_login_start(
     State(s): State<Arc<NodeState>>,
     req: axum::extract::Request,
 ) -> ApiResult<ControllerLoginStarted> {
     // Anyone may start one (it hands the token out), so few at a time: from one address, and in all
     let origin = login_origin(&req);
+    let body = axum::body::to_bytes(req.into_body(), 1024)
+        .await
+        .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, e.to_string()))?;
+    let renew_asked = if body.iter().all(u8::is_ascii_whitespace) {
+        false
+    } else {
+        serde_json::from_slice::<ControllerLoginStart>(&body)
+            .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, e.to_string()))?
+            .renew
+    };
     // Held from the check to the insert: sign-ins started at once can't pass the caps together
     let mut logins = s.controller_logins.lock().await;
     logins.retain(|_, (_, at, _)| at.elapsed() < CONTROLLER_LOGIN_TTL);
     let Some(owner) = s.sync_handle().map(|h| h.z32().to_string()) else {
         return Err(ApiError::new(
             StatusCode::PRECONDITION_FAILED,
-            "the node is not signed in to Pubky yet: sign it in once (Settings → Pubky, or `pm-node login`)",
+            "the node has no Pubky session loaded: sign it in (Settings → Pubky, or `pm-node login`), or restart it once its homeserver answers",
         ));
     };
     let hs = s
         .homeserver()
         .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, e.to_string()))?;
-    // The node's own session lacks folders: this log in asks for them too, so the owner's
-    // approval renews it (no separate "sign in again")
-    let renews = s.sync_handle().is_some_and(|h| h.needs_resign());
-    let caps = if renews {
-        pm_pubky::homeserver::LOGIN_CAPABILITIES
-    } else {
-        pm_pubky::homeserver::CONTROLLER_CAPABILITIES
-    };
+    // The node's own session lacks folders and the owner asked: this log in asks for them too, so
+    // the owner's approval renews it (no separate "sign in again")
+    let (renews, caps) = login_capabilities(renew_asked, s.sync_handle().is_some_and(|h| h.needs_resign()));
     let flow = hs
         .start_login_with("pubky-music-controller", caps)
         .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, e.to_string()))?;
@@ -5312,24 +5329,41 @@ mod tests {
         assert_eq!((st, v["ended"].as_bool()), (StatusCode::OK, Some(false)), "{v}");
         let (st, _) = send("GET", "/v1/me".into(), "s3cret".into(), None).await;
         assert_eq!(st, StatusCode::OK);
-        // An owner's browser session (the Ring log in itself is in tests/bundled_homeserver.rs):
-        // the owner while the node's Pubky session isn't loaded (no identity to tell apart here);
-        // Log out ends it; a made-up one never works
-        let session =
-            accounts::mint_owner(&s, "o3ftkuxjd9k6zgnc4hhbhbg5jusubr4zqyb1dtzi8hhm3hf5wbmy").unwrap();
+        // An owner's browser session (the Ring log in, Log out and the identity's own sessions
+        // are in tests/bundled_homeserver.rs). While the node has no identity loaded, none is the
+        // owner: an earlier owner's session can't come back when the node's own session isn't
+        // restored at start (Kimi review of #209); the API token still works
+        const OLD: &str = "o3ftkuxjd9k6zgnc4hhbhbg5jusubr4zqyb1dtzi8hhm3hf5wbmy";
+        const NEW: &str = "gujx6qd8ksydh1makdphd3bxu351d9b8waqka8hfg6q7hnqkxexo";
+        let session = accounts::mint_owner(&s, OLD).unwrap();
         assert!(session.starts_with(accounts::OWNER_PREFIX));
-        let (_, me) = send("GET", "/v1/me".into(), session.clone(), None).await;
-        assert_eq!(me["role"], "owner", "{me}");
-        let (st, v) = send("DELETE", "/v1/me/token".into(), session.clone(), None).await;
-        assert_eq!((st, v["ended"].as_bool()), (StatusCode::OK, Some(true)), "{v}");
-        let (st, v) = send("GET", "/v1/me".into(), session, None).await;
-        assert_eq!(st, StatusCode::UNAUTHORIZED);
+        let (st, v) = send("GET", "/v1/me".into(), session.clone(), None).await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED, "{v}");
         assert_eq!(
             v["error"], "missing or wrong bearer token",
             "the page logs in again on exactly this"
         );
+        let (st, _) = send("GET", "/v1/me".into(), "s3cret".into(), None).await;
+        assert_eq!(st, StatusCode::OK);
         let (st, _) = send("GET", "/v1/me".into(), "pmo_madeup".into(), None).await;
         assert_eq!(st, StatusCode::UNAUTHORIZED);
+        // The node takes on another identity: the old owner's sessions are gone for good, the new
+        // owner's stay
+        let mine = accounts::mint_owner(&s, &format!("pubky{NEW}")).unwrap();
+        accounts::keep_owner_sessions_of(&s, &format!("pubky{NEW}")).unwrap();
+        let kept: Vec<String> = serde_json::from_str::<Vec<serde_json::Value>>(
+            &s.library
+                .lock()
+                .unwrap()
+                .get_setting("accounts.owner_sessions")
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap()
+        .iter()
+        .map(|t| t["key"].as_str().unwrap().to_string())
+        .collect();
+        assert_eq!(kept, [NEW], "{mine}");
     }
 
     #[tokio::test]
@@ -8375,6 +8409,27 @@ mod tests {
         let (st, v) = call(&app, "GET", "/v1/auth/pubky/poll?id=nope", None).await;
         assert_eq!(st, StatusCode::OK, "{v}");
         assert_eq!(v["status"], "expired");
+    }
+
+    /// A log in asks for the node's folders only when the owner's page asks for a renewal and the
+    /// node lacks them: a listener scanning the QR code is never asked to give the node write
+    /// access to their own homeserver (Hermes review of #209, medium 1).
+    #[test]
+    fn only_the_owners_renewal_asks_for_the_nodes_folders() {
+        use pm_pubky::homeserver::{CONTROLLER_CAPABILITIES, LOGIN_CAPABILITIES};
+        assert_eq!(
+            login_capabilities(false, true),
+            (false, CONTROLLER_CAPABILITIES),
+            "the node needs folders, but nobody asked: a plain log in"
+        );
+        assert_eq!(
+            login_capabilities(true, false),
+            (false, CONTROLLER_CAPABILITIES),
+            "asked, but nothing to renew"
+        );
+        assert_eq!(login_capabilities(false, false), (false, CONTROLLER_CAPABILITIES));
+        assert_eq!(login_capabilities(true, true), (true, LOGIN_CAPABILITIES));
+        assert!(!CONTROLLER_CAPABILITIES.contains(":rw"), "a log in only reads");
     }
 
     /// Anyone may start a Pubky Ring sign-in, so few wait at once: six per address (IPv6 per

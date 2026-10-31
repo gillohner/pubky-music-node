@@ -201,8 +201,9 @@ async fn event_stream(socket: WebSocket, s: Arc<NodeState>, c: Caller, token: Op
     let session = token
         .as_deref()
         .is_some_and(|t| t.starts_with(crate::accounts::OWNER_PREFIX));
-    // The owner came in with the API token: when it is replaced, this socket ends with it
-    let with_token = c.role == crate::accounts::Role::Owner && !session && s.token().is_some();
+    // The owner came in with the API token, or with a browser session (a new token ends them all):
+    // when it is replaced, this socket ends with it
+    let with_token = c.role == crate::accounts::Role::Owner && s.token().is_some();
     let mut token_changed = s.token_changed.subscribe();
     // A listener signed out or lost music access, or an owner logged out: the socket goes with
     // the token (checked on each server ping, and before an event at most every few seconds)

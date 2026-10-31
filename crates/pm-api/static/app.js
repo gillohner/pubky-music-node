@@ -698,7 +698,9 @@
     ? `<img class="face ${cls}" src="${esc(f.avatar)}" alt="">`
     : `<span class="face mono ${cls}" style="background:hsl(${hue(f && f.id)} 35% 34%)">${esc(initials((f && f.name) || '?'))}</span>`);
   // One poll at a time: `timer` is a poll waiting to run, `asking` one under way
-  const lg = { flow: null, timer: null, asking: false, showQr: false, gen: 0 };
+  // `renew`: the owner logged out from the notice that the node needs new folders, so this log in
+  // asks for them too. Only then: anyone scanning a plain QR code is asked to read, nothing more
+  const lg = { flow: null, timer: null, asking: false, showQr: false, gen: 0, renew: false };
   const loginStop = () => { clearTimeout(lg.timer); lg.timer = null; lg.gen += 1; };
   const drawLoginFlow = () => {
     const f = lg.flow; if (!f) return;
@@ -708,7 +710,7 @@
     const qr = f.qr_svg ? `<div class="loginqr" role="img" aria-label="QR code to scan with Pubky Ring">${f.qr_svg}</div>` : '';
     const open = (cls) => `<a class="btn ${cls}" id="loginring" href="${esc(ringUrl(f.url))}">Open in Pubky Ring</a>`;
     const wait = '<p class="loginwait" id="loginwait"><span class="spin" aria-hidden="true"></span>Waiting for Pubky Ring… this page continues by itself.</p>';
-    const renew = f.renews ? `<p class="muted small">If this is your node, Pubky Ring also asks you to approve new folders for it.</p>` : '';
+    const renew = f.renews ? `<p class="muted small">Pubky Ring also asks you to approve the new folders this node needs.</p>` : '';
     $('#loginbody').innerHTML = ringFirst()
       ? `${open('primary loginmain')}${lg.showQr ? qr : ''}<button class="btn ghost sm" type="button" id="loginqrbtn" aria-expanded="${lg.showQr}">${lg.showQr ? 'Hide QR code' : 'Show QR code'}</button>${wait}${renew}`
       : `${qr}<p class="muted">Scan with Pubky Ring on your phone.</p>${open('ghost sm')}${wait}${renew}`;
@@ -736,7 +738,7 @@
       if (gen !== lg.gen) return;
       if (p.status === 'pending') return loginPoll(gen);
       if (p.status === 'ok' && p.token) {
-        loginStop(); state.token = p.token; try { localStorage.setItem('pm.token', p.token); } catch { /* this tab keeps it */ }
+        loginStop(); lg.renew = false; state.token = p.token; try { localStorage.setItem('pm.token', p.token); } catch { /* this tab keeps it */ }
         hideLogin(); connect(); return;
       }
       if (p.status === 'denied') { loginStop(); drawRefused(p); return; }
@@ -747,10 +749,10 @@
     loginStop(); const gen = lg.gen;
     $('#loginbody').innerHTML = '<p class="loginwait"><span class="spin" aria-hidden="true"></span>Starting…</p>';
     try {
-      const r = await fetch('/v1/auth/pubky/start', { method: 'POST' }); const j = await r.json();
+      const r = await fetch('/v1/auth/pubky/start', lg.renew ? { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"renew":true}' } : { method: 'POST' }); const j = await r.json();
       if (gen !== lg.gen) return;
       if (r.status === 412) {
-        $('#loginbody').innerHTML = '<p class="muted">This node isn’t linked to a Pubky identity yet, so Pubky Ring can’t log you in. Use its API token below.</p>';
+        $('#loginbody').innerHTML = '<p class="muted">Pubky Ring can’t log you in here right now: this node isn’t linked to a Pubky identity, or couldn’t reach it when it started. Use its API token below.</p>';
         $('#logintoken').open = true; return;
       }
       if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
@@ -771,6 +773,9 @@
     $('#loginpage').hidden = false;
     const w = $('#loginwhy'); w.hidden = !LOGIN_WHY[why]; w.textContent = LOGIN_WHY[why] || '';
     $('#tok').value = ''; $('#logintoken').open = false;
+    try { lg.renew = sessionStorage.getItem('pm.loginRenew') === '1'; sessionStorage.removeItem('pm.loginRenew'); } catch { /* a plain log in; Settings asks again */ }
+    // The app behind is hidden: the screen's heading takes the focus, so it is announced
+    $('#loginh').focus();
     loginStart();
   };
   const hideLogin = () => { loginStop(); document.body.classList.remove('signedout'); $('#loginpage').hidden = true; };
@@ -786,8 +791,23 @@
   };
   // Log out: the node ends this browser's session (an owner's or a listener's; a pasted API
   // token stays the node's), and the page forgets everything of the account, back to Log in.
-  const logOut = async () => {
-    try { if (state.token) await fetch('/v1/me/token', { method: 'DELETE', headers: { authorization: 'Bearer ' + state.token } }); } catch { /* logged out here either way */ }
+  // Only once the node said so (or the session had already ended): else the session would go on
+  // working while the page claims it is over, so it says why, still logged in, with Try again.
+  // `renew` (from the notice that the node needs new folders): the next log in asks for them.
+  const logOut = async (renew) => {
+    if (state.token) {
+      let why = '';
+      try {
+        const r = await fetch('/v1/me/token', { method: 'DELETE', headers: { authorization: 'Bearer ' + state.token } });
+        if (!r.ok && r.status !== 401) why = (await r.json().catch(() => ({}))).error || `HTTP ${r.status}`;
+      } catch { why = 'the node didn’t answer'; }
+      if (why) {
+        popTransient(); if (popPending) await popPending;
+        if (confirm(`Couldn’t log out: ${why}. You are still logged in.\n\nTry again?`)) logOut(renew);
+        return;
+      }
+    }
+    try { if (renew === true) sessionStorage.setItem('pm.loginRenew', '1'); } catch { /* a plain log in */ }
     forgetAccount();
     try { sessionStorage.setItem('pm.loginWhy', 'out'); } catch { /* no reason shown */ }
     // From a menu: its history entry goes first, or popping it later would cancel this navigation
@@ -3709,11 +3729,11 @@
   // A session approved for fewer folders than the node uses: one plain line with the way out.
   // The node's own Pubky session lacks folders: the owner's next log in with Pubky Ring asks for
   // them (one approval, no separate sign-in), so the way there is Log out
-  const RESIGN_TEXT = 'This node needs your approval for new folders on your homeserver. Log out and log in again with Pubky Ring to give it.';
+  const RESIGN_TEXT = 'This node needs your approval for new folders on your homeserver. Use Log out here and log in again with Pubky Ring to give it.';
   const resignNotice = (pk = state.pubkyStatus) => pk && pk.needs_resign ? `<div class="notice warn resign" role="status"><span>${esc(pk.notice || RESIGN_TEXT)}</span>${state.token ? `<button class="btn sm" data-resign>${icon('logout')} Log out</button>` : '<button class="btn sm primary" data-resign>Approve in Pubky Ring</button>'}</div>` : '';
   // With a token: Log out, as the next log in asks for the folders. A node without one has no log
   // in, so its notice approves them here (Settings › My accounts, the node's own Pubky sign-in).
-  const bindResign = (root) => $$('[data-resign]', root).forEach((b) => b.onclick = state.token ? logOut : () => { state.autoResign = true; setView('settings', 'accounts'); });
+  const bindResign = (root) => $$('[data-resign]', root).forEach((b) => b.onclick = state.token ? () => logOut(true) : () => { state.autoResign = true; setView('settings', 'accounts'); });
   // A sync's answer as one plain line: the re-sign notice instead of a raw 403.
   const syncToast = (r) => { const resign = (r.errors || []).find((e) => e === RESIGN_TEXT); if (resign) { state.pubkyUser = undefined; return toast(RESIGN_TEXT, 'error'); } toast(`Saved: ${r.pushed} sent to your homeserver, ${r.pulled} received${r.errors.length ? `, ${r.errors.length} errors` : ''}${r.pending ? `; ${r.pending} more going out in the background` : ''}${(r.notes || []).length ? `. ${r.notes.join(' ')}` : ''}`); };
   // The API serves at most 1000 rows per call; follow the `after` cursor to the end (capped at 50k rows).

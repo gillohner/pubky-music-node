@@ -75,43 +75,50 @@ fn load(s: &NodeState, setting: &str) -> Vec<PersonToken> {
         .unwrap_or_default()
 }
 
-fn store(s: &NodeState, setting: &str, t: &[PersonToken]) -> Result<(), ApiError> {
-    s.library
-        .lock()
-        .expect("library poisoned")
-        .set_setting(setting, &serde_json::to_string(t).expect("serializes"))?;
-    Ok(())
+/// Changes a token list in place: read and saved under one hold of the library, so two changes
+/// at once (a log in while Make a new token ends every session) can't bring ended ones back.
+fn update<R>(
+    s: &NodeState,
+    setting: &str,
+    f: impl FnOnce(&mut Vec<PersonToken>) -> R,
+) -> Result<R, ApiError> {
+    let lib = s.library.lock().expect("library poisoned");
+    let mut all: Vec<PersonToken> = lib
+        .get_setting(setting)
+        .ok()
+        .flatten()
+        .and_then(|j| serde_json::from_str(&j).ok())
+        .unwrap_or_default();
+    let r = f(&mut all);
+    lib.set_setting(setting, &serde_json::to_string(&all).expect("serializes"))?;
+    Ok(r)
 }
 
 fn load_tokens(s: &NodeState) -> Vec<PersonToken> {
     load(s, TOKENS)
 }
 
-fn store_tokens(s: &NodeState, t: &[PersonToken]) -> Result<(), ApiError> {
-    store(s, TOKENS, t)
-}
-
 /// A new personal token for `key` (returned once; the node keeps its hash).
 pub fn mint(s: &NodeState, key: &str) -> Result<String, ApiError> {
     let key = key.trim_start_matches("pubky").to_string();
     let token = format!("pml_{}", crate::tidal::random_urlsafe(32));
-    let mut all = load_tokens(s);
-    // A person signing in again on another device keeps their other sessions; at most 10
-    let mine: Vec<usize> = all
-        .iter()
-        .enumerate()
-        .filter(|(_, t)| t.key == key)
-        .map(|(i, _)| i)
-        .collect();
-    if mine.len() >= 10 {
-        all.remove(mine[0]);
-    }
-    all.push(PersonToken {
-        hash: hash(&token),
-        key,
-        created_at: now(),
-    });
-    store_tokens(s, &all)?;
+    update(s, TOKENS, |all| {
+        // A person signing in again on another device keeps their other sessions; at most 10
+        let mine: Vec<usize> = all
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| t.key == key)
+            .map(|(i, _)| i)
+            .collect();
+        if mine.len() >= 10 {
+            all.remove(mine[0]);
+        }
+        all.push(PersonToken {
+            hash: hash(&token),
+            key,
+            created_at: now(),
+        });
+    })?;
     Ok(token)
 }
 
@@ -119,33 +126,38 @@ pub fn mint(s: &NodeState, key: &str) -> Result<String, ApiError> {
 /// the node keeps its hash. At most 20; the oldest goes first.
 pub fn mint_owner(s: &NodeState, key: &str) -> Result<String, ApiError> {
     let token = format!("{OWNER_PREFIX}{}", crate::tidal::random_urlsafe(32));
-    let mut all = load(s, OWNER_SESSIONS);
-    if all.len() >= 20 {
-        all.remove(0);
-    }
-    all.push(PersonToken {
-        hash: hash(&token),
-        key: key.trim_start_matches("pubky").to_string(),
-        created_at: now(),
-    });
-    store(s, OWNER_SESSIONS, &all)?;
+    update(s, OWNER_SESSIONS, |all| {
+        if all.len() >= 20 {
+            all.remove(0);
+        }
+        all.push(PersonToken {
+            hash: hash(&token),
+            key: key.trim_start_matches("pubky").to_string(),
+            created_at: now(),
+        });
+    })?;
     Ok(token)
 }
 
-/// An owner's browser session that is still open, for the identity the node is signed in as now
-/// (a node signed in as someone else no longer lets the old owner's browsers in). While the
-/// node's Pubky session isn't loaded (its homeserver didn't answer at start), sessions stay valid:
-/// they were made for the owner, and nobody can log in with Ring meanwhile.
-fn owner_session(s: &NodeState, token: &str, owner: Option<&str>) -> bool {
+/// An owner's browser session that is still open, for `owner`: the identity the node has loaded
+/// now (a node signed in as someone else no longer lets the old owner's browsers in).
+fn owner_session(s: &NodeState, token: &str, owner: &str) -> bool {
     let h = hash(token);
     load(s, OWNER_SESSIONS)
         .iter()
-        .any(|t| t.hash == h && owner.is_none_or(|o| t.key == o))
+        .any(|t| t.hash == h && t.key == owner)
+}
+
+/// The node took on the identity `owner` (restored at start, or a log in renewed or changed it):
+/// browser sessions of any other identity end, so none can come back later.
+pub fn keep_owner_sessions_of(s: &NodeState, owner: &str) -> Result<(), ApiError> {
+    let owner = owner.trim_start_matches("pubky");
+    update(s, OWNER_SESSIONS, |all| all.retain(|t| t.key == owner))
 }
 
 /// Ends every browser session of the owner (a new API token: the answer to a leak).
 pub fn end_owner_sessions(s: &NodeState) -> Result<(), ApiError> {
-    store(s, OWNER_SESSIONS, &[])
+    update(s, OWNER_SESSIONS, Vec::clear)
 }
 
 /// Whose token this is, when it is a listener's that still has music access.
@@ -322,10 +334,13 @@ pub fn caller(s: &NodeState, token: Option<&str>) -> Option<Caller> {
         });
     }
     if t.starts_with(OWNER_PREFIX) {
-        let key = owner_key();
-        return owner_session(s, t, key.as_deref()).then_some(Caller {
+        // Only for the identity the node has loaded. Without one (its homeserver didn't answer at
+        // start) no session is the owner: which identity is the owner then can't be told, and an
+        // earlier owner's session must not come back. The API token still logs in meanwhile
+        let key = owner_key()?;
+        return owner_session(s, t, &key).then_some(Caller {
             role: Role::Owner,
-            key,
+            key: Some(key),
         });
     }
     if t.starts_with(crate::party::GUEST_PREFIX) {
@@ -377,9 +392,7 @@ pub(crate) async fn sign_out(
         _ => return Ok(Json(serde_json::json!({"signed_out": true, "ended": false}))),
     };
     let h = hash(&token);
-    let mut all = load(&s, setting);
-    all.retain(|t| t.hash != h);
-    store(&s, setting, &all)?;
+    update(&s, setting, |all| all.retain(|t| t.hash != h))?;
     Ok(Json(serde_json::json!({"signed_out": true, "ended": true})))
 }
 
@@ -415,9 +428,7 @@ pub fn sessions_of(s: &NodeState, key: &str) -> usize {
 
 /// Forgets every token of `key` (People › remove).
 pub fn sign_out_everywhere(s: &NodeState, key: &str) -> Result<(), ApiError> {
-    let mut all = load_tokens(s);
-    all.retain(|t| t.key != key);
-    store_tokens(s, &all)
+    update(s, TOKENS, |all| all.retain(|t| t.key != key))
 }
 
 /// The refusal a listener gets.

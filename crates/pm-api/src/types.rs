@@ -1810,6 +1810,15 @@ pub struct LoginStarted {
     pub qr_svg: Option<String>,
 }
 
+/// `POST /v1/auth/pubky/start` body (optional).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ControllerLoginStart {
+    /// The owner's page asks for the node's folders too, as the node needs new ones; ignored
+    /// while it doesn't.
+    #[serde(default)]
+    pub renew: bool,
+}
+
 /// `POST /v1/auth/pubky/start`: a controller or browser sign-in with Pubky Ring.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ControllerLoginStarted {
@@ -1822,8 +1831,9 @@ pub struct ControllerLoginStarted {
     pub owner_face: crate::profiles::LoginFace,
     /// The node's name ("Log in to …").
     pub node_name: String,
-    /// Pubky Ring also asks the owner to approve new folders for the node (its own session lacks
-    /// them); an approval by the owner renews the node's session.
+    /// Pubky Ring also asks the owner to approve new folders for the node (asked for with
+    /// `renew`, and its own session lacks them); an approval by the owner renews the node's
+    /// session.
     #[serde(default)]
     pub renews: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]

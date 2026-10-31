@@ -658,12 +658,12 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
     {
       const OWNER_K = 'o'.repeat(52); const OTHER_K = 'b'.repeat(52);
       const QR = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><rect width="10" height="10" fill="#fff"/></svg>';
-      let poll = { status: 'pending' }; let starts = 0; let logouts = 0;
+      let poll = { status: 'pending' }; let starts = 0; let logouts = 0; const startBodies = [];
       // A context whose token (if any) is set once, so a Log out or a reload doesn't bring it back
       const loginCtx = async (opts, token) => {
         const cx = await browser.newContext(opts);
         if (token) await cx.addInitScript((t) => { if (!sessionStorage.getItem('seeded')) { sessionStorage.setItem('seeded', '1'); localStorage.setItem('pm.token', t); localStorage.setItem('pm.zone', 'browser'); } }, token);
-        await cx.route(/\/v1\/auth\/pubky\/start$/, (r) => { starts++; return r.fulfill({ json: { id: `flow${starts}`, url: 'pubkyauth:///?caps=/pub/pubky.app/:r&secret=c2VjcmV0&relay=https://relay.example/link', owner: OWNER_K, owner_face: { id: OWNER_K, name: 'Alice' }, node_name: 'CI node', renews: false, qr_svg: QR } }); });
+        await cx.route(/\/v1\/auth\/pubky\/start$/, (r) => { starts++; startBodies.push(r.request().postData()); return r.fulfill({ json: { id: `flow${starts}`, url: 'pubkyauth:///?caps=/pub/pubky.app/:r&secret=c2VjcmV0&relay=https://relay.example/link', owner: OWNER_K, owner_face: { id: OWNER_K, name: 'Alice' }, node_name: 'CI node', renews: false, qr_svg: QR } }); });
         await cx.route(/\/v1\/auth\/pubky\/poll/, (r) => r.fulfill({ json: poll }));
         await cx.route(/\/v1\/me\/token$/, (r) => { logouts++; return r.continue(); });
         return cx;
@@ -681,6 +681,8 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
       const loginShown = async (ms) => { const end = Date.now() + ms; for (;;) { if (await p.isVisible('#loginpage').catch(() => false)) return true; if (Date.now() > end) return false; await p.waitForTimeout(200); } };
       check(await loginShown(15000), 'Log out shows the Log in screen');
       check(await waitText(p, '#loginwhy', 'You logged out.'), 'it says you logged out');
+      check(await p.evaluate(() => document.activeElement && document.activeElement.id === 'loginh'), 'the screen’s heading has the focus, so it is announced');
+      check(startBodies.length > 0 && startBodies.every((b) => !b || !JSON.parse(b).renew), 'a plain log in doesn’t ask for the node’s folders');
       check(logouts === 1, 'the node was asked to end this browser’s session');
       check(await p.evaluate(() => localStorage.getItem('pm.token') === null && localStorage.getItem('pm.zone') === null), 'the browser forgot the token and the account’s state');
       check(!(await p.isVisible('.shell')) && !(await p.isVisible('#np')), 'no half of the app behind it');
@@ -694,6 +696,23 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
       check(await waitText(p, '#tokerr', 'The node doesn\u2019t take that token.') && await p.isVisible('#loginpage'), 'a wrong token is said on the screen');
       await p.fill('#tok', TOKEN); await p.click('#tokform button[type=submit]');
       check(await p.locator('#loginpage').waitFor({ state: 'hidden', timeout: 15000 }).then(() => true).catch(() => false) && await visible(p, '#me'), 'the right token logs in');
+      await c.close();
+
+      // A Log out the node didn't confirm: still logged in, saying why, with Try again
+      c = await loginCtx({ viewport: { width: 1280, height: 900 } }, TOKEN); p = await c.newPage();
+      let refusals = 1; const asked = [];
+      await c.route(/\/v1\/me\/token$/, (r) => (refusals-- > 0 ? r.fulfill({ status: 500, json: { error: 'database is locked' } }) : r.fallback()));
+      p.on('dialog', (d) => { asked.push(d.message()); return asked.length === 1 ? d.dismiss() : d.accept(); });
+      await p.goto(BASE + '/');
+      await visible(p, '#me', 20000);
+      await p.click('#me');
+      await p.locator('.popover.menu .pop-item', { hasText: 'Log out' }).click();
+      await p.waitForTimeout(800);
+      check(asked.length === 1 && /Couldn’t log out: database is locked\. You are still logged in\./.test(asked[0]) && /Try again/.test(asked[0]), `a failed Log out says why, with Try again (${asked[0]})`);
+      check(!(await p.isVisible('#loginpage')) && await p.evaluate((t) => localStorage.getItem('pm.token') === t, TOKEN), 'and the browser stays logged in');
+      await p.click('#me');
+      await p.locator('.popover.menu .pop-item', { hasText: 'Log out' }).click();
+      check(await loginShown(15000), 'once the node ends the session, Log in');
       await c.close();
 
       // Phone (and tablet): Open in Pubky Ring first, the QR code on request
@@ -741,11 +760,21 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
       await c.close();
 
       // The node's own session lacks folders: a Log out line in Settings, no banner on Home
-      c = await ctx(); p = await c.newPage();
-      await c.route(/\/v1\/pubky$/, (r) => r.fulfill({ json: { user: 'pubky' + OWNER_K, unsynced: 0, needs_resign: true, missing: ['/pub/music/v1/'], notice: 'This node needs your approval for new folders on your homeserver. Log out and log in again with Pubky Ring to give it.', sync: null } }));
+      c = await loginCtx({ viewport: { width: 1280, height: 900 } }, TOKEN); p = await c.newPage();
+      await c.route(/\/v1\/pubky$/, (r) => r.fulfill({ json: { user: 'pubky' + OWNER_K, unsynced: 0, needs_resign: true, missing: ['/pub/music/v1/'], notice: 'This node needs your approval for new folders on your homeserver. Use Log out here and log in again with Pubky Ring to give it.', sync: null } }));
       await p.goto(BASE + '/settings/accounts');
       check(await visible(p, '#pkresign [data-resign]', 20000), 'Settings says the node needs approval, with Log out');
       check(!(await p.$('#pklogin')), 'no separate "Sign in again"');
+      // Its Log out asks the next log in for the folders (only the owner's page does)
+      const renewBodies = [];
+      await c.route(/\/v1\/auth\/pubky\/start$/, (r) => { renewBodies.push(r.request().postData()); return r.fulfill({ json: { id: 'renew1', url: 'pubkyauth:///?caps=/pub/pubky.app/:r&secret=c2VjcmV0&relay=https://relay.example/link', owner: OWNER_K, owner_face: { id: OWNER_K, name: 'Alice' }, node_name: 'CI node', renews: true, qr_svg: QR } }); });
+      await c.route(/\/v1\/auth\/pubky\/poll/, (r) => r.fulfill({ json: { status: 'pending' } }));
+      await p.click('#pkresign [data-resign]');
+      check(await visible(p, '#loginpage', 15000) && await waitText(p, '#loginbody', 'new folders'), 'its Log out leads to a log in that asks for the new folders');
+      check(renewBodies.length === 1 && JSON.parse(renewBodies[0] || '{}').renew === true, `the log in asks the node for a renewal (${renewBodies.join(' ')})`);
+      await c.close();
+      c = await ctx(); p = await c.newPage();
+      await c.route(/\/v1\/pubky$/, (r) => r.fulfill({ json: { user: 'pubky' + OWNER_K, unsynced: 0, needs_resign: true, missing: ['/pub/music/v1/'], notice: 'This node needs your approval for new folders on your homeserver. Use Log out here and log in again with Pubky Ring to give it.', sync: null } }));
       await p.goto(BASE + '/'); await p.waitForSelector('#h-setup', { timeout: 20000 }).catch(() => {}); await p.waitForTimeout(800);
       check(!(await p.$('#main .notice.resign')), 'Home has no sign-in banner');
       await c.close();

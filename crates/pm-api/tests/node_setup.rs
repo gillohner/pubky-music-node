@@ -217,11 +217,23 @@ async fn the_owner_replaces_a_token_the_node_made_and_the_old_one_stops_working(
     std::fs::write(&file, OWNER).unwrap();
     let s = node(dir.path(), vec![], just_null());
     let listener = listener(&s);
-    let browser =
-        pm_api::accounts::mint_owner(&s, "o3ftkuxjd9k6zgnc4hhbhbg5jusubr4zqyb1dtzi8hhm3hf5wbmy").unwrap();
+    // An owner's browser session (only valid with the node's identity loaded, which needs a
+    // homeserver: tests/bundled_homeserver.rs; here, that the node keeps it)
+    pm_api::accounts::mint_owner(&s, "o3ftkuxjd9k6zgnc4hhbhbg5jusubr4zqyb1dtzi8hhm3hf5wbmy").unwrap();
+    let browsers = || {
+        let kept = s
+            .library
+            .lock()
+            .unwrap()
+            .get_setting("accounts.owner_sessions")
+            .unwrap()
+            .unwrap_or_default();
+        serde_json::from_str::<Vec<serde_json::Value>>(&kept)
+            .unwrap_or_default()
+            .len()
+    };
+    assert_eq!(browsers(), 1);
     let app = router(s.clone());
-    let (st, _) = call(&app, &browser, "GET", "/v1/info", None).await;
-    assert_eq!(st, StatusCode::OK, "an owner's browser session");
     // Set in the config: changed there, not here
     let (st, r) = call(&app, OWNER, "POST", "/v1/node/token", None).await;
     assert_eq!(st, StatusCode::CONFLICT, "{r}");
@@ -247,10 +259,9 @@ async fn the_owner_replaces_a_token_the_node_made_and_the_old_one_stops_working(
     assert_eq!(st, StatusCode::OK);
     let (st, _) = call(&app, &listener, "GET", "/v1/info", None).await;
     assert_eq!(st, StatusCode::OK, "listeners keep their own tokens");
-    let (st, _) = call(&app, &browser, "GET", "/v1/info", None).await;
     assert_eq!(
-        st,
-        StatusCode::UNAUTHORIZED,
+        browsers(),
+        0,
         "the owner's browsers are logged out (the answer to a leak)"
     );
 }

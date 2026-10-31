@@ -558,6 +558,15 @@ async fn call_auth(
 async fn ring_sign_in(app: &axum::Router, signer: &pubky::PubkySigner) -> serde_json::Value {
     let (st, started) = call(app, "POST", "/v1/auth/pubky/start").await;
     assert_eq!(st, StatusCode::OK, "{started}");
+    approve_and_poll(app, signer, &started).await
+}
+
+/// Approves a started sign-in as `signer` and polls until it ends.
+async fn approve_and_poll(
+    app: &axum::Router,
+    signer: &pubky::PubkySigner,
+    started: &serde_json::Value,
+) -> serde_json::Value {
     signer
         .approve_auth(started["url"].as_str().unwrap())
         .await
@@ -679,8 +688,8 @@ async fn owner_with_signer(app: &axum::Router, api: &str) -> pubky::PubkySigner 
 }
 
 /// TASK-login-ux: the owner logs in with Pubky Ring and gets a browser session of their own,
-/// which Log out ends (the API token stays); someone else is refused with both names; a log in
-/// while the node's session lacks folders renews it.
+/// which Log out ends (the API token stays); someone else is refused with both names; while the
+/// node's session lacks folders, only a log in the owner's page asks to renew asks for them.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_owner_logs_in_and_out_and_a_wrong_identity_is_named() {
     let Some(ep) = bundled() else {
@@ -720,6 +729,20 @@ async fn the_owner_logs_in_and_out_and_a_wrong_identity_is_named() {
     let (st, _) = call_auth(&app, "GET", "/v1/me", API, None).await;
     assert_eq!(st, StatusCode::OK);
 
+    // While the node has no identity loaded (its homeserver didn't answer at start), no browser
+    // session is the owner; the API token is. Loaded again, the owner's session works again
+    let v = ring_sign_in(&app, &owner).await;
+    let session = v["token"].as_str().unwrap().to_string();
+    let loaded = s.sync_handle().unwrap();
+    s.set_sync(None);
+    let (st, _) = call_auth(&app, "GET", "/v1/me", &session, None).await;
+    assert_eq!(st, StatusCode::UNAUTHORIZED);
+    let (st, _) = call_auth(&app, "GET", "/v1/me", API, None).await;
+    assert_eq!(st, StatusCode::OK);
+    s.set_sync(Some(loaded));
+    let (st, _) = call_auth(&app, "GET", "/v1/me", &session, None).await;
+    assert_eq!(st, StatusCode::OK, "the owner's own session stays");
+
     // Another identity: refused, saying who approved and whose node it is
     let stranger = Pubky::new().unwrap().signer(Keypair::random());
     let (_, inv) = call_auth(
@@ -753,13 +776,32 @@ async fn the_owner_logs_in_and_out_and_a_wrong_identity_is_named() {
         "{v}"
     );
 
-    // The node's session lacks folders (the homeserver refused one): the log in asks for them, and
-    // the owner's approval renews the node's session
+    // The node's session lacks folders (the homeserver refused one). A plain log in (anyone's,
+    // a listener's QR scan too) still only reads: Ring never asks them for their homeserver
     s.sync_handle().unwrap().note_refusal();
     let (_, started) = call(&app, "POST", "/v1/auth/pubky/start").await;
+    assert_eq!(started["renews"], false, "{started}");
+    let caps = param(started["url"].as_str().unwrap(), "caps").unwrap();
+    assert!(!caps.contains(":rw"), "{caps}");
+    let v = approve_and_poll(&app, &owner, &started).await;
+    assert_eq!(v["role"], "owner", "{v}");
+    let (_, pk) = call_auth(&app, "GET", "/v1/pubky", API, None).await;
+    assert_eq!(pk["needs_resign"], true, "nothing renewed: {pk}");
+    // The owner's page asks for the renewal: the log in asks for the folders, and the owner's
+    // approval renews the node's session
+    let (st, started) = call_json(
+        &app,
+        "POST",
+        "/v1/auth/pubky/start",
+        serde_json::json!({"renew": true}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{started}");
     assert_eq!(started["renews"], true, "{started}");
     assert_eq!(started["owner_face"]["id"], owner_key, "{started}");
-    let v = ring_sign_in(&app, &owner).await;
+    let caps = param(started["url"].as_str().unwrap(), "caps").unwrap();
+    assert!(caps.contains("/priv/pubky.music/vault/:rw"), "{caps}");
+    let v = approve_and_poll(&app, &owner, &started).await;
     assert_eq!(v["role"], "owner", "{v}");
     let (_, pk) = call_auth(&app, "GET", "/v1/pubky", API, None).await;
     assert_eq!(pk["needs_resign"], false, "{pk}");
