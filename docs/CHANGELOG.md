@@ -4,6 +4,10 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-10-31
+
+- **Pause stops a Chromecast, an MPD server and a group of devices at once too.** Like a UPnP renderer or BluOS player before, they went on with the seconds of stream they had buffered (about 5 s). A Cast device now gets its own media PAUSE and PLAY. One that says it plays on after PAUSE, or can't pause the live stream, is stopped for the pause (and from then on at once) and started again from where it was heard; one that is only slow to answer is left paused. Nothing loads and plays again by itself while paused (after a media error or a reconnect), and a resume counts only once the receiver plays again. MPD gets `pause 1` and `pause 0`, the latter only while MPD still holds the node's stream, so another client's song never starts. If it doesn't (it dropped the stream during a long pause, someone picked something else, or the pause wasn't confirmed), it starts again from where it was heard. A group pauses every member with its own device's command, all at once, so the group falls silent together. If any member can't carry on from its buffer (a sound card next to a BluOS player, a Cast receiver or UPnP renderer stopped for the pause, a Cast receiver whose media failed meanwhile), no member resumes and the group starts again from where it was heard, so the members stay in step.
+
 ### 2026-10-30
 
 - **An AcoustID key AcoustID refuses no longer turns fingerprinting off without a word.** Saving a key checks it with AcoustID first, and one it refuses isn't saved: you get a plain message instead. A run whose key AcoustID refuses stops fingerprinting at the first refusal (nothing more is decoded) and still matches the songs by title and artist. Settings says the key was refused and shows the key field to enter a new one. A new key saved during a run is not reported as refused because the run's old key was, and that run still stops fingerprinting with its old key. Without a key, songs are no longer decoded for nothing.

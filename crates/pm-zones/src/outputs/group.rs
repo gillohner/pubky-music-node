@@ -17,6 +17,10 @@
 //!   at most once per [`NUDGE_EVERY_MS`], only beyond [`NUDGE_DEADBAND_MS`]
 //!   for a few seconds, and skipping at most [`NUDGE_SKIP_MAX_MS`] at once:
 //!   a frame slipped into their stream would be heard seconds later.
+//! * **Pause**: every member pauses with its own sink's pause, all at once (a member that pauses
+//!   its device waits for it), so the group falls silent together. When every member held its
+//!   buffer they all carry on from it; when only some did, the resume is an error and the zone
+//!   opens the group again from what was heard, so the members start in step.
 //! * **Drift monitoring**: each member's audible position (frames written
 //!   minus frames still queued, minus pre-roll and slips) is compared with
 //!   the leader's and reported through [`AudioSink::members`].
@@ -282,6 +286,7 @@ impl Output for GroupOutput {
             correct: self.drift_correction && fmt.kind == SampleKind::Pcm,
             warmup_frames: ms_to_frames(fmt, WARMUP_MS),
             deadband_frames: ms_to_frames(fmt, DEADBAND_MS) as i64,
+            paused: None,
         };
         g.preroll()?;
         Ok(Box::new(g))
@@ -414,6 +419,8 @@ pub struct GroupSink {
     correct: bool,
     warmup_frames: u64,
     deadband_frames: i64,
+    /// Paused: whether each member held its buffer.
+    paused: Option<Vec<bool>>,
 }
 
 /// `block` with its last frame repeated `extra` times.
@@ -453,6 +460,39 @@ fn without_tail(block: &AudioBlock, cut: usize) -> AudioBlock {
 }
 
 impl GroupSink {
+    /// After a flush: held members wait again (the next writes start them together), and drift
+    /// is measured afresh.
+    fn restart(&mut self) {
+        self.start_pending = self.held;
+        self.since_start = 0;
+        let leader = self.members.first().map(|m| m.audible()).unwrap_or(0);
+        self.nudge_from = leader + ms_to_frames(self.fmt, NUDGE_SETTLE_MS) as i64;
+        for m in self.members.iter_mut() {
+            m.drift_avg = None;
+            m.beyond = None;
+        }
+    }
+
+    /// `f` on every member's sink at once, one thread each (a member that tells its device waits
+    /// for it), in member order. Every member is tried, whatever the others answer.
+    fn each_at_once<T: Send>(
+        &mut self,
+        f: impl Fn(&mut dyn AudioSink) -> Result<T, SinkError> + Sync,
+    ) -> Vec<Result<T, SinkError>> {
+        let f = &f;
+        std::thread::scope(|scope| {
+            let running: Vec<_> = self
+                .members
+                .iter_mut()
+                .map(|m| scope.spawn(move || f(m.sink.as_mut())))
+                .collect();
+            running
+                .into_iter()
+                .map(|h| h.join().unwrap_or_else(|p| std::panic::resume_unwind(p)))
+                .collect()
+        })
+    }
+
     /// Start held members together once each has `SYNC_START_MS` buffered.
     fn maybe_start(&mut self) -> Result<(), SinkError> {
         if !self.start_pending || self.since_start < ms_to_frames(self.fmt, SYNC_START_MS) {
@@ -568,16 +608,52 @@ impl AudioSink for GroupSink {
                 first_err.get_or_insert(e);
             }
         }
-        // Held members wait again; the next writes start them together.
-        self.start_pending = self.held;
-        self.since_start = 0;
-        let leader = self.members.first().map(|m| m.audible()).unwrap_or(0);
-        self.nudge_from = leader + ms_to_frames(self.fmt, NUDGE_SETTLE_MS) as i64;
-        for m in self.members.iter_mut() {
-            m.drift_avg = None;
-            m.beyond = None;
-        }
+        self.paused = None;
+        self.restart();
         first_err.map_or(Ok(()), Err)
+    }
+
+    /// Every member's own pause, at once. True when any member holds its buffer.
+    fn pause(&mut self) -> Result<bool, SinkError> {
+        let held = self
+            .each_at_once(|s| s.pause())
+            .into_iter()
+            .collect::<Result<Vec<bool>, SinkError>>()?;
+        if !held.contains(&true) {
+            // Every member dropped what it had queued, as a flush
+            self.restart();
+            return Ok(false);
+        }
+        self.paused = Some(held);
+        Ok(true)
+    }
+
+    /// Every member held its buffer and can carry on from it (each asked at once). When only
+    /// some can, they would play seconds of it while the others start after it.
+    fn ready_to_resume(&mut self) -> Result<(), SinkError> {
+        let Some(held) = &self.paused else {
+            return Ok(());
+        };
+        if held.contains(&false) {
+            return Err(SinkError::Device(
+                "some of the group's members dropped their buffer for the pause; starting the group again in step"
+                    .into(),
+            ));
+        }
+        self.each_at_once(|s| s.ready_to_resume()).into_iter().collect()
+    }
+
+    /// Carry on, all at once, only once every member can ([`Self::ready_to_resume`]): else an
+    /// error before any member plays, so the zone opens the group again from what was heard and
+    /// the members start in step.
+    fn resume(&mut self) -> Result<(), SinkError> {
+        if self.paused.is_none() {
+            return Ok(());
+        }
+        let ready = self.ready_to_resume();
+        self.paused = None;
+        ready?;
+        self.each_at_once(|s| s.resume()).into_iter().collect()
     }
 
     fn drain(&mut self) -> Result<(), SinkError> {
@@ -1110,5 +1186,187 @@ mod tests {
         assert_eq!(frames_to_ms(fmt, 5760), 120);
         let dsd = AudioFormat::dsd(AudioFormat::DSD64_RATE, 2);
         assert_eq!(ms_to_frames(dsd, 1000), AudioFormat::DSD64_RATE as u64 / 8);
+    }
+
+    /// A member that logs its own pause and resume; its pause takes `delay` (a device's answer)
+    /// and says whether it holds its buffer.
+    struct Pausing {
+        id: &'static str,
+        holds: bool,
+        /// Can carry on from its buffer (a Cast receiver stopped for the pause can't).
+        ready: bool,
+        delay: std::time::Duration,
+        log: Arc<std::sync::Mutex<Vec<String>>>,
+        caps: OutputCaps,
+    }
+
+    impl Pausing {
+        fn new(id: &'static str, holds: bool, log: &Arc<std::sync::Mutex<Vec<String>>>) -> Arc<Self> {
+            Arc::new(Self {
+                id,
+                holds,
+                ready: true,
+                delay: std::time::Duration::from_millis(300),
+                log: log.clone(),
+                caps: OutputCaps::unlimited(),
+            })
+        }
+    }
+
+    struct PausingSink {
+        fmt: AudioFormat,
+        out: Arc<Pausing>,
+    }
+
+    #[async_trait]
+    impl Output for Arc<Pausing> {
+        fn id(&self) -> OutputId {
+            OutputId::new("test", self.id)
+        }
+        fn name(&self) -> String {
+            self.id.into()
+        }
+        fn caps(&self) -> &OutputCaps {
+            &self.caps
+        }
+        async fn open(&self, fmt: AudioFormat) -> Result<Box<dyn AudioSink>, SinkError> {
+            Ok(Box::new(PausingSink {
+                fmt,
+                out: self.clone(),
+            }))
+        }
+    }
+
+    impl AudioSink for PausingSink {
+        fn format(&self) -> AudioFormat {
+            self.fmt
+        }
+        fn write(&mut self, _: &AudioBlock) -> Result<(), SinkError> {
+            Ok(())
+        }
+        fn buffer_level(&self) -> BufferLevel {
+            BufferLevel {
+                queued_frames: 0,
+                capacity_frames: 0,
+            }
+        }
+        fn flush(&mut self) -> Result<(), SinkError> {
+            Ok(())
+        }
+        fn drain(&mut self) -> Result<(), SinkError> {
+            Ok(())
+        }
+        fn pause(&mut self) -> Result<bool, SinkError> {
+            std::thread::sleep(self.out.delay);
+            self.out
+                .log
+                .lock()
+                .unwrap()
+                .push(format!("{} pause", self.out.id));
+            Ok(self.out.holds)
+        }
+        fn ready_to_resume(&mut self) -> Result<(), SinkError> {
+            if self.out.ready {
+                Ok(())
+            } else {
+                Err(SinkError::Device(format!("{} was stopped", self.out.id)))
+            }
+        }
+        fn resume(&mut self) -> Result<(), SinkError> {
+            self.ready_to_resume()?;
+            self.out
+                .log
+                .lock()
+                .unwrap()
+                .push(format!("{} resume", self.out.id));
+            Ok(())
+        }
+        fn frames_written(&self) -> u64 {
+            0
+        }
+    }
+
+    /// Pause reaches every member with its own command (a group only stopped feeding them
+    /// before, and a Cast or MPD member played out its buffer), all at once: the group falls
+    /// silent together, not one device after another.
+    #[tokio::test]
+    async fn each_member_pauses_with_its_own_command_at_once() {
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let g = GroupOutput::new(
+            "g",
+            vec![
+                Arc::new(Pausing::new("cast", true, &log)),
+                Arc::new(Pausing::new("mpd", true, &log)),
+            ],
+        )
+        .unwrap();
+        let mut sink = g.open(AudioFormat::pcm(48_000, 16, 2)).await.unwrap();
+        let t = std::time::Instant::now();
+        assert!(sink.pause().unwrap(), "both hold their buffer");
+        assert!(
+            t.elapsed() < std::time::Duration::from_millis(550),
+            "{:?}",
+            t.elapsed()
+        );
+        sink.resume().unwrap();
+        let mut seen = log.lock().unwrap().clone();
+        seen[..2].sort();
+        seen[2..].sort();
+        assert_eq!(seen, ["cast pause", "mpd pause", "cast resume", "mpd resume"]);
+    }
+
+    /// Only some members held their buffer: they would play it while the others start after
+    /// it, so the resume is an error and the zone opens the group again in step.
+    #[tokio::test]
+    async fn a_group_where_only_some_members_held_is_opened_again() {
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let g = GroupOutput::new(
+            "g",
+            vec![
+                Arc::new(Pausing::new("bluos", true, &log)),
+                Arc::new(Pausing::new("card", false, &log)),
+            ],
+        )
+        .unwrap();
+        let mut sink = g.open(AudioFormat::pcm(48_000, 16, 2)).await.unwrap();
+        assert!(sink.pause().unwrap());
+        let e = sink.resume().unwrap_err().to_string();
+        assert!(e.contains("starting the group again"), "{e}");
+        assert!(
+            !log.lock().unwrap().iter().any(|l| l.ends_with("resume")),
+            "{:?}",
+            log.lock().unwrap()
+        );
+    }
+
+    /// A member that held but can't carry on (a Cast receiver stopped for the pause) fails the
+    /// group's resume before any member plays: the others don't play a blip of their buffer
+    /// before the group starts again.
+    #[tokio::test]
+    async fn no_member_resumes_when_one_cannot_carry_on() {
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let stopped = Arc::new(Pausing {
+            id: "cast",
+            holds: true,
+            ready: false,
+            delay: std::time::Duration::ZERO,
+            log: log.clone(),
+            caps: OutputCaps::unlimited(),
+        });
+        let g = GroupOutput::new(
+            "g",
+            vec![Arc::new(Pausing::new("mpd", true, &log)), Arc::new(stopped)],
+        )
+        .unwrap();
+        let mut sink = g.open(AudioFormat::pcm(48_000, 16, 2)).await.unwrap();
+        assert!(sink.pause().unwrap());
+        assert!(sink.ready_to_resume().is_err());
+        let e = sink.resume().unwrap_err().to_string();
+        assert!(e.contains("cast was stopped"), "{e}");
+        assert!(
+            !log.lock().unwrap().iter().any(|l| l.ends_with("resume")),
+            "{:?}",
+            log.lock().unwrap()
+        );
     }
 }

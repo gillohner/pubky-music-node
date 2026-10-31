@@ -299,6 +299,7 @@ impl Output for UpnpOutput {
             refill,
             pause_results,
             pauses_pending: 0,
+            pause_outcome: None,
         }))
     }
 
@@ -533,6 +534,8 @@ struct UpnpSink {
     pause_results: std::sync::mpsc::Receiver<Paused>,
     /// Pauses whose outcome hasn't been read.
     pauses_pending: usize,
+    /// How the last pause went, once read (see [`UpnpSink::read_pause_outcomes`]).
+    pause_outcome: Option<Paused>,
 }
 
 impl UpnpSink {
@@ -585,38 +588,35 @@ impl AudioSink for UpnpSink {
             if c.send(Control::Pause).is_ok() {
                 self.paused = true;
                 self.pauses_pending += 1;
+                self.pause_outcome = None;
                 self.inner.pause()?;
                 return Ok(true);
             }
         }
         self.inner.flush().map(|()| false)
     }
+    /// Whether the renderer held its buffer (a group asks before any member resumes): one stopped
+    /// for the pause can't carry on, nor one that refused Pause and Stop and played its buffer
+    /// out, which would play out of step with members that held theirs. (On its own it carries
+    /// on: the stream goes on from where it was.)
+    fn ready_to_resume(&mut self) -> Result<(), SinkError> {
+        self.read_pause_outcomes();
+        match self.pause_outcome.filter(|_| self.paused) {
+            Some(Paused::Stopped) => Err(stopped_for_pause()),
+            Some(Paused::Refused) => Err(SinkError::Device(
+                "the renderer refused Pause and Stop and played its buffer out; starting it again".into(),
+            )),
+            _ => Ok(()),
+        }
+    }
     /// Play again; a refusal shows on the next write, as a refused start does.
     fn resume(&mut self) -> Result<(), SinkError> {
-        // How the pause went (a quick resume waits for it, briefly). Stopped for it: the renderer
-        // dropped its buffer, so the zone opens the output again from what was last heard
-        let deadline = std::time::Instant::now() + PAUSE_OUTCOME_WAIT;
-        let mut outcome = None;
-        while self.pauses_pending > 0 {
-            let left = deadline.saturating_duration_since(std::time::Instant::now());
-            match self.pause_results.recv_timeout(left) {
-                Ok(how) => {
-                    self.pauses_pending -= 1;
-                    outcome = Some(how);
-                }
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                    self.pauses_pending = 0;
-                    break;
-                }
-                // Still coming: the next resume reads it first
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
-            }
-        }
-        if outcome == Some(Paused::Stopped) {
+        // Stopped for the pause: the renderer dropped its buffer, so the zone opens the output
+        // again from what was last heard
+        self.read_pause_outcomes();
+        if self.pause_outcome.take() == Some(Paused::Stopped) {
             self.paused = false;
-            return Err(SinkError::Device(
-                "the renderer was stopped for the pause; starting it again".into(),
-            ));
+            return Err(stopped_for_pause());
         }
         if std::mem::take(&mut self.paused) {
             let sent = self
@@ -633,6 +633,33 @@ impl AudioSink for UpnpSink {
     fn frames_written(&self) -> u64 {
         self.inner.frames_written()
     }
+}
+
+impl UpnpSink {
+    /// How the pauses went, from the control thread (a quick resume waits for it, briefly); the
+    /// last one is kept in `pause_outcome`.
+    fn read_pause_outcomes(&mut self) {
+        let deadline = std::time::Instant::now() + PAUSE_OUTCOME_WAIT;
+        while self.pauses_pending > 0 {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            match self.pause_results.recv_timeout(left) {
+                Ok(how) => {
+                    self.pauses_pending -= 1;
+                    self.pause_outcome = Some(how);
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    self.pauses_pending = 0;
+                    break;
+                }
+                // Still coming: the next resume reads it first
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
+            }
+        }
+    }
+}
+
+fn stopped_for_pause() -> SinkError {
+    SinkError::Device("the renderer was stopped for the pause; starting it again".into())
 }
 
 impl Drop for UpnpSink {
@@ -675,16 +702,18 @@ mod tests {
 
     /// [`fake_renderer`] that takes `stop` to answer Stop.
     fn fake_renderer_slow(stop: std::time::Duration) -> (String, Arc<Mutex<Vec<String>>>) {
-        fake_renderer_with(stop, Arc::default(), Arc::default())
+        fake_renderer_with(stop, Arc::default(), Arc::default(), Arc::default())
     }
 
     /// [`fake_renderer_slow`] that refuses the next `refuse_play` Plays (UPnP error, HTTP 500)
-    /// and, with `ignores_pause`, answers Pause but plays on (as a Linn does on a live stream).
+    /// and, with `ignores_pause`, answers Pause but plays on (as a Linn does on a live stream);
+    /// with `refuses_pause`, it refuses Pause and Stop both (and plays on).
     /// It reports its transport state to GetTransportInfo, which is not logged.
     fn fake_renderer_with(
         stop: std::time::Duration,
         refuse_play: Arc<std::sync::atomic::AtomicUsize>,
         ignores_pause: Arc<std::sync::atomic::AtomicBool>,
+        refuses_pause: Arc<std::sync::atomic::AtomicBool>,
     ) -> (String, Arc<Mutex<Vec<String>>>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
@@ -737,6 +766,13 @@ mod tests {
                 } else {
                     format!("{action} {uri}")
                 });
+                if matches!(action.as_str(), "Pause" | "Stop")
+                    && refuses_pause.load(std::sync::atomic::Ordering::SeqCst)
+                {
+                    let body = "<s:Envelope><s:Body><s:Fault><detail><UPnPError><errorCode>701</errorCode></UPnPError></detail></s:Fault></s:Body></s:Envelope>";
+                    let _ = write!(s, "HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+                    continue;
+                }
                 if action == "Stop" {
                     std::thread::sleep(stop);
                     state = "STOPPED";
@@ -912,7 +948,12 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_play_refused_after_a_pause_sets_the_stream_again() {
         let refuse = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let (base, log) = fake_renderer_with(std::time::Duration::ZERO, refuse.clone(), Arc::default());
+        let (base, log) = fake_renderer_with(
+            std::time::Duration::ZERO,
+            refuse.clone(),
+            Arc::default(),
+            Arc::default(),
+        );
         let renderer = Renderer {
             udn: "uuid:refuse".into(),
             friendly_name: "Fake DSM".into(),
@@ -996,7 +1037,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_renderer_that_plays_on_after_pause_is_stopped_instead() {
         let ignores = Arc::new(std::sync::atomic::AtomicBool::new(true));
-        let (base, log) = fake_renderer_with(std::time::Duration::ZERO, Arc::default(), ignores);
+        let (base, log) =
+            fake_renderer_with(std::time::Duration::ZERO, Arc::default(), ignores, Arc::default());
         let renderer = Renderer {
             udn: "uuid:linnish".into(),
             friendly_name: "Fake Linn".into(),
@@ -1037,7 +1079,12 @@ mod tests {
             let mut sink = sink;
             wait(3);
             assert!(sink.pause().unwrap());
-            // Resumed at once: the resume waits for how the pause went
+            // Resumed at once: a group asks first, and both wait for how the pause went
+            let ready = sink.ready_to_resume();
+            assert!(
+                ready.is_err(),
+                "stopped for the pause, it can't carry on: {ready:?}"
+            );
             let err = sink.resume().unwrap_err();
             (sink, err)
         })
@@ -1416,5 +1463,51 @@ mod tests {
             "{:?}",
             started.elapsed()
         );
+    }
+
+    /// A renderer that refused both Pause and Stop played its buffer out: alone it carries on
+    /// from the stream, but a group can't count it as holding its buffer (it would play out of
+    /// step), so it isn't ready to resume and the group starts again in step.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_renderer_that_refused_the_pause_is_not_ready_to_resume_in_step() {
+        let refuses = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (base, log) = fake_renderer_with(
+            std::time::Duration::ZERO,
+            Arc::default(),
+            Arc::default(),
+            refuses.clone(),
+        );
+        let renderer = Renderer {
+            udn: "uuid:stubborn".into(),
+            friendly_name: "Stubborn TV".into(),
+            manufacturer: None,
+            model: None,
+            av_transport: format!("{base}/av"),
+            rendering_control: None,
+            connection_manager: None,
+            zone_group_topology: None,
+            location: format!("{base}/desc.xml"),
+        };
+        let out = UpnpOutput::new(
+            renderer,
+            Arc::new(PullOutput::controlled("stubborn")),
+            "http://node/v1/outputs/pull/stubborn/stream.wav".into(),
+        );
+        let sink = out.open(AudioFormat::pcm(44_100, 16, 2)).await.unwrap();
+        tokio::task::spawn_blocking(move || {
+            let mut sink = sink;
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            while log.lock().unwrap().len() < 3 && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            refuses.store(true, std::sync::atomic::Ordering::SeqCst);
+            assert!(sink.pause().unwrap());
+            let ready = sink.ready_to_resume();
+            assert!(ready.is_err(), "it played its buffer out: {ready:?}");
+            refuses.store(false, std::sync::atomic::Ordering::SeqCst);
+            drop(sink);
+        })
+        .await
+        .unwrap();
     }
 }
