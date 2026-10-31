@@ -57,6 +57,9 @@ pub struct IdentifyProgress {
     /// fingerprinted. Cleared when the key changes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acoustid_refused: Option<String>,
+    /// Why the run ended before its last song (the next run carries on from there).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stopped: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_at: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -203,7 +206,6 @@ pub(crate) async fn put_settings(
                 )));
             }
         }
-        s.identify.lock().expect("identify lock").acoustid_refused = None;
         {
             let lib = s.library.lock().expect("library poisoned");
             if k.is_empty() {
@@ -212,8 +214,12 @@ pub(crate) async fn put_settings(
                 lib.set_setting(KEY_SETTING, &k)?;
             }
         }
-        let mut a = s.acoustid.write().expect("acoustid lock");
-        a.api_key = if k.is_empty() { a.configured.clone() } else { k };
+        {
+            let mut a = s.acoustid.write().expect("acoustid lock");
+            a.api_key = if k.is_empty() { a.configured.clone() } else { k };
+        }
+        // After the key changed: a run's refusal of the old key, set meanwhile, is cleared too
+        s.identify.lock().expect("identify lock").acoustid_refused = None;
     }
     Ok(Json(status(&s)?))
 }
@@ -278,7 +284,7 @@ pub(crate) async fn start(
     tokio::spawn(async move {
         if let Err(e) = run(&st, retry).await {
             tracing::warn!("identify: {}", e.message);
-            st.identify.lock().expect("identify lock").last_error = Some(e.message);
+            st.identify.lock().expect("identify lock").stopped = Some(e.message);
         }
         let mut p = st.identify.lock().expect("identify lock");
         p.running = false;
@@ -387,25 +393,33 @@ pub async fn run(s: &Arc<NodeState>, retry: bool) -> Result<(), ApiError> {
         let _ = albums_done.send(());
         r
     };
-    tokio::try_join!(
+    let lanes = tokio::try_join!(
         album_lane,
         fingerprint_lane(s, client.as_ref(), from_albums, to_search, &found),
         search_lane(s, misses, after_albums, &found),
-    )?;
+    );
     let identified_now = found.into_inner().expect("found lock");
-    // "Write IDs into my files", when the owner turned it on.
+    // "Write IDs into my files", when the owner turned it on: also for the songs a run that
+    // stopped early identified before it stopped
     if !identified_now.is_empty() && write_ids_on(s) {
         let st = s.clone();
         let only = identified_now.clone();
-        let r = tokio::task::spawn_blocking(move || write_found_ids(&st, Some(&only)))
+        let written = tokio::task::spawn_blocking(move || write_found_ids(&st, Some(&only)))
             .await
-            .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))??;
-        tracing::info!(
-            written = r.written,
-            skipped = r.skipped.len(),
-            "identify: IDs written into files"
-        );
+            .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+            .and_then(|r| r);
+        match written {
+            Ok(r) => tracing::info!(
+                written = r.written,
+                skipped = r.skipped.len(),
+                "identify: IDs written into files"
+            ),
+            // The run's own error is the one to report
+            Err(e) if lanes.is_err() => tracing::warn!("identify: IDs not written: {}", e.message),
+            Err(e) => return Err(e),
+        }
     }
+    lanes?;
     Ok(())
 }
 
@@ -484,7 +498,7 @@ async fn album_lane(
                 })
                 .buffered(workers));
             while let Some((t, outcome)) = decided.next().await {
-                settle(s, &t, outcome, found)?;
+                settle(s, &t, outcome, found).await?;
             }
         } else {
             left = w.tracks;
@@ -728,7 +742,7 @@ async fn fingerprint_lane(
                 Outcome::Unknown | Outcome::Error(_) => {
                     let _ = misses.send(Miss { track: t, outcome });
                 }
-                o => settle(s, &t, o, found)?,
+                o => settle(s, &t, o, found).await?,
             }
         }
     }
@@ -748,45 +762,41 @@ async fn search_lane(
             Ok(c) if !c.is_empty() => Outcome::Suggest(c),
             _ => m.outcome,
         };
-        settle(s, &m.track, outcome, found)?;
+        settle(s, &m.track, outcome, found).await?;
     }
     Ok(())
 }
 
 /// Store what a song's ladder found and count it.
-fn settle(s: &NodeState, t: &Track, outcome: Outcome, found: &Mutex<Vec<i64>>) -> Result<(), ApiError> {
+async fn settle(s: &NodeState, t: &Track, outcome: Outcome, found: &Mutex<Vec<i64>>) -> Result<(), ApiError> {
     let id = t.id.map(|i| i.0).unwrap_or_default();
-    // The library first, then the count, never both at once: `status` holds the progress while
-    // it reads the library
-    {
-        let lib = s.library.lock().expect("library poisoned");
-        match &outcome {
-            Outcome::Identified {
-                recording,
-                release,
-                confidence,
-                acoustid,
-                detail,
-            } => {
-                lib.set_identity(
-                    id,
-                    &MusicUri::Recording { mbid: *recording },
-                    *confidence,
-                    acoustid.as_deref(),
-                )?;
-                lib.set_identify_state(id, "identified", Some(detail))?;
-                if let Some(r) = release {
-                    lib.set_identify_release(id, r)?;
-                }
-                found.lock().expect("found lock").push(id);
+    // The library first (waiting through a busy database), then the count, never both at once:
+    // `status` holds the progress while it reads the library
+    match &outcome {
+        Outcome::Identified {
+            recording,
+            release,
+            confidence,
+            acoustid,
+            detail,
+        } => {
+            let uri = MusicUri::Recording { mbid: *recording };
+            write_waiting(s, |lib| {
+                lib.set_identity(id, &uri, *confidence, acoustid.as_deref())
+            })
+            .await?;
+            write_waiting(s, |lib| lib.set_identify_state(id, "identified", Some(detail))).await?;
+            if let Some(r) = release {
+                write_waiting(s, |lib| lib.set_identify_release(id, r)).await?;
             }
-            Outcome::Suggest(c) => {
-                lib.add_suggestions(id, c)?;
-                lib.set_identify_state(id, "suggested", None)?;
-            }
-            Outcome::Unknown => lib.set_identify_state(id, "unknown", None)?,
-            Outcome::Error(e) => lib.set_identify_state(id, "error", Some(e))?,
+            found.lock().expect("found lock").push(id);
         }
+        Outcome::Suggest(c) => {
+            write_waiting(s, |lib| lib.add_suggestions(id, c)).await?;
+            write_waiting(s, |lib| lib.set_identify_state(id, "suggested", None)).await?;
+        }
+        Outcome::Unknown => write_waiting(s, |lib| lib.set_identify_state(id, "unknown", None)).await?,
+        Outcome::Error(e) => write_waiting(s, |lib| lib.set_identify_state(id, "error", Some(e))).await?,
     }
     let mut p = s.identify.lock().expect("identify lock");
     p.done += 1;
@@ -884,14 +894,21 @@ async fn lookup(
                 .await
                 .map_err(|e| e.to_string())?
                 .map_err(|e| format!("fingerprint: {e}"))?;
-            s.library
-                .lock()
-                .expect("library poisoned")
-                .save_fingerprint(&key, f.duration_secs, &f.fingerprint)
-                .map_err(|e| e.to_string())?;
+            // The cache saves work, nothing more: a busy library doesn't fail the song
+            if let Err(e) = s.library.lock().expect("library poisoned").save_fingerprint(
+                &key,
+                f.duration_secs,
+                &f.fingerprint,
+            ) {
+                tracing::debug!("identify: fingerprint not cached: {e}");
+            }
             (f.duration_secs, f.fingerprint)
         }
     };
+    // Refused while this song was fingerprinted
+    if refused() {
+        return Ok(Vec::new());
+    }
     let looked = client.lookup(&fp, duration).await;
     if let Some(a) = probe.as_mut() {
         **a = !matches!(looked, Err(pm_library::LibraryError::AcoustIdKey(_)));
@@ -899,17 +916,24 @@ async fn lookup(
     let (raw, results) = match looked {
         Ok(r) => r,
         Err(pm_library::LibraryError::AcoustIdKey(why)) => {
-            tracing::warn!("identify: AcoustID refused the key ({why}); nothing more is fingerprinted");
-            s.identify.lock().expect("identify lock").acoustid_refused = Some(why);
+            // The key saved meanwhile is a new one, checked when it was saved: not this refusal
+            let mut p = s.identify.lock().expect("identify lock");
+            if s.acoustid.read().expect("acoustid lock").api_key == client.api_key() {
+                tracing::warn!("identify: AcoustID refused the key ({why}); nothing more is fingerprinted");
+                p.acoustid_refused = Some(why);
+            }
             return Ok(Vec::new());
         }
         Err(e) => return Err(e.to_string()),
     };
-    s.library
+    if let Err(e) = s
+        .library
         .lock()
         .expect("library poisoned")
         .save_lookup(&key, &raw)
-        .map_err(|e| e.to_string())?;
+    {
+        tracing::debug!("identify: AcoustID answer not cached: {e}");
+    }
     Ok(results)
 }
 
@@ -921,6 +945,46 @@ fn acoustid_client(
     let mut cfg = pm_library::identify::AcoustIdConfig::new(key, s.user_agent());
     cfg.base_url = base_url.to_string();
     pm_library::identify::AcoustIdClient::new(cfg).map_err(ApiError::from)
+}
+
+/// How long the job waits for a write while another connection holds the library (a scan
+/// writing) before it stops; each try waits the connection's busy timeout first.
+const BUSY_PATIENCE: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// A library write that waits through a busy database instead of ending the run (it stopped at
+/// the first "database is locked" while a scan ran): tried again once the scan is done (or a
+/// second later, when no scan runs), for up to [`BUSY_PATIENCE`].
+async fn write_waiting<T>(
+    s: &NodeState,
+    write: impl Fn(&Library) -> pm_library::Result<T>,
+) -> Result<T, ApiError> {
+    let start = std::time::Instant::now();
+    loop {
+        let r = write(&s.library.lock().expect("library poisoned"));
+        match r {
+            Err(e) if e.is_busy() && start.elapsed() < BUSY_PATIENCE => {
+                tracing::info!("identify waits for the library (another writer holds it): {e}");
+                // Without the library meanwhile: a try holds it through SQLite's busy wait, and
+                // every request that reads the library would wait with it
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    if !s.is_scanning() || start.elapsed() >= BUSY_PATIENCE {
+                        break;
+                    }
+                }
+            }
+            Err(e) if e.is_busy() => {
+                return Err(ApiError::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    format!(
+                        "the library stayed busy for {} minutes (a scan writing?): {e}",
+                        BUSY_PATIENCE.as_secs() / 60
+                    ),
+                ))
+            }
+            r => return r.map_err(ApiError::from),
+        }
+    }
 }
 
 /// MusicBrainz recordings matching the tags' artist and title (± 2 s): suggestions only, ranked

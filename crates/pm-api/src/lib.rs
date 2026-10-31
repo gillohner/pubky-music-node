@@ -14158,6 +14158,54 @@ exec sleep 300
         assert!(b["progress"]["acoustid_refused"].is_null(), "{b}");
     }
 
+    /// Identify while another connection holds the library's write lock longer than the busy
+    /// timeout (a scan writing): the first song's state write is turned away, tried again and
+    /// the run carries on; no song ends in "error" because of the lock, and every song is checked.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn identify_waits_for_a_busy_library_and_checks_every_song() {
+        let dir = tempfile::tempdir().unwrap();
+        let music = dir.path().join("music");
+        std::fs::create_dir_all(&music).unwrap();
+        let s = state(dir.path(), None).await;
+        let mut ids = Vec::new();
+        for i in 1..=3 {
+            let path = music.join(format!("{i:02} song.wav"));
+            tone_wav(&path, 10 + i);
+            // Looked up before (an empty answer): the job's first write is the song's state
+            let key = Library::file_key(&path).unwrap();
+            let t = untagged_track(path, &format!("Song {i}"), "Band");
+            let lib = s.library.lock().unwrap();
+            lib.save_fingerprint(&key, 10 + i as u64, "AQfake").unwrap();
+            lib.save_lookup(&key, r#"{"status":"ok","results":[]}"#).unwrap();
+            ids.push(lib.upsert_track(&t).unwrap().0);
+        }
+        // Another connection takes the write lock and keeps it past the busy timeout
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+        let held = pm_library::db::BUSY_TIMEOUT + std::time::Duration::from_secs(1);
+        let other = {
+            let db = dir.path().join("lib.sqlite");
+            std::thread::spawn(move || {
+                let other = Library::open(&db).unwrap();
+                other.begin_batch().unwrap();
+                locked_tx.send(()).unwrap();
+                std::thread::sleep(held);
+                other.commit_batch().unwrap();
+            })
+        };
+        locked_rx.recv().unwrap();
+        identify::run(&s, false).await.unwrap();
+        other.join().unwrap();
+        let p = s.identify.lock().unwrap().clone();
+        assert_eq!((p.done, p.unknown, p.errors), (3, 3, 0), "{p:?}");
+        assert!(s
+            .library
+            .lock()
+            .unwrap()
+            .tracks_to_identify(false)
+            .unwrap()
+            .is_empty());
+    }
+
     /// Identify library as a ladder (owner, 2026-10-30: too slow on the NUC): a folder that is an
     /// album is identified from one MusicBrainz search and one release lookup, without decoding
     /// a file; only what doesn't fit (a bonus track, a compilation folder of mixed artists) is
@@ -14439,5 +14487,53 @@ exec sleep 300
         assert_eq!(st["progress"]["done"], 10, "{st}");
         assert_eq!(st["progress"]["unknown"], 3, "{st}");
         assert_eq!(st["progress"]["suggested"], 1, "{st}");
+    }
+
+    /// A key saved while a run looks songs up with the old one (#205 review): the run's refusal
+    /// of the old key is not reported against the new key, which AcoustID took when it was saved.
+    #[tokio::test]
+    async fn a_refusal_of_the_old_key_is_not_reported_for_a_key_saved_meanwhile() {
+        let node: Arc<std::sync::OnceLock<Arc<NodeState>>> = Default::default();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mock = {
+            let node = node.clone();
+            Router::new().route(
+                "/v2/lookup",
+                post(move |body: String| {
+                    let node = node.clone();
+                    async move {
+                        if body.contains("client=GoodKey") {
+                            return Json(serde_json::json!({"status": "ok", "results": []}));
+                        }
+                        // The owner saves a new key while the old one's lookup is under way
+                        let s = node.get().unwrap();
+                        s.acoustid.write().unwrap().api_key = "GoodKey".into();
+                        s.identify.lock().unwrap().acoustid_refused = None;
+                        Json(serde_json::json!({"status": "error",
+                            "error": {"code": 4, "message": "invalid API key"}}))
+                    }
+                }),
+            )
+        };
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let music = dir.path().join("music");
+        std::fs::create_dir_all(&music).unwrap();
+        let s = state(dir.path(), None).await;
+        node.set(s.clone()).ok().unwrap();
+        *s.acoustid.write().unwrap() = identify::AcoustIdSettings {
+            api_key: "OldKey1".into(),
+            base_url: format!("http://127.0.0.1:{port}"),
+            configured: String::new(),
+        };
+        let path = music.join("01 song.wav");
+        tone_wav(&path, 11);
+        let t = untagged_track(path, "Song 1", "Band");
+        s.library.lock().unwrap().upsert_track(&t).unwrap();
+        identify::run(&s, false).await.unwrap();
+        let p = s.identify.lock().unwrap().clone();
+        assert_eq!(p.acoustid_refused, None, "{p:?}");
+        assert_eq!(s.acoustid.read().unwrap().api_key, "GoodKey");
     }
 }

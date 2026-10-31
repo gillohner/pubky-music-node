@@ -428,6 +428,11 @@ mod client {
             })
         }
 
+        /// The application key this client sends.
+        pub fn api_key(&self) -> &str {
+            &self.config.api_key
+        }
+
         /// Look a fingerprint up. Returns the raw JSON (for the cache) and
         /// the parsed results.
         pub async fn lookup(
