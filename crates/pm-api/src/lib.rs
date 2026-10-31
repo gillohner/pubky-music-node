@@ -14082,6 +14082,105 @@ exec sleep 300
         assert_eq!(z["repeat"], "off");
     }
 
+    /// "In collections" (TASK-in-collections-client): the public collections Pinakes says hold
+    /// the page's link, as a count and the first few, each pointing at its shared-collection
+    /// page; absent while Pinakes doesn't list them. Nothing about bookmarks.
+    #[tokio::test]
+    async fn item_pages_name_the_public_collections_holding_them() {
+        let fixture = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../pm-pubky/tests/fixtures/pinakes/music/detail-tidal-track-bohemian.json"
+        ))
+        .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let ships = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        const A: &str = "gujx6qd8ksydh1makdphd3bxu351d9b8waqka8hfg6q7hnqkxexo";
+        const B: &str = "o3ftkuxjd9k6zgnc4hhbhbg5jusubr4zqyb1dtzi8hhm3hf5wbmy";
+        let mock = Router::new()
+            .route(
+                "/v1/info",
+                get({
+                    let ships = ships.clone();
+                    move || {
+                        let ships = ships.clone();
+                        async move {
+                            let limits = if ships.load(std::sync::atomic::Ordering::SeqCst) {
+                                serde_json::json!({"search": 50, "collections": 20})
+                            } else {
+                                serde_json::json!({"search": 50})
+                            };
+                            Json(serde_json::json!({"version": "test", "limits": limits}))
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/v1/resources/by-uri",
+                get(move || {
+                    let fixture = fixture.clone();
+                    async move { ([(header::CONTENT_TYPE, "application/json")], fixture) }
+                }),
+            )
+            .route(
+                "/v1/resources/{id}/collections",
+                get(|Path(id): Path<String>, axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>| async move {
+                    assert!(!id.is_empty());
+                    assert_eq!(q.get("limit").map(String::as_str), Some("3"), "{q:?}");
+                    Json(serde_json::json!({"items": [
+                        {"uri": format!("pubky://{A}/pub/social/v1/posts/0035WKVKQDHSM"), "author": A, "indexed_at": 1700000000000i64},
+                        {"uri": format!("pubky://{B}/pub/social/v1/posts/00351MT54YS9G"), "author": B, "indexed_at": 1690000000000i64},
+                        {"uri": "not a post", "author": ""},
+                    ], "total": 5}))
+                }),
+            );
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let pubky = pm_pubky::config::PmPubkyConfig {
+            pinakes_base: format!("http://127.0.0.1:{port}"),
+            nexus_base: format!("http://127.0.0.1:{port}/nexus"),
+            user_agent_contact: "test@example.org".into(),
+            ..Default::default()
+        };
+        let s = state_with(dir.path(), None, pubky).await;
+        s.set_contact("test@example.org").unwrap();
+        let app = router(s.clone());
+        let id = discover::page_id("https://tidal.com/track/534050211");
+        // Pinakes without the route: no row at all (the page never says "0 collections")
+        let (st, v) = call(&app, "GET", &format!("/v1/item/song/{id}/extras"), None).await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        assert!(v.get("collections").is_none(), "{v}");
+        // The feature probe is cached: a fresh node sees the route
+        ships.store(true, std::sync::atomic::Ordering::SeqCst);
+        let dir2 = tempfile::tempdir().unwrap();
+        let pubky2 = pm_pubky::config::PmPubkyConfig {
+            pinakes_base: format!("http://127.0.0.1:{port}/"),
+            nexus_base: format!("http://127.0.0.1:{port}/nexus"),
+            user_agent_contact: "test@example.org".into(),
+            ..Default::default()
+        };
+        let s2 = state_with(dir2.path(), None, pubky2).await;
+        s2.set_contact("test@example.org").unwrap();
+        let app2 = router(s2.clone());
+        let (st, v) = call(&app2, "GET", &format!("/v1/item/song/{id}/extras"), None).await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        let c = &v["collections"];
+        assert_eq!(c["count"], 5, "{v}");
+        let items = c["items"].as_array().unwrap();
+        assert_eq!(items.len(), 2, "a line that is not a post is left out: {v}");
+        assert_eq!(items[0]["author"], A);
+        assert_eq!(items[0]["id"], "0035WKVKQDHSM");
+        assert_eq!(items[0]["mine"], false, "no identity here");
+        assert!(
+            items[0].get("name").is_none(),
+            "no homeserver to read the name from: {v}"
+        );
+        assert!(
+            !v.to_string().contains("bookmark"),
+            "nothing about bookmarks: {v}"
+        );
+    }
+
     #[tokio::test]
     async fn item_pages_list_similar_music_from_the_library() {
         let dir = tempfile::tempdir().unwrap();

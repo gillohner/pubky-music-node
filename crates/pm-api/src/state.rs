@@ -154,6 +154,9 @@ pub struct NodeState {
     pub login: tokio::sync::Mutex<Option<pm_pubky::homeserver::LoginFlow>>,
     /// Bulk uploads to the homeserver's private storage, by job id (files.rs).
     pub upload_jobs: std::sync::Mutex<std::collections::HashMap<String, crate::types::UploadProgress>>,
+    /// What the Pinakes in use ships (the names of its `/v1/info` limits), asked at most every
+    /// ten minutes (`home::pinakes_limits`).
+    pub pinakes_caps: std::sync::Mutex<Option<(std::time::Instant, Vec<String>)>>,
     /// Controller sign-ins in progress: id → (flow, started, who asked: `lib::login_origin`).
     pub controller_logins: tokio::sync::Mutex<
         std::collections::HashMap<String, (pm_pubky::homeserver::LoginFlow, std::time::Instant, String)>,
@@ -417,6 +420,7 @@ impl NodeState {
             controller_logins: tokio::sync::Mutex::new(std::collections::HashMap::new()),
             renewals: Default::default(),
             upload_jobs: Default::default(),
+            pinakes_caps: Default::default(),
             events,
             sources_off,
             sync: Mutex::new(None),

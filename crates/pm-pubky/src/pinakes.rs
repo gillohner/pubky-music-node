@@ -422,6 +422,28 @@ pub struct GroupDetail {
     pub curated: Option<bool>,
 }
 
+/// A public collection post that holds a link (`/v1/resources/{id}/collections`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct CollectionRef {
+    /// The post's `pubky://` URI.
+    pub uri: String,
+    /// The author's public key (z32).
+    #[serde(default)]
+    pub author: String,
+}
+
+/// One page of [`CollectionRef`]s.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct CollectionsPage {
+    #[serde(default, alias = "collections")]
+    pub items: Vec<CollectionRef>,
+    /// How many hold it in all, when Pinakes says (else the page's length).
+    #[serde(default, alias = "count")]
+    pub total: Option<u64>,
+    #[serde(default)]
+    pub next_cursor: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InfoCounts {
     pub resources: i64,
@@ -736,6 +758,32 @@ impl PinakesClient {
                 }
             }
             Err(e) => Err(e),
+        }
+    }
+
+    /// The public collections that hold a resource's links (`GET /v1/resources/{id}/collections`,
+    /// Pinakes TASK-in-collections): newest first, the viewer's own first when `viewer` is given.
+    /// A bare list is taken as the page too.
+    pub async fn resource_collections(
+        &self,
+        id: &str,
+        viewer: Option<&str>,
+        limit: usize,
+    ) -> Result<CollectionsPage, PinakesError> {
+        let lim = limit.to_string();
+        let mut q = vec![("limit", lim.as_str())];
+        if let Some(v) = viewer {
+            q.push(("viewer", v));
+        }
+        let url = crate::nexus::with_query(&self.url(&format!("/resources/{id}/collections")), &q);
+        let resp = self.send(|| self.http.get(&url)).await?;
+        let v: Value = Self::json(resp).await?;
+        match v {
+            Value::Array(a) => Ok(CollectionsPage {
+                items: serde_json::from_value(Value::Array(a)).unwrap_or_default(),
+                ..Default::default()
+            }),
+            v => serde_json::from_value(v).map_err(|e| PinakesError::Decode(e.to_string())),
         }
     }
 

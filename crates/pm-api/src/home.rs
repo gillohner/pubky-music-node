@@ -455,26 +455,38 @@ async fn geocode(s: &NodeState, city: &str) -> Result<HomeLocation, ApiError> {
     })
 }
 
-/// What Pinakes ships beyond search (related items), checked from its
-/// `/v1/info` limits and cached ten minutes.
-pub(crate) async fn pinakes_has_related(s: &NodeState) -> bool {
-    static C: OnceLock<Mutex<Option<(Instant, bool)>>> = OnceLock::new();
-    let c = C.get_or_init(Default::default);
-    if let Some((at, v)) = *c.lock().expect("caps lock") {
+/// What Pinakes ships beyond search (related items, collections holding a link): the names of
+/// its `/v1/info` limits, kept on the node ten minutes.
+async fn pinakes_limits(s: &NodeState) -> Vec<String> {
+    if let Some((at, v)) = s.pinakes_caps.lock().expect("caps lock").as_ref() {
         if at.elapsed() < Duration::from_secs(600) {
-            return v;
+            return v.clone();
         }
     }
-    let Some(d) = s.discovery() else { return false };
+    let Some(d) = s.discovery() else { return Vec::new() };
     let v = match d.pinakes().info_raw().await {
         Ok(info) => info
             .get("limits")
-            .and_then(|l| l.as_object().map(|o| o.keys().any(|k| k.starts_with("related"))))
-            .unwrap_or(false),
-        Err(_) => false,
+            .and_then(|l| l.as_object().map(|o| o.keys().cloned().collect()))
+            .unwrap_or_default(),
+        Err(_) => Vec::new(),
     };
-    *c.lock().expect("caps lock") = Some((Instant::now(), v));
+    *s.pinakes_caps.lock().expect("caps lock") = Some((Instant::now(), v.clone()));
     v
+}
+
+/// Pinakes ships related items (`related*` among its limits).
+pub(crate) async fn pinakes_has_related(s: &NodeState) -> bool {
+    pinakes_limits(s).await.iter().any(|k| k.starts_with("related"))
+}
+
+/// Pinakes lists the public collections that hold a link (`collection*` among its limits;
+/// TASK-in-collections-client). Without it the item pages show no "In collections" row.
+pub(crate) async fn pinakes_has_collections(s: &NodeState) -> bool {
+    pinakes_limits(s)
+        .await
+        .iter()
+        .any(|k| k.starts_with("collection"))
 }
 
 /// A title as people compare songs: no "(Remastered 2011)", "- Live", "| Music Video".
