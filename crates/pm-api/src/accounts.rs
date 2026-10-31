@@ -174,6 +174,17 @@ pub fn keep_owner_sessions_of(s: &NodeState, owner: &str) -> Result<(), ApiError
     update(s, OWNER_SESSIONS, |all| all.retain(|t| t.key == owner))
 }
 
+/// Ends one owner's browser session (Log out); whether it was open. Also while the node has no
+/// identity loaded, when the session is otherwise refused: Log out must still work then.
+pub fn end_owner_session(s: &NodeState, token: &str) -> Result<bool, ApiError> {
+    let h = hash(token);
+    update(s, OWNER_SESSIONS, |all| {
+        let before = all.len();
+        all.retain(|t| t.hash != h);
+        all.len() < before
+    })
+}
+
 /// Ends every browser session of the owner (a new API token: the answer to a leak).
 pub fn end_owner_sessions(s: &NodeState) -> Result<(), ApiError> {
     update(s, OWNER_SESSIONS, Vec::clear)
@@ -405,13 +416,16 @@ pub(crate) async fn sign_out(
 ) -> ApiResult<serde_json::Value> {
     // The token the request was let in with, from the header or `?token=` (as the middleware read it)
     let token = crate::bearer(&headers, &query).unwrap_or_default();
-    let setting = match c.role {
-        Role::Listener => TOKENS,
-        Role::Owner if token.starts_with(OWNER_PREFIX) => OWNER_SESSIONS,
+    match c.role {
+        Role::Listener => {
+            let h = hash(&token);
+            update(&s, TOKENS, |all| all.retain(|t| t.hash != h))?;
+        }
+        Role::Owner if token.starts_with(OWNER_PREFIX) => {
+            end_owner_session(&s, &token)?;
+        }
         _ => return Ok(Json(serde_json::json!({"signed_out": true, "ended": false}))),
-    };
-    let h = hash(&token);
-    update(&s, setting, |all| all.retain(|t| t.hash != h))?;
+    }
     Ok(Json(serde_json::json!({"signed_out": true, "ended": true})))
 }
 
