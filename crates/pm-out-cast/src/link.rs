@@ -206,6 +206,17 @@ impl<S: AsyncRead + AsyncWrite + Unpin> CastLink<S> {
 
     /// LOAD a live stream URL with autoplay, showing `meta` on the device.
     pub async fn load(&mut self, url: &str, content_type: &str, meta: &crate::Meta) -> Result<(), CastError> {
+        self.load_with(url, content_type, meta, true).await
+    }
+
+    /// [`Self::load`], playing at once only with `autoplay` (else [`Self::play`] starts it).
+    pub async fn load_with(
+        &mut self,
+        url: &str,
+        content_type: &str,
+        meta: &crate::Meta,
+        autoplay: bool,
+    ) -> Result<(), CastError> {
         let transport = self
             .transport_id
             .clone()
@@ -215,7 +226,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> CastLink<S> {
             NS_MEDIA,
             json!({
                 "type": "LOAD",
-                "autoplay": true,
+                "autoplay": autoplay,
                 "currentTime": 0,
                 "media": {
                     "contentId": url,
@@ -229,6 +240,16 @@ impl<S: AsyncRead + AsyncWrite + Unpin> CastLink<S> {
         let v = self.wait_for("MEDIA_STATUS", "MEDIA_STATUS after LOAD").await?;
         self.media_session_id = v.pointer("/status/0/mediaSessionId").and_then(Value::as_u64);
         Ok(())
+    }
+
+    /// PLAY the loaded media.
+    pub async fn play(&mut self) -> Result<(), CastError> {
+        let (Some(transport), Some(m)) = (self.transport_id.clone(), self.media_session_id) else {
+            return Err(CastError::Protocol("nothing loaded".into()));
+        };
+        self.send(&transport, NS_MEDIA, json!({"type": "PLAY", "mediaSessionId": m}))
+            .await
+            .map(drop)
     }
 
     /// Stop the app (receiver STOP), which also ends the stream fetch.

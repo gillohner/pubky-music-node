@@ -276,8 +276,14 @@ impl AudioSink for CastSink {
         if !self.paused {
             return Ok(());
         }
-        if let Some(why) = cannot_carry_on(self.pause_outcome()) {
+        let how = self.pause_outcome();
+        if let Some(why) = cannot_carry_on(how) {
             return reopen(why);
+        }
+        // It played its buffer out: alone it carries on from the stream, but in a group it would
+        // play out of step with members that held theirs
+        if how == Some(Paused::Refused) {
+            return reopen("the receiver didn't pause and played its buffer out");
         }
         let status = self
             .session
@@ -438,5 +444,25 @@ mod tests {
             assert!(ready.is_err(), "{ctl_msg:?}: {ready:?}");
             drop(sink);
         }
+    }
+
+    /// A receiver that couldn't be paused played its buffer out: alone it carries on from the
+    /// stream, but it isn't ready to resume in step with group members that held theirs.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_receiver_that_wasnt_paused_is_not_ready_in_step() {
+        let fake = Arc::new(crate::session::tests::Fake::default());
+        fake.no_media_id.store(true, std::sync::atomic::Ordering::SeqCst);
+        let (session, _fake, _ctl) = crate::session::tests::setup_with(fake, Default::default()).await;
+        let mut sink = sink(session, "cast-refused").await;
+        let (ready, resumed, sink) = std::thread::spawn(move || {
+            assert!(sink.pause().unwrap());
+            let ready = sink.ready_to_resume();
+            (ready, sink.resume(), sink)
+        })
+        .join()
+        .unwrap();
+        assert!(ready.is_err(), "{ready:?}");
+        assert!(resumed.is_ok(), "alone it carries on: {resumed:?}");
+        drop(sink);
     }
 }
