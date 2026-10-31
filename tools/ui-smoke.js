@@ -193,21 +193,25 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   console.log('deep link /song/mb-…:', dh && dh.textContent, '|', (w2.document.querySelector('#main .notice') || {}).textContent || '');
   if (!dh) errors.push('deep link to a song page did not render');
   // Phone arrangement (Layout: Compact): tabs Home, Search, Library, Zones; Library opens the library
-  // with its sections as chips; the account button opens Settings; back returns.
+  // with its sections as chips; the account button's menu has Settings (and Log out); back returns.
   w2.localStorage.setItem('pm.layout', 'compact'); w2.dispatchEvent(new w2.Event('resize')); await sleep(600);
   const tabs = [...w2.document.querySelectorAll('.bnav')].filter((b) => !b.classList.contains('rail-only')).map((b) => b.dataset.bnav).join(',');
   w2.document.querySelector('[data-bnav="library"]').click(); await sleep(1500);
   const libChips = [...w2.document.querySelectorAll('#main .libnav [data-libnav]')].map((b) => b.dataset.libnav);
   const chip = w2.document.querySelector('#main .libnav [data-libnav="artists"]'); if (chip) chip.click(); await sleep(1500);
   const onArtists = w2.location.pathname === '/artists'; const libOn = w2.document.querySelector('[data-bnav="library"]').classList.contains('on');
-  w2.document.querySelector('#me').click(); await sleep(1500);
+  w2.document.querySelector('#me').click(); await sleep(1000);
+  const acct = [...w2.document.querySelectorAll('.popover.menu .pop-item')];
+  const acctItems = acct.map((b) => b.textContent.trim());
+  if (!acctItems.some((t) => /Log out/.test(t))) errors.push(`the account menu has no Log out (${acctItems.join(', ')})`);
+  (acct.find((b) => /Settings/.test(b.textContent)) || { click() {} }).click(); await sleep(1500);
   const onSettings = w2.location.pathname.startsWith('/settings');
   w2.history.back(); await sleep(1500);
   console.log('phone shell:', w2.document.documentElement.dataset.shell, '| tabs', tabs, '| chips', libChips.join(','), '| artists', onArtists, 'library tab on', libOn, '| settings', onSettings, '| back', w2.location.pathname);
   if (w2.document.documentElement.dataset.shell !== 'phone') errors.push('Layout: Compact does not give the phone arrangement');
   if (tabs !== 'home,search,library,zones') errors.push(`the phone tabs are ${tabs}`);
   if (!libChips.includes("albums") || !onArtists || !libOn) errors.push('the Library tab and its section chips do not work');
-  if (!onSettings || w2.location.pathname !== '/artists') errors.push('the account button does not open Settings, or back does not return');
+  if (!onSettings || w2.location.pathname !== '/artists') errors.push('the account menu does not open Settings, or back does not return');
   // ☰ does something at every width: desktop collapses the sidebar to icons and back.
   const shellEl = w.document.querySelector('.shell'); const menuBtn = w.document.querySelector('#menu');
   const sideBefore = shellEl.classList.contains('collapsed');

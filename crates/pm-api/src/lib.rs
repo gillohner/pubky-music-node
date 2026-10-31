@@ -809,6 +809,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
                 .route("/jamendo/callback", get(jamendo::callback))
                 .route("/v1/auth/pubky/start", post(controller_login_start))
                 .route("/v1/auth/pubky/poll", get(controller_login_poll))
+                .route("/v1/auth/pubky/owner/avatar", get(profiles::owner_avatar))
                 // A party guest's link: the page, and joining it (party.rs)
                 .route("/party/{code}", get(party_page))
                 .route("/v1/party/join", post(party::join))
@@ -892,6 +893,7 @@ async fn auth(
 ) -> Response {
     // The owner's API token, or a listener's personal one (accounts.rs)
     let Some(caller) = accounts::caller(&state, bearer(&headers, &query).as_deref()) else {
+        // The web page knows this answer (app.js NODE_REFUSED): it means "log in again"
         return ApiError::new(StatusCode::UNAUTHORIZED, "missing or wrong bearer token").into_response();
     };
     let refusal = match caller.role {
@@ -3053,33 +3055,55 @@ pub(crate) fn qr_svg(text: &str) -> Option<String> {
     ))
 }
 
-/// `POST /v1/auth/pubky/start`: a controller or browser asks to sign in with
-/// Pubky Ring. Only the node's owner (the identity the node itself is signed
-/// in as) is accepted; approval hands out the API token, so nothing is typed
-/// or pasted. 412 until the node has a Pubky session.
+/// What a Pubky Ring log in asks for: the node's own folders only when the owner's page asked for
+/// a renewal (`{renew: true}`, from its "Log out" on the notice) and the node does lack them.
+/// Anyone may start a log in, so a listener scanning the QR code is never asked to give the node
+/// write access to their own homeserver.
+fn login_capabilities(renew_asked: bool, needs_resign: bool) -> (bool, &'static str) {
+    if renew_asked && needs_resign {
+        (true, pm_pubky::homeserver::LOGIN_CAPABILITIES)
+    } else {
+        (false, pm_pubky::homeserver::CONTROLLER_CAPABILITIES)
+    }
+}
+
+/// `POST /v1/auth/pubky/start [{renew}]`: a controller or browser asks to log in with Pubky
+/// Ring. The node tells the owner and listeners apart by who approves; `renew` (the owner's own
+/// page, when the node needs new folders) also asks for the node's folders. 412 until the node
+/// has a Pubky session.
 async fn controller_login_start(
     State(s): State<Arc<NodeState>>,
     req: axum::extract::Request,
 ) -> ApiResult<ControllerLoginStarted> {
     // Anyone may start one (it hands the token out), so few at a time: from one address, and in all
     let origin = login_origin(&req);
+    let body = axum::body::to_bytes(req.into_body(), 1024)
+        .await
+        .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, e.to_string()))?;
+    let renew_asked = if body.iter().all(u8::is_ascii_whitespace) {
+        false
+    } else {
+        serde_json::from_slice::<ControllerLoginStart>(&body)
+            .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, e.to_string()))?
+            .renew
+    };
     // Held from the check to the insert: sign-ins started at once can't pass the caps together
     let mut logins = s.controller_logins.lock().await;
     logins.retain(|_, (_, at, _)| at.elapsed() < CONTROLLER_LOGIN_TTL);
     let Some(owner) = s.sync_handle().map(|h| h.z32().to_string()) else {
         return Err(ApiError::new(
             StatusCode::PRECONDITION_FAILED,
-            "the node is not signed in to Pubky yet: sign it in once (Settings → Pubky, or `pm-node login`)",
+            "the node has no Pubky session loaded: sign it in (Settings → Pubky, or `pm-node login`), or restart it once its homeserver answers",
         ));
     };
     let hs = s
         .homeserver()
         .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, e.to_string()))?;
+    // The node's own session lacks folders and the owner asked: this log in asks for them too, so
+    // the owner's approval renews it (no separate "sign in again")
+    let (renews, caps) = login_capabilities(renew_asked, s.sync_handle().is_some_and(|h| h.needs_resign()));
     let flow = hs
-        .start_login_with(
-            "pubky-music-controller",
-            pm_pubky::homeserver::CONTROLLER_CAPABILITIES,
-        )
+        .start_login_with("pubky-music-controller", caps)
         .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, e.to_string()))?;
     let url = flow.url().to_string();
     let id = tidal::random_urlsafe(24);
@@ -3098,16 +3122,21 @@ async fn controller_login_start(
     logins.insert(id.clone(), (flow, std::time::Instant::now(), origin));
     drop(logins);
     let qr_svg = qr_svg(&url);
+    let owner_face = profiles::login_face(&s, &owner, profiles::FaceFrom::Owner).await;
     Ok(Json(ControllerLoginStarted {
         id,
         url,
         owner,
+        owner_face,
+        node_name: s.name.clone(),
+        renews,
         qr_svg,
     }))
 }
 
-/// `GET /v1/auth/pubky/poll?id=`: `pending` until Ring approves; `ok` with
-/// the API token when the approver is the owner; `denied` otherwise.
+/// `GET /v1/auth/pubky/poll?id=`: `pending` until Ring approves; `ok` with a browser session
+/// of its own when the approver is the owner (renewing the node's session when this log in asked
+/// for its folders); `denied` otherwise, with who approved and whose node it is.
 async fn controller_login_poll(
     State(s): State<Arc<NodeState>>,
     Query(q): Query<std::collections::HashMap<String, String>>,
@@ -3115,31 +3144,17 @@ async fn controller_login_poll(
     let id = q.get("id").cloned().unwrap_or_default();
     let mut logins = s.controller_logins.lock().await;
     let Some((flow, at, _)) = logins.get(&id) else {
-        return Ok(Json(ControllerLoginStatus {
-            status: "expired".into(),
-            token: None,
-            user: None,
-            role: None,
-        }));
+        return Ok(Json(ControllerLoginStatus::of("expired")));
     };
     if at.elapsed() > CONTROLLER_LOGIN_TTL {
         logins.remove(&id);
-        return Ok(Json(ControllerLoginStatus {
-            status: "expired".into(),
-            token: None,
-            user: None,
-            role: None,
-        }));
+        return Ok(Json(ControllerLoginStatus::of("expired")));
     }
     match flow.poll().await {
-        Ok(None) => Ok(Json(ControllerLoginStatus {
-            status: "pending".into(),
-            token: None,
-            user: None,
-            role: None,
-        })),
+        Ok(None) => Ok(Json(ControllerLoginStatus::of("pending"))),
         Ok(Some(session)) => {
             logins.remove(&id);
+            drop(logins);
             let who = session.public_key().to_string();
             let owner = s.sync_handle().map(|h| h.z32().to_string()).unwrap_or_default();
             if who != owner {
@@ -3148,26 +3163,48 @@ async fn controller_login_poll(
                     let token = accounts::mint(&s, &who)?;
                     tracing::info!(%who, "listener signed in with Pubky Ring");
                     return Ok(Json(ControllerLoginStatus {
-                        status: "ok".into(),
                         token: Some(token),
                         user: Some(who),
                         role: Some("listener".into()),
+                        ..ControllerLoginStatus::of("ok")
                     }));
                 }
-                tracing::warn!(%who, %owner, "controller sign-in by a different identity refused");
+                let key = who.trim_start_matches("pubky");
+                let known = people::load(&s).people.iter().any(|p| p.key == key);
+                tracing::warn!(%who, %owner, known, "controller sign-in by a different identity refused");
+                // The approver may be anyone: their profile from the cache or Nexus only, never
+                // fetched from a homeserver they name
+                let (approver, owner_face) = tokio::join!(
+                    profiles::login_face(&s, &who, profiles::FaceFrom::Nexus),
+                    profiles::login_face(&s, &owner, profiles::FaceFrom::Owner)
+                );
                 return Ok(Json(ControllerLoginStatus {
-                    status: "denied".into(),
-                    token: None,
                     user: Some(who),
-                    role: None,
+                    reason: Some(if known { "no_access" } else { "not_owner" }.into()),
+                    approver: Some(approver),
+                    owner_face: Some(owner_face),
+                    ..ControllerLoginStatus::of("denied")
                 }));
             }
-            tracing::info!(%who, "controller signed in with Pubky Ring");
+            // A log in that asked for the node's folders, approved by the owner: the node's
+            // session is renewed with it
+            let granted = pm_pubky::homeserver::session_capabilities(&session);
+            let renew = s.sync_handle().is_some_and(|h| h.needs_resign())
+                && pm_pubky::homeserver::missing_capabilities(
+                    &granted,
+                    pm_pubky::homeserver::LOGIN_CAPABILITIES,
+                )
+                .is_empty();
+            if renew {
+                adopt_session(&s, session).await?;
+            }
+            let token = accounts::mint_owner(&s, &who)?;
+            tracing::info!(%who, renew, "controller signed in with Pubky Ring");
             Ok(Json(ControllerLoginStatus {
-                status: "ok".into(),
-                token: s.token(),
+                token: Some(token),
                 user: Some(who),
                 role: Some("owner".into()),
+                ..ControllerLoginStatus::of("ok")
             }))
         }
         Err(e) => {
@@ -3175,6 +3212,33 @@ async fn controller_login_poll(
             Err(ApiError::new(StatusCode::BAD_GATEWAY, e.to_string()))
         }
     }
+}
+
+/// The node signs in to Pubky with `session`: its secret goes to the configured file, sync
+/// starts with it, and the node record, settings and the first sync follow in the background.
+/// Returns the user's z32 key.
+async fn adopt_session(s: &Arc<NodeState>, session: pubky::PubkySession) -> Result<String, ApiError> {
+    let secret = pm_pubky::homeserver::export_session_secret(&session).await;
+    if let (Some(path), Some(secret)) = (&s.session_secret_path, &secret) {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        // Created 0600, never written first and made private after
+        if let Err(e) = imports::write_private(path, secret.as_bytes()) {
+            tracing::warn!(path = %path.display(), "cannot store the session secret: {e}");
+        }
+    }
+    let hs = s
+        .homeserver()
+        .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, e.to_string()))?;
+    let sync = Arc::new(sync::PubkySync::from_session(hs, session));
+    let user = sync.z32().to_string();
+    s.set_sync(Some(sync.clone()));
+    tracing::info!(user = %user, "pubky sign-in: session ready");
+    // "Signed in" now; the node record, settings and the first sync follow in the background
+    // (they took minutes, one request at a time, before the answer)
+    sync::first_sync_in_background(s, sync.clone());
+    Ok(user)
 }
 
 /// Poll the sign-in. When approved: the session is kept, its secret written
@@ -3207,26 +3271,7 @@ async fn pubky_login_poll(State(s): State<Arc<NodeState>>) -> ApiResult<LoginSta
         Ok(Some(session)) => {
             *guard = None;
             drop(guard);
-            let secret = pm_pubky::homeserver::export_session_secret(&session).await;
-            if let (Some(path), Some(secret)) = (&s.session_secret_path, &secret) {
-                if let Some(parent) = path.parent() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
-                // Created 0600, never written first and made private after
-                if let Err(e) = imports::write_private(path, secret.as_bytes()) {
-                    tracing::warn!(path = %path.display(), "cannot store the session secret: {e}");
-                }
-            }
-            let hs = s
-                .homeserver()
-                .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, e.to_string()))?;
-            let sync = Arc::new(sync::PubkySync::from_session(hs, session));
-            let user = sync.z32().to_string();
-            s.set_sync(Some(sync.clone()));
-            tracing::info!(user = %user, "pubky sign-in: session ready");
-            // "Signed in" now; the node record, settings and the first sync follow in the
-            // background (they took minutes, one request at a time, before the answer)
-            sync::first_sync_in_background(&s, sync.clone());
+            let user = adopt_session(&s, session).await?;
             Ok(Json(LoginStatus {
                 status: "signed_in".into(),
                 user: Some(user),
@@ -5279,6 +5324,85 @@ mod tests {
         // The owner's token is the owner
         let (_, me) = send("GET", "/v1/me".into(), "s3cret".into(), None).await;
         assert_eq!(me["role"], "owner");
+        // Log out with the API token ends nothing (apps keep it; the page forgets it)
+        let (st, v) = send("DELETE", "/v1/me/token".into(), "s3cret".into(), None).await;
+        assert_eq!((st, v["ended"].as_bool()), (StatusCode::OK, Some(false)), "{v}");
+        let (st, _) = send("GET", "/v1/me".into(), "s3cret".into(), None).await;
+        assert_eq!(st, StatusCode::OK);
+        // An owner's browser session (the Ring log in, Log out and the identity's own sessions
+        // are in tests/bundled_homeserver.rs). While the node has no identity loaded, none is the
+        // owner: an earlier owner's session can't come back when the node's own session isn't
+        // restored at start (Kimi review of #209); the API token still works
+        const OLD: &str = "o3ftkuxjd9k6zgnc4hhbhbg5jusubr4zqyb1dtzi8hhm3hf5wbmy";
+        const NEW: &str = "gujx6qd8ksydh1makdphd3bxu351d9b8waqka8hfg6q7hnqkxexo";
+        let session = accounts::mint_owner(&s, OLD).unwrap();
+        assert!(session.starts_with(accounts::OWNER_PREFIX));
+        let (st, v) = send("GET", "/v1/me".into(), session.clone(), None).await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED, "{v}");
+        assert_eq!(
+            v["error"], "missing or wrong bearer token",
+            "the page logs in again on exactly this"
+        );
+        let (st, _) = send("GET", "/v1/me".into(), "s3cret".into(), None).await;
+        assert_eq!(st, StatusCode::OK);
+        let (st, _) = send("GET", "/v1/me".into(), "pmo_madeup".into(), None).await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED);
+        // The node takes on another identity: the old owner's sessions are gone for good, the new
+        // owner's stay
+        let mine = accounts::mint_owner(&s, &format!("pubky{NEW}")).unwrap();
+        accounts::keep_owner_sessions_of(&s, &format!("pubky{NEW}")).unwrap();
+        let kept: Vec<String> = serde_json::from_str::<Vec<serde_json::Value>>(
+            &s.library
+                .lock()
+                .unwrap()
+                .get_setting("accounts.owner_sessions")
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap()
+        .iter()
+        .map(|t| t["key"].as_str().unwrap().to_string())
+        .collect();
+        assert_eq!(kept, [NEW], "{mine}");
+    }
+
+    #[tokio::test]
+    async fn the_log_in_screen_gets_names_and_small_pictures_inline() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), Some("s3cret")).await;
+        const ALICE: &str = "gujx6qd8ksydh1makdphd3bxu351d9b8waqka8hfg6q7hnqkxexo";
+        const BOB: &str = "o3ftkuxjd9k6zgnc4hhbhbg5jusubr4zqyb1dtzi8hhm3hf5wbmy";
+        let view = |id: &str, name: &str| {
+            serde_json::from_value::<pm_pubky::nexus::UserView>(serde_json::json!({
+                "details": {"id": id, "name": name, "image": format!("pubky://{id}/pub/pubky.app/files/1")}
+            }))
+            .unwrap()
+        };
+        profiles::cache_view(ALICE, Some(view(ALICE, "Alice")));
+        profiles::cache_view(BOB, Some(view(BOB, "Bob")));
+        let people = s.art_dir.join("people");
+        std::fs::create_dir_all(&people).unwrap();
+        let png = |n: usize| [&[0x89, b'P', b'N', b'G'][..], &vec![0u8; n]].concat();
+        std::fs::write(people.join(ALICE), png(100)).unwrap();
+        std::fs::write(people.join(BOB), png(300 * 1024)).unwrap();
+        // Someone who approved: name and a small picture inline (the screen has no token)
+        let a = profiles::login_face(&s, &format!("pubky{ALICE}"), profiles::FaceFrom::Nexus).await;
+        assert_eq!((a.id.as_str(), a.name.as_str()), (ALICE, "Alice"));
+        assert!(
+            a.avatar
+                .as_deref()
+                .is_some_and(|u| u.starts_with("data:image/png;base64,")),
+            "{a:?}"
+        );
+        // A big picture stays off the screen (initials instead)
+        let b = profiles::login_face(&s, BOB, profiles::FaceFrom::Nexus).await;
+        assert_eq!((b.name.as_str(), b.avatar), ("Bob", None));
+        // The owner's picture by its own address, not inline
+        let o = profiles::login_face(&s, ALICE, profiles::FaceFrom::Owner).await;
+        assert_eq!(o.avatar.as_deref(), Some(profiles::OWNER_AVATAR));
+        // Not a key: its short form, nothing looked up
+        let x = profiles::login_face(&s, "nonsense", profiles::FaceFrom::Nexus).await;
+        assert_eq!(x.avatar, None);
     }
 
     #[tokio::test]
@@ -8285,6 +8409,27 @@ mod tests {
         let (st, v) = call(&app, "GET", "/v1/auth/pubky/poll?id=nope", None).await;
         assert_eq!(st, StatusCode::OK, "{v}");
         assert_eq!(v["status"], "expired");
+    }
+
+    /// A log in asks for the node's folders only when the owner's page asks for a renewal and the
+    /// node lacks them: a listener scanning the QR code is never asked to give the node write
+    /// access to their own homeserver (Hermes review of #209, medium 1).
+    #[test]
+    fn only_the_owners_renewal_asks_for_the_nodes_folders() {
+        use pm_pubky::homeserver::{CONTROLLER_CAPABILITIES, LOGIN_CAPABILITIES};
+        assert_eq!(
+            login_capabilities(false, true),
+            (false, CONTROLLER_CAPABILITIES),
+            "the node needs folders, but nobody asked: a plain log in"
+        );
+        assert_eq!(
+            login_capabilities(true, false),
+            (false, CONTROLLER_CAPABILITIES),
+            "asked, but nothing to renew"
+        );
+        assert_eq!(login_capabilities(false, false), (false, CONTROLLER_CAPABILITIES));
+        assert_eq!(login_capabilities(true, true), (true, LOGIN_CAPABILITIES));
+        assert!(!CONTROLLER_CAPABILITIES.contains(":rw"), "a log in only reads");
     }
 
     /// Anyone may start a Pubky Ring sign-in, so few wait at once: six per address (IPv6 per

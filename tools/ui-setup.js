@@ -11,8 +11,14 @@
 //     app's players on a DAC), by
 //     kind, one kind at a time, says what a pick becomes, and doesn't offer one that shares no
 //     sample rate with the ones picked;
-//   * About: "Use a different token in this browser", the node's token set in the config, or
-//     replaced and shown once; the login dialog says where the token is;
+//   * About: Log out for this browser, the node's token set in the config, or replaced and shown
+//     once;
+//   * Log in / Log out: the account menu's Log out ends the session and shows the Log in screen;
+//     phones and tablets get Open in Pubky Ring first (QR on request), desktops the QR code; a
+//     wrong identity is named ("This node belongs to …"), someone without access is told to ask;
+//     Try again starts over and an approval logs in; an ended session comes back to Log in with
+//     "Your session ended"; the API token is the small alternative, with where to find it; the
+//     node's missing folders are a Log out line in Settings, not a banner on Home;
 //   * an item page credits Wikipedia's text and a Commons picture (source, licence, links), and
 //     redraws only About when it arrives in the background;
 //   * covers carry a provider badge (where it plays from: the library or the service) on tiles,
@@ -134,7 +140,7 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
     c = await ctx(); p = await c.newPage();
     await p.goto(BASE + '/settings/about');
     await p.waitForSelector('#logout');
-    check((await p.textContent('#logout')).trim() === 'Use a different token in this browser', 'the browser token button says what it does');
+    check((await p.textContent('#logout')).trim() === 'Log out', 'this browser has Log out');
     check(!(await p.$('#tokennew')) && /Set in the node’s config/.test(await p.textContent('#main')) && await p.locator('#main a[href*="troubleshooting.md"]').count() === 1, 'a config token: changed in the config, with the guide');
     await p.route(/\/v1\/node\/settings$/, async (r) => { if (r.request().method() !== 'GET') return r.continue(); const res = await r.fetch(); const j = await res.json(); return r.fulfill({ json: { ...j, token_replaceable: true } }); });
     let rotated = 0; await p.route(/\/v1\/node\/token$/, (r) => { rotated++; return r.fulfill({ json: { token: 'f'.repeat(64) } }); });
@@ -699,14 +705,131 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
       await api('PUT', '/node/settings', { dev_outputs: !!devBefore }).catch(() => {});
     }
 
-    // ---- The login dialog ----
-    c = await browser.newContext(); p = await c.newPage();
-    await p.goto(BASE + '/');
-    await p.waitForSelector('#login[open]');
-    const hint = await p.textContent('#login details');
-    check(/api-token/.test(hint) && /PM_TOKEN/.test(hint), 'the login dialog says where the token is');
-    check(await p.locator('#login a[href*="troubleshooting.md"]').count() === 1, 'and links the guide');
-    await c.close();
+    // ---- Log in / Log out (TASK-login-ux) ----
+    {
+      const OWNER_K = 'o'.repeat(52); const OTHER_K = 'b'.repeat(52);
+      const QR = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><rect width="10" height="10" fill="#fff"/></svg>';
+      let poll = { status: 'pending' }; let starts = 0; let logouts = 0; const startBodies = [];
+      // A context whose token (if any) is set once, so a Log out or a reload doesn't bring it back
+      const loginCtx = async (opts, token) => {
+        const cx = await browser.newContext(opts);
+        if (token) await cx.addInitScript((t) => { if (!sessionStorage.getItem('seeded')) { sessionStorage.setItem('seeded', '1'); localStorage.setItem('pm.token', t); localStorage.setItem('pm.zone', 'browser'); } }, token);
+        await cx.route(/\/v1\/auth\/pubky\/start$/, (r) => { starts++; startBodies.push(r.request().postData()); return r.fulfill({ json: { id: `flow${starts}`, url: 'pubkyauth:///?caps=/pub/pubky.app/:r&secret=c2VjcmV0&relay=https://relay.example/link', owner: OWNER_K, owner_face: { id: OWNER_K, name: 'Alice' }, node_name: 'CI node', renews: false, qr_svg: QR } }); });
+        await cx.route(/\/v1\/auth\/pubky\/poll/, (r) => r.fulfill({ json: poll }));
+        await cx.route(/\/v1\/me\/token$/, (r) => { logouts++; return r.continue(); });
+        return cx;
+      };
+      const before = (p, a, b) => p.evaluate(([x, y]) => { const ea = document.querySelector(x); const eb = document.querySelector(y); return !!(ea && eb && (ea.compareDocumentPosition(eb) & Node.DOCUMENT_POSITION_FOLLOWING)); }, [a, b]);
+
+      // Desktop: Log out from the account menu, back to the Log in screen with the QR code first
+      c = await loginCtx({ viewport: { width: 1280, height: 900 } }, TOKEN); p = await c.newPage();
+      await p.goto(BASE + '/');
+      check(await visible(p, '#me', 20000), 'the account button is on the desktop shell');
+      await p.waitForSelector('#main .section, #main .pagehead, #main h1', { timeout: 20000 }).catch(() => {});
+      await p.click('#me');
+      await p.locator('.popover.menu .pop-item', { hasText: 'Log out' }).click();
+      // Polled: Log out reloads the page, which a single wait doesn't outlive
+      const loginShown = async (ms) => { const end = Date.now() + ms; for (;;) { if (await p.isVisible('#loginpage').catch(() => false)) return true; if (Date.now() > end) return false; await p.waitForTimeout(200); } };
+      check(await loginShown(15000), 'Log out shows the Log in screen');
+      check(await waitText(p, '#loginwhy', 'You logged out.'), 'it says you logged out');
+      check(await p.evaluate(() => document.activeElement && document.activeElement.id === 'loginh'), 'the screen’s heading has the focus, so it is announced');
+      check(startBodies.length > 0 && startBodies.every((b) => !b || !JSON.parse(b).renew), 'a plain log in doesn’t ask for the node’s folders');
+      check(logouts === 1, 'the node was asked to end this browser’s session');
+      check(await p.evaluate(() => localStorage.getItem('pm.token') === null && localStorage.getItem('pm.zone') === null), 'the browser forgot the token and the account’s state');
+      check(!(await p.isVisible('.shell')) && !(await p.isVisible('#np')), 'no half of the app behind it');
+      check(await visible(p, '#loginbody .loginqr'), 'desktop: the QR code');
+      check(await before(p, '#loginbody .loginqr', '#loginring') && !(await p.$eval('#loginring', (e) => e.classList.contains('primary'))), 'desktop: QR first, Open in Pubky Ring a link below');
+      check(/^pubkyauth:/.test(await p.getAttribute('#loginring', 'href')), 'the link opens Pubky Ring');
+      check((await p.textContent('#loginh')).trim() === 'Log in to CI node', 'the screen names the node');
+      const hint = await p.textContent('#logintoken');
+      check(/api-token/.test(hint) && /PM_TOKEN/.test(hint) && await p.locator('#logintoken a[href*="troubleshooting.md"]').count() === 1, 'the API token stays as the alternative, saying where it is');
+      await p.click('#logintoken summary'); await p.fill('#tok', 'not-the-token'); await p.click('#tokform button[type=submit]');
+      check(await waitText(p, '#tokerr', 'The node doesn\u2019t take that token.') && await p.isVisible('#loginpage'), 'a wrong token is said on the screen');
+      await p.fill('#tok', TOKEN); await p.click('#tokform button[type=submit]');
+      check(await p.locator('#loginpage').waitFor({ state: 'hidden', timeout: 15000 }).then(() => true).catch(() => false) && await visible(p, '#me'), 'the right token logs in');
+      await c.close();
+
+      // A Log out the node didn't confirm: still logged in, saying why, with Try again
+      c = await loginCtx({ viewport: { width: 1280, height: 900 } }, TOKEN); p = await c.newPage();
+      let refusals = 1; const asked = [];
+      await c.route(/\/v1\/me\/token$/, (r) => (refusals-- > 0 ? r.fulfill({ status: 500, json: { error: 'database is locked' } }) : r.fallback()));
+      p.on('dialog', (d) => { asked.push(d.message()); return asked.length === 1 ? d.dismiss() : d.accept(); });
+      await p.goto(BASE + '/');
+      await visible(p, '#me', 20000);
+      await p.click('#me');
+      await p.locator('.popover.menu .pop-item', { hasText: 'Log out' }).click();
+      await p.waitForTimeout(800);
+      check(asked.length === 1 && /Couldn’t log out: database is locked\. You are still logged in\./.test(asked[0]) && /Try again/.test(asked[0]), `a failed Log out says why, with Try again (${asked[0]})`);
+      check(!(await p.isVisible('#loginpage')) && await p.evaluate((t) => localStorage.getItem('pm.token') === t, TOKEN), 'and the browser stays logged in');
+      await p.click('#me');
+      await p.locator('.popover.menu .pop-item', { hasText: 'Log out' }).click();
+      check(await loginShown(15000), 'once the node ends the session, Log in');
+      await c.close();
+
+      // Phone (and tablet): Open in Pubky Ring first, the QR code on request
+      for (const [w, h] of [[390, 844], [834, 1194]]) {
+        c = await loginCtx({ viewport: { width: w, height: h }, isMobile: true, hasTouch: true }); p = await c.newPage();
+        poll = { status: 'pending' };
+        await p.goto(BASE + '/');
+        check(await visible(p, '#loginring', 15000), `${w}: signed out, the Log in screen`);
+        check(await p.$eval('#loginbody', (b) => b.firstElementChild && b.firstElementChild.id === 'loginring') && await p.$eval('#loginring', (e) => e.classList.contains('primary')), `${w}: Open in Pubky Ring is the main button, first`);
+        check(!(await p.$('#loginbody .loginqr')), `${w}: no QR code until asked`);
+        await p.click('#loginqrbtn');
+        check(await visible(p, '#loginbody .loginqr'), `${w}: Show QR code shows it`);
+        check(await p.evaluate(() => document.documentElement.scrollWidth <= innerWidth), `${w}: nothing wider than the screen`);
+        if (w !== 390) { await c.close(); continue; }
+        // Another identity approved: said plainly, with both people, and Try again
+        poll = { status: 'denied', reason: 'not_owner', user: OTHER_K, approver: { id: OTHER_K, name: 'Bob' }, owner_face: { id: OWNER_K, name: 'Alice' } };
+        check(await waitText(p, '#loginrefused', 'This node belongs to Alice. You approved as Bob. Pick Alice in Pubky Ring and try again.'), 'a wrong identity is named: whose node, who approved, what to do');
+        check(await p.locator('#loginbody .loginwho .face').count() === 2 && await p.isVisible('#loginagain'), 'with both people and Try again');
+        poll = { status: 'pending' }; const s0 = starts;
+        await p.click('#loginagain');
+        check(await visible(p, '#loginring') && starts === s0 + 1, 'Try again starts a new log in');
+        poll = { status: 'denied', reason: 'no_access', user: OTHER_K, approver: { id: OTHER_K, name: 'Bob' }, owner_face: { id: OWNER_K, name: 'Alice' } };
+        check(await waitText(p, '#loginrefused', 'Bob doesn’t have access to the music here. Ask Alice to give you access.'), 'someone without music access is told to ask the owner');
+        poll = { status: 'pending' }; await p.click('#loginagain'); await p.waitForSelector('#loginring');
+        poll = { status: 'ok', token: TOKEN, role: 'owner', user: OWNER_K };
+        check(await p.locator('#loginpage').waitFor({ state: 'hidden', timeout: 15000 }).then(() => true).catch(() => false), 'an approval logs in by itself');
+        check(await visible(p, '#me') && await p.evaluate((t) => localStorage.getItem('pm.token') === t, TOKEN), 'and the app is there, with the session kept');
+        await c.close();
+      }
+
+      // A service refusing a sign-in (a 401 of its own) isn't the node refusing this browser
+      c = await loginCtx({ viewport: { width: 1280, height: 900 } }, TOKEN); p = await c.newPage();
+      await c.route(/\/v1\/health$/, (r) => r.fulfill({ status: 401, json: { error: 'ListenBrainz refused this token' } }));
+      await p.goto(BASE + '/'); await visible(p, '#me', 20000); await p.waitForTimeout(3000);
+      check(!(await p.isVisible('#loginpage')) && await p.evaluate((t) => localStorage.getItem('pm.token') === t, TOKEN), 'a service\u2019s 401 leaves you logged in');
+      await c.close();
+
+      // A session that ended: the same Log in screen, saying so
+      c = await loginCtx({ viewport: { width: 1280, height: 900 } }, 'pml_' + 'x'.repeat(43)); p = await c.newPage();
+      poll = { status: 'pending' };
+      await p.goto(BASE + '/');
+      check(await visible(p, '#loginpage', 20000), 'an ended session brings the Log in screen');
+      check(await waitText(p, '#loginwhy', 'Your session ended. Log in again.'), 'saying the session ended');
+      check(await p.evaluate(() => localStorage.getItem('pm.token') === null), 'and the old token is gone');
+      await c.close();
+
+      // The node's own session lacks folders: a Log out line in Settings, no banner on Home
+      c = await loginCtx({ viewport: { width: 1280, height: 900 } }, TOKEN); p = await c.newPage();
+      await c.route(/\/v1\/pubky$/, (r) => r.fulfill({ json: { user: 'pubky' + OWNER_K, unsynced: 0, needs_resign: true, missing: ['/pub/music/v1/'], notice: 'This node needs your approval for new folders on your homeserver. Use Log out here and log in again with Pubky Ring to give it.', sync: null } }));
+      await p.goto(BASE + '/settings/accounts');
+      check(await visible(p, '#pkresign [data-resign]', 20000), 'Settings says the node needs approval, with Log out');
+      check(!(await p.$('#pklogin')), 'no separate "Sign in again"');
+      // Its Log out asks the next log in for the folders (only the owner's page does)
+      const renewBodies = [];
+      await c.route(/\/v1\/auth\/pubky\/start$/, (r) => { renewBodies.push(r.request().postData()); return r.fulfill({ json: { id: 'renew1', url: 'pubkyauth:///?caps=/pub/pubky.app/:r&secret=c2VjcmV0&relay=https://relay.example/link', owner: OWNER_K, owner_face: { id: OWNER_K, name: 'Alice' }, node_name: 'CI node', renews: true, qr_svg: QR } }); });
+      await c.route(/\/v1\/auth\/pubky\/poll/, (r) => r.fulfill({ json: { status: 'pending' } }));
+      await p.click('#pkresign [data-resign]');
+      check(await visible(p, '#loginpage', 15000) && await waitText(p, '#loginbody', 'new folders'), 'its Log out leads to a log in that asks for the new folders');
+      check(renewBodies.length === 1 && JSON.parse(renewBodies[0] || '{}').renew === true, `the log in asks the node for a renewal (${renewBodies.join(' ')})`);
+      await c.close();
+      c = await ctx(); p = await c.newPage();
+      await c.route(/\/v1\/pubky$/, (r) => r.fulfill({ json: { user: 'pubky' + OWNER_K, unsynced: 0, needs_resign: true, missing: ['/pub/music/v1/'], notice: 'This node needs your approval for new folders on your homeserver. Use Log out here and log in again with Pubky Ring to give it.', sync: null } }));
+      await p.goto(BASE + '/'); await p.waitForSelector('#h-setup', { timeout: 20000 }).catch(() => {}); await p.waitForTimeout(800);
+      check(!(await p.$('#main .notice.resign')), 'Home has no sign-in banner');
+      await c.close();
+    }
   } finally {
     await api('PUT', '/node/settings', { first_steps_hidden: !!before.first_steps_hidden }).catch(() => {});
     await browser.close();

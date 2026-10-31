@@ -135,7 +135,7 @@ const TAGS_ON_V1: &str = "pubky.tags_social_v1";
 const TAGS_NOT_MUSIC: &str = "pubky.tags_not_music";
 
 /// What the owner reads when the session cannot reach every folder the node uses.
-pub const RESIGN_NOTICE: &str = "This node needs permission for new folders on your homeserver. Sign in again with Pubky Ring to approve them.";
+pub const RESIGN_NOTICE: &str = "This node needs your approval for new folders on your homeserver. Use Log out here and log in again with Pubky Ring to give it.";
 
 impl PubkySync {
     /// Restore a session from an exported secret and prepare to sync.

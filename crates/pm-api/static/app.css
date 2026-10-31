@@ -1061,7 +1061,7 @@ html[data-shell="phone"] .ytpanel { bottom: calc(150px + env(safe-area-inset-bot
    desktop (the sidebar). The full transport lives in Now playing on phones. */
 .bottomnav { display: none; }
 .np-transport { display: none; }
-.me-btn { display: none; }
+.me-btn { display: inline-flex; flex: none; width: 40px; height: 40px; border-radius: 50%; background: var(--surface-3); color: var(--fg-2); }
 .bnav { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; min-height: 52px; min-width: 44px; background: none; border: 0; color: var(--muted); font: inherit; font-size: 11px; cursor: pointer; border-radius: 10px; }
 .bnav .ic { width: 22px; height: 22px; }
 .bnav:hover { color: var(--fg); }
@@ -1403,3 +1403,31 @@ html[data-art] #nowplaying { background: radial-gradient(1100px 700px at 30% 0%,
 @media (max-width: 600px) { .mrow .msize { display: none; } }
 /* Home's Listening now: who, their song's cover, what and where, Listen along */
 .list-row.listening .thumb + .thumb, .list-row.listening .avatar + .thumb { margin-left: -14px; box-shadow: 0 0 0 2px var(--bg); }
+
+/* Log in (signed out): one screen instead of the app. Phones and tablets open Pubky Ring first,
+   desktops show the QR code first. */
+body.signedout .shell, body.signedout .toast, body.signedout #connbar, body.signedout .overlay, body.signedout .popover, body.signedout .embedpanel, body.signedout .scrim { display: none !important; }
+.loginpage { min-height: 100vh; min-height: 100dvh; display: grid; place-items: center; padding: 32px 16px; box-sizing: border-box; background: var(--bg); }
+.logincard { width: min(440px, 100%); display: flex; flex-direction: column; align-items: center; text-align: center; gap: 12px; }
+.logincard h1 { font-size: 26px; margin: 4px 0 0; }
+.logincard > p { margin: 0; }
+.loginface { display: flex; align-items: center; justify-content: center; min-height: 64px; }
+.loginface .face { width: 64px; height: 64px; font-size: 22px; }
+#loginwhy { width: 100%; box-sizing: border-box; }
+#loginbody { width: 100%; display: flex; flex-direction: column; align-items: center; gap: 12px; }
+.loginqr { width: 220px; height: 220px; border-radius: 14px; overflow: hidden; background: #fff; padding: 8px; box-sizing: border-box; }
+.loginqr svg { width: 100%; height: 100%; display: block; }
+.loginmain { width: 100%; justify-content: center; min-height: 48px; font-size: 16px; }
+.loginwait { display: inline-flex; align-items: center; gap: 8px; color: var(--fg-2); font-size: 14px; }
+.loginwho { display: flex; align-items: center; justify-content: center; gap: 18px; margin: 4px 0; }
+.loginwho figure { margin: 0; display: flex; flex-direction: column; align-items: center; gap: 6px; max-width: 140px; }
+.loginwho figcaption { font-size: 13px; color: var(--fg-2); overflow-wrap: anywhere; }
+.loginwho .face { width: 52px; height: 52px; font-size: 18px; }
+.loginwho .face.wrong { outline: 2px solid var(--warn); outline-offset: 2px; }
+.loginmsg { text-align: center; color: var(--fg); margin: 0; }
+.logintoken { width: 100%; margin-top: 12px; text-align: left; }
+.logintoken summary { text-align: center; cursor: pointer; }
+.logintoken form { margin-top: 10px; }
+/* The account button: on every shell (Log out is always one tap away) */
+.me-btn.has-face { padding: 0; overflow: hidden; }
+.me-btn .face { width: 100%; height: 100%; border-radius: 50%; }
