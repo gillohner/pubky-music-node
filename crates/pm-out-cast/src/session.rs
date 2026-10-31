@@ -137,6 +137,12 @@ impl Session {
         rx
     }
 
+    /// Carry on without a PLAY: the pause never reached the receiver (it played its buffer out),
+    /// so the zone's resume only lifts the pause intent and loads may play again.
+    pub fn carry_on(&self) {
+        self.paused.store(false, Ordering::SeqCst);
+    }
+
     /// Play the paused media again.
     pub fn play(&self) -> oneshot::Receiver<bool> {
         let (ack, rx) = oneshot::channel();
@@ -568,17 +574,19 @@ where
                         .await
                         .is_ok()
                 {
-                    ids.session_id = link.session_id.clone();
-                    ids.transport_id = link.transport_id.clone();
-                    ids.media_session_id = link.media_session_id;
-                    // A pause while the LOAD was under way keeps it from playing
+                    // A pause while the LOAD was under way keeps it from playing. A PLAY the
+                    // receiver doesn't confirm leaves its media paused: the session is lost, and
+                    // the zone hears of it, rather than taken for playing
                     let stays_paused = while_paused();
                     if !stays_paused {
                         if let Err(e) = link.play().await {
-                            tracing::debug!(attempt, "Cast PLAY after the reload failed: {e}");
-                            continue;
+                            tracing::warn!(attempt, "the Cast receiver didn't play the reloaded stream: {e}");
+                            return None;
                         }
                     }
+                    ids.session_id = link.session_id.clone();
+                    ids.transport_id = link.transport_id.clone();
+                    ids.media_session_id = link.media_session_id;
                     tracing::info!("Cast session started again");
                     return Some((link, stays_paused));
                 }
@@ -1062,7 +1070,7 @@ pub(crate) mod tests {
         session.stop().await;
     }
 
-    async fn until_lost(session: &Session) {
+    pub(crate) async fn until_lost(session: &Session) {
         for _ in 0..200 {
             if session.status().lost {
                 return;
@@ -1127,6 +1135,20 @@ pub(crate) mod tests {
             "{:?}",
             log(&fake)
         );
+        session.stop().await;
+    }
+
+    /// A relaunch whose PLAY the receiver turns down leaves its media paused: recovery fails (the
+    /// session is lost, and the zone hears of it) rather than reporting it playing.
+    #[tokio::test]
+    async fn a_relaunch_the_receiver_wont_play_is_lost() {
+        let (session, fake, ctl) = setup().await;
+        fake.forgot_session.store(true, Ordering::SeqCst);
+        fake.refuses_play.store(true, Ordering::SeqCst);
+        ctl.send(Ctl::Drop).unwrap();
+        until(&fake, "2 media PLAY 9").await;
+        until_lost(&session).await;
+        assert_eq!(session.status().resumed, 0, "{:?}", session.status());
         session.stop().await;
     }
 }

@@ -242,14 +242,50 @@ impl<S: AsyncRead + AsyncWrite + Unpin> CastLink<S> {
         Ok(())
     }
 
-    /// PLAY the loaded media.
+    /// PLAY the loaded media, once the receiver answers that it plays it: a refusal, another
+    /// state or no answer is an error.
     pub async fn play(&mut self) -> Result<(), CastError> {
         let (Some(transport), Some(m)) = (self.transport_id.clone(), self.media_session_id) else {
             return Err(CastError::Protocol("nothing loaded".into()));
         };
-        self.send(&transport, NS_MEDIA, json!({"type": "PLAY", "mediaSessionId": m}))
-            .await
-            .map(drop)
+        let rid = self
+            .send(&transport, NS_MEDIA, json!({"type": "PLAY", "mediaSessionId": m}))
+            .await?;
+        let v = self.wait_answer(rid, "the answer to PLAY").await?;
+        let s0 = v.pointer("/status/0");
+        let state = s0.and_then(|s| s.get("playerState")).and_then(Value::as_str);
+        let media = s0.and_then(|s| s.get("mediaSessionId")).and_then(Value::as_u64);
+        let t = v.get("type").and_then(Value::as_str).unwrap_or("");
+        if t == "MEDIA_STATUS" && matches!(state, Some("PLAYING" | "BUFFERING")) && media == Some(m) {
+            return Ok(());
+        }
+        Err(CastError::Receiver(format!(
+            "PLAY answered {t} {}",
+            state.unwrap_or_default()
+        )))
+    }
+
+    /// The receiver's answer to request `rid` (answering its PINGs meanwhile).
+    async fn wait_answer(&mut self, rid: u64, what: &'static str) -> Result<Value, CastError> {
+        let deadline = tokio::time::Instant::now() + REPLY_TIMEOUT;
+        loop {
+            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+            let msg = tokio::time::timeout(left, self.recv())
+                .await
+                .map_err(|_| CastError::Timeout(what))??;
+            let Some(text) = msg.payload_utf8.as_deref() else {
+                continue;
+            };
+            let v: Value = serde_json::from_str(text).unwrap_or(Value::Null);
+            if msg.namespace == NS_HEARTBEAT && v.get("type").and_then(Value::as_str) == Some("PING") {
+                let src = msg.source_id.clone();
+                self.send(&src, NS_HEARTBEAT, json!({"type": "PONG"})).await?;
+                continue;
+            }
+            if v.get("requestId").and_then(Value::as_u64) == Some(rid) {
+                return Ok(v);
+            }
+        }
     }
 
     /// Stop the app (receiver STOP), which also ends the stream fetch.

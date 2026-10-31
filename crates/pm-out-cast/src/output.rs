@@ -214,6 +214,23 @@ struct CastSink {
 }
 
 impl CastSink {
+    /// Why the session no longer has the receiver (lost, taken over, its media failed), if so.
+    fn session_gone(&self) -> Option<&'static str> {
+        let status = self
+            .session
+            .lock()
+            .expect("session")
+            .as_ref()
+            .map(Session::status);
+        match status {
+            None => Some("the session ended during the pause"),
+            Some(st) if st.lost => Some("the link to the receiver was lost during the pause"),
+            Some(st) if st.taken_over => Some("another app took the receiver during the pause"),
+            Some(st) if st.stale => Some("the receiver's media failed during the pause"),
+            Some(_) => None,
+        }
+    }
+
     /// How the pause went: waits for the session's answer once.
     fn pause_outcome(&mut self) -> Option<Paused> {
         if let Some(rx) = self.outcome.take() {
@@ -285,18 +302,9 @@ impl AudioSink for CastSink {
         if how == Some(Paused::Refused) {
             return reopen("the receiver didn't pause and played its buffer out");
         }
-        let status = self
-            .session
-            .lock()
-            .expect("session")
-            .as_ref()
-            .map(Session::status);
-        match status {
-            None => reopen("the session ended during the pause"),
-            Some(st) if st.lost => reopen("the link to the receiver was lost during the pause"),
-            Some(st) if st.taken_over => reopen("another app took the receiver during the pause"),
-            Some(st) if st.stale => reopen("the receiver's media failed during the pause"),
-            Some(_) => Ok(()),
+        match self.session_gone() {
+            Some(why) => reopen(why),
+            None => Ok(()),
         }
     }
     /// PLAY after a PAUSE. A receiver stopped for the pause (or a session that ended meanwhile)
@@ -310,8 +318,15 @@ impl AudioSink for CastSink {
         if let Some(why) = cannot_carry_on(how) {
             return reopen(why);
         }
-        // Nothing was paused: the stream carries on
+        // Nothing was paused: the stream carries on, if the session still has the receiver, and
+        // loads may play again
         if how == Some(Paused::Refused) {
+            if let Some(why) = self.session_gone() {
+                return reopen(why);
+            }
+            if let Some(s) = self.session.lock().expect("session").as_ref() {
+                s.carry_on();
+            }
             return self.inner.resume();
         }
         let Some(play) = self.session.lock().expect("session").as_ref().map(Session::play) else {
@@ -463,6 +478,66 @@ mod tests {
         .unwrap();
         assert!(ready.is_err(), "{ready:?}");
         assert!(resumed.is_ok(), "alone it carries on: {resumed:?}");
+        drop(sink);
+    }
+
+    /// A pause that never reached the receiver (it played its buffer out): the zone's resume
+    /// carries on, and lifts the pause intent, so a later reconnect may launch and load again.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_resume_after_an_unpaused_pause_lets_loads_play_again() {
+        use crate::session::tests::{setup_with, Ctl, Fake};
+        let fake = Arc::new(Fake::default());
+        fake.no_media_id.store(true, std::sync::atomic::Ordering::SeqCst);
+        let (session, fake, ctl) = setup_with(fake, Default::default()).await;
+        let mut sink = sink(session, "cast-carry-on").await;
+        let sink = std::thread::spawn(move || {
+            assert!(sink.pause().unwrap());
+            sink.resume().unwrap();
+            sink
+        })
+        .join()
+        .unwrap();
+        fake.forgot_session
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        ctl.send(Ctl::Drop).unwrap();
+        until(&fake, "2 receiver LAUNCH").await;
+        drop(sink);
+    }
+
+    /// The same resume with the receiver gone meanwhile (the link lost during the pause) is an
+    /// error, not a success with nothing playing: the zone opens the output again.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_resume_after_an_unpaused_pause_without_a_receiver_is_an_error() {
+        use crate::session::tests::{setup_with, Ctl, Fake};
+        let fake = Arc::new(Fake::default());
+        fake.no_media_id.store(true, std::sync::atomic::Ordering::SeqCst);
+        let (session, fake, ctl) = setup_with(fake, Default::default()).await;
+        let mut sink = sink(session, "cast-gone").await;
+        let mut sink = std::thread::spawn(move || {
+            assert!(sink.pause().unwrap());
+            sink
+        })
+        .join()
+        .unwrap();
+        fake.forgot_session
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        ctl.send(Ctl::Drop).unwrap();
+        until(&fake, "2 receiver GET_STATUS").await;
+        for _ in 0..200 {
+            if sink
+                .session
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|s| s.status().lost)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        let (resumed, sink) = std::thread::spawn(move || (sink.resume(), sink)).join().unwrap();
+        let e = resumed.unwrap_err().to_string();
+        assert!(e.contains("lost"), "{e}");
         drop(sink);
     }
 }
