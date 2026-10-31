@@ -23,6 +23,11 @@ fn bundled() -> Option<pm_api::bundled::AdminEndpoint> {
 }
 
 fn node(dir: &std::path::Path) -> Arc<NodeState> {
+    node_with(dir, None)
+}
+
+/// A node whose API is behind `token` (None: open, everyone counts as the owner).
+fn node_with(dir: &std::path::Path, token: Option<&str>) -> Arc<NodeState> {
     let db = dir.join("node.sqlite");
     let outputs = OutputRegistry::new();
     outputs.register(Arc::new(pm_zones::outputs::NullOutput::new()));
@@ -35,7 +40,7 @@ fn node(dir: &std::path::Path) -> Arc<NodeState> {
             art_dir: dir.join("art"),
             mirror_dir: dir.join("homeserver"),
             pipeline: PipelineConfig::default(),
-            token: None,
+            token: token.map(str::to_string),
             subsonic_user: "pubky".into(),
             pubky: Default::default(),
             public_url: "http://127.0.0.1:7788".into(),
@@ -553,6 +558,15 @@ async fn call_auth(
 async fn ring_sign_in(app: &axum::Router, signer: &pubky::PubkySigner) -> serde_json::Value {
     let (st, started) = call(app, "POST", "/v1/auth/pubky/start").await;
     assert_eq!(st, StatusCode::OK, "{started}");
+    approve_and_poll(app, signer, &started).await
+}
+
+/// Approves a started sign-in as `signer` and polls until it ends.
+async fn approve_and_poll(
+    app: &axum::Router,
+    signer: &pubky::PubkySigner,
+    started: &serde_json::Value,
+) -> serde_json::Value {
     signer
         .approve_auth(started["url"].as_str().unwrap())
         .await
@@ -649,4 +663,152 @@ async fn a_listener_signs_in_with_ring_and_plays_a_homeserver_only_account_canno
     let v = ring_sign_in(&app, &kim).await;
     assert_eq!(v["status"], "denied", "{v}");
     assert!(v["token"].is_null());
+}
+
+/// The owner signs the node up on its homeserver (with the API token), and keeps their signer.
+async fn owner_with_signer(app: &axum::Router, api: &str) -> pubky::PubkySigner {
+    let (_, started) = call_auth(app, "POST", "/v1/homeserver/bundled/owner-signup", api, None).await;
+    let url = started["url"].as_str().unwrap().to_string();
+    let hs = param(&url, "hs").unwrap();
+    let token = param(&url, "st").unwrap();
+    let signer = Pubky::new().unwrap().signer(Keypair::random());
+    signer
+        .signup(&PublicKey::try_from(hs.as_str()).unwrap(), Some(&token))
+        .await
+        .unwrap();
+    signer.approve_auth(&url).await.unwrap();
+    for _ in 0..60 {
+        let (_, v) = call_auth(app, "GET", "/v1/pubky/login", api, None).await;
+        if v["status"] == "signed_in" {
+            return signer;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    panic!("the owner did not get signed in");
+}
+
+/// TASK-login-ux: the owner logs in with Pubky Ring and gets a browser session of their own,
+/// which Log out ends (the API token stays); someone else is refused with both names; while the
+/// node's session lacks folders, only a log in the owner's page asks to renew asks for them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_owner_logs_in_and_out_and_a_wrong_identity_is_named() {
+    let Some(ep) = bundled() else {
+        eprintln!("skipped: set PM_BUNDLED_HS_ADMIN and PM_BUNDLED_HS_PASSWORD");
+        return;
+    };
+    const API: &str = "the-api-token";
+    let dir = tempfile::tempdir().unwrap();
+    let s = node_with(dir.path(), Some(API));
+    s.set_bundled_homeserver(ep);
+    let app = router(s.clone());
+    let owner = owner_with_signer(&app, API).await;
+    let owner_key = owner.public_key().z32();
+
+    // Log in: a session of its own, not the API token
+    let v = ring_sign_in(&app, &owner).await;
+    assert_eq!(
+        (v["status"].as_str(), v["role"].as_str()),
+        (Some("ok"), Some("owner")),
+        "{v}"
+    );
+    let session = v["token"].as_str().unwrap().to_string();
+    assert!(session.starts_with("pmo_") && session != API, "{v}");
+    let (st, me) = call_auth(&app, "GET", "/v1/me", &session, None).await;
+    assert_eq!((st, me["role"].as_str()), (StatusCode::OK, Some("owner")), "{me}");
+    // Log out ends it; the API token goes on working
+    let (st, out) = call_auth(&app, "DELETE", "/v1/me/token", &session, None).await;
+    assert_eq!(
+        (st, out["ended"].as_bool()),
+        (StatusCode::OK, Some(true)),
+        "{out}"
+    );
+    let (st, _) = call_auth(&app, "GET", "/v1/me", &session, None).await;
+    assert_eq!(st, StatusCode::UNAUTHORIZED);
+    let (_, out) = call_auth(&app, "DELETE", "/v1/me/token", API, None).await;
+    assert_eq!(out["ended"], false, "{out}");
+    let (st, _) = call_auth(&app, "GET", "/v1/me", API, None).await;
+    assert_eq!(st, StatusCode::OK);
+
+    // While the node has no identity loaded (its homeserver didn't answer at start), no browser
+    // session is the owner (a 503, so the page keeps it); the API token is. Loaded again, the
+    // owner's session works again
+    let v = ring_sign_in(&app, &owner).await;
+    let session = v["token"].as_str().unwrap().to_string();
+    let loaded = s.sync_handle().unwrap();
+    s.set_sync(None);
+    let (st, _) = call_auth(&app, "GET", "/v1/me", &session, None).await;
+    assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE);
+    let (st, _) = call_auth(&app, "GET", "/v1/me", API, None).await;
+    assert_eq!(st, StatusCode::OK);
+    s.set_sync(Some(loaded));
+    let (st, _) = call_auth(&app, "GET", "/v1/me", &session, None).await;
+    assert_eq!(st, StatusCode::OK, "the owner's own session stays");
+
+    // Another identity: refused, saying who approved and whose node it is
+    let stranger = Pubky::new().unwrap().signer(Keypair::random());
+    let (_, inv) = call_auth(
+        &app,
+        "POST",
+        "/v1/people/invites",
+        API,
+        Some(serde_json::json!({"access": "homeserver"})),
+    )
+    .await;
+    stranger
+        .handle_deeplink(inv["url"].as_str().unwrap())
+        .await
+        .unwrap();
+    // Not in People yet (the used invite becomes a person when People is read): "not the owner"
+    let v = ring_sign_in(&app, &stranger).await;
+    assert_eq!(
+        (v["status"].as_str(), v["reason"].as_str()),
+        (Some("denied"), Some("not_owner")),
+        "{v}"
+    );
+    assert!(v["token"].is_null());
+    assert_eq!(v["approver"]["id"], stranger.public_key().z32(), "{v}");
+    assert_eq!(v["owner_face"]["id"], owner_key, "{v}");
+    // In People with the homeserver only, no music: "ask for access"
+    call_auth(&app, "GET", "/v1/people", API, None).await;
+    let v = ring_sign_in(&app, &stranger).await;
+    assert_eq!(
+        (v["status"].as_str(), v["reason"].as_str()),
+        (Some("denied"), Some("no_access")),
+        "{v}"
+    );
+
+    // The node's session lacks folders (the homeserver refused one). A plain log in (anyone's,
+    // a listener's QR scan too) still only reads: Ring never asks them for their homeserver
+    s.sync_handle().unwrap().note_refusal();
+    let (_, started) = call(&app, "POST", "/v1/auth/pubky/start").await;
+    assert_eq!(started["renews"], false, "{started}");
+    let caps = param(started["url"].as_str().unwrap(), "caps").unwrap();
+    assert!(!caps.contains(":rw"), "{caps}");
+    let v = approve_and_poll(&app, &owner, &started).await;
+    assert_eq!(v["role"], "owner", "{v}");
+    let (_, pk) = call_auth(&app, "GET", "/v1/pubky", API, None).await;
+    assert_eq!(pk["needs_resign"], true, "nothing renewed: {pk}");
+    // The owner's page asks for the renewal: the log in asks for the folders, and the owner's
+    // approval renews the node's session
+    let (st, started) = call_json(
+        &app,
+        "POST",
+        "/v1/auth/pubky/start",
+        serde_json::json!({"renew": true}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{started}");
+    assert_eq!(started["renews"], true, "{started}");
+    assert_eq!(started["owner_face"]["id"], owner_key, "{started}");
+    let caps = param(started["url"].as_str().unwrap(), "caps").unwrap();
+    assert!(caps.contains("/priv/pubky.music/vault/:rw"), "{caps}");
+    let v = approve_and_poll(&app, &owner, &started).await;
+    assert_eq!(v["role"], "owner", "{v}");
+    let (_, pk) = call_auth(&app, "GET", "/v1/pubky", API, None).await;
+    assert_eq!(pk["needs_resign"], false, "{pk}");
+    assert_eq!(
+        pk["user"].as_str().map(|u| u.trim_start_matches("pubky")),
+        Some(owner_key.trim_start_matches("pubky")),
+        "{pk}"
+    );
 }
