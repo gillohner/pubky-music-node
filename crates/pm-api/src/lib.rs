@@ -704,6 +704,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/presence/along", post(presence::join).delete(presence::leave))
         .route("/me/first-steps", get(first_steps::get))
         .route("/me/token", axum::routing::delete(accounts::sign_out))
+        .route("/auth/pubky/renewal", post(login_renewal))
         .route(
             "/me/listening",
             get(listening_share::get).put(listening_share::put),
@@ -3076,10 +3077,42 @@ pub(crate) fn qr_svg(text: &str) -> Option<String> {
     ))
 }
 
+/// How long a renewal code ([`login_renewal`]) stays good.
+const RENEWAL_TTL: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// `POST /v1/auth/pubky/renewal` (owner): while the node needs new folders, a code for the next
+/// Pubky Ring log in from this page to ask for them, so only the owner's own page can start a log
+/// in that asks anyone for write access (Kimi review of #209). The page gets it before logging out.
+async fn login_renewal(State(s): State<Arc<NodeState>>) -> ApiResult<LoginRenewal> {
+    if !s.sync_handle().is_some_and(|h| h.needs_resign()) {
+        return Ok(Json(LoginRenewal { renewal: None }));
+    }
+    let code = tidal::random_urlsafe(24);
+    let mut all = s.renewals.lock().expect("renewals lock");
+    all.retain(|_, at| at.elapsed() < RENEWAL_TTL);
+    // Few at a time: the owner asks once per log out
+    while all.len() >= 8 {
+        let oldest = all.iter().min_by_key(|(_, at)| **at).map(|(c, _)| c.clone());
+        let Some(oldest) = oldest else { break };
+        all.remove(&oldest);
+    }
+    all.insert(code.clone(), std::time::Instant::now());
+    Ok(Json(LoginRenewal { renewal: Some(code) }))
+}
+
+/// Uses up a renewal code: whether it was one the node gave out, still good.
+fn take_renewal(s: &NodeState, code: &str) -> bool {
+    s.renewals
+        .lock()
+        .expect("renewals lock")
+        .remove(code)
+        .is_some_and(|at| at.elapsed() < RENEWAL_TTL)
+}
+
 /// What a Pubky Ring log in asks for: the node's own folders only when the owner's page asked for
-/// a renewal (`{renew: true}`, from its "Log out" on the notice) and the node does lack them.
-/// Anyone may start a log in, so a listener scanning the QR code is never asked to give the node
-/// write access to their own homeserver.
+/// a renewal (with a code from [`login_renewal`]) and the node does lack them. Anyone may start a
+/// log in, so a listener scanning the QR code is never asked to give the node write access to
+/// their own homeserver.
 fn login_capabilities(renew_asked: bool, needs_resign: bool) -> (bool, &'static str) {
     if renew_asked && needs_resign {
         (true, pm_pubky::homeserver::LOGIN_CAPABILITIES)
@@ -3088,10 +3121,10 @@ fn login_capabilities(renew_asked: bool, needs_resign: bool) -> (bool, &'static 
     }
 }
 
-/// `POST /v1/auth/pubky/start [{renew}]`: a controller or browser asks to log in with Pubky
-/// Ring. The node tells the owner and listeners apart by who approves; `renew` (the owner's own
-/// page, when the node needs new folders) also asks for the node's folders. 412 until the node
-/// has a Pubky session.
+/// `POST /v1/auth/pubky/start [{renewal}]`: a controller or browser asks to log in with Pubky
+/// Ring. The node tells the owner and listeners apart by who approves; a `renewal` code (the
+/// owner's own page, when the node needs new folders) also asks for the node's folders. 412 until
+/// the node has a Pubky session.
 async fn controller_login_start(
     State(s): State<Arc<NodeState>>,
     req: axum::extract::Request,
@@ -3106,7 +3139,8 @@ async fn controller_login_start(
     } else {
         serde_json::from_slice::<ControllerLoginStart>(&body)
             .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, e.to_string()))?
-            .renew
+            .renewal
+            .is_some_and(|code| take_renewal(&s, &code))
     };
     // Held from the check to the insert: sign-ins started at once can't pass the caps together
     let mut logins = s.controller_logins.lock().await;
@@ -5421,6 +5455,40 @@ mod tests {
             v["error"], "missing or wrong bearer token",
             "the page logs in again on exactly this"
         );
+    }
+
+    /// A token changed in the config (`PM_TOKEN`, `[api] token`) ends the owner's browser sessions
+    /// at the next start, as Make a new token does (Hermes review of #209, low 4).
+    #[tokio::test]
+    async fn a_token_changed_in_the_config_ends_the_owners_browser_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), Some("s3cret")).await;
+        let stored = || {
+            s.library
+                .lock()
+                .unwrap()
+                .get_setting("accounts.owner_sessions")
+                .unwrap()
+                .unwrap_or_default()
+        };
+        let one =
+            r#"[{"hash":"00","key":"o3ftkuxjd9k6zgnc4hhbhbg5jusubr4zqyb1dtzi8hhm3hf5wbmy","created_at":1}]"#;
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting("accounts.owner_sessions", one)
+            .unwrap();
+        // Sessions from before the node noted a token: kept, and the token noted
+        assert!(!accounts::end_sessions_of_an_old_token(&s).unwrap());
+        assert_eq!(stored(), one);
+        // The same token at the next start: kept
+        assert!(!accounts::end_sessions_of_an_old_token(&s).unwrap());
+        assert_eq!(stored(), one);
+        // Another token: they end
+        *s.token.write().unwrap() = Some("changed-in-the-config".into());
+        assert!(accounts::end_sessions_of_an_old_token(&s).unwrap());
+        assert_eq!(stored(), "[]");
+        assert!(!accounts::end_sessions_of_an_old_token(&s).unwrap());
     }
 
     #[tokio::test]
@@ -8491,6 +8559,47 @@ mod tests {
         assert_eq!(login_capabilities(false, false), (false, CONTROLLER_CAPABILITIES));
         assert_eq!(login_capabilities(true, true), (true, LOGIN_CAPABILITIES));
         assert!(!CONTROLLER_CAPABILITIES.contains(":rw"), "a log in only reads");
+    }
+
+    /// A renewal needs a code only the owner's page can get, good once (Kimi review of #209 at
+    /// 6bf5f7d): a made-up one, or `{renew: true}` as before, asks for nothing more.
+    #[tokio::test]
+    async fn a_renewal_code_comes_from_the_owner_and_is_good_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        let app = router(s.clone());
+        // The node needs no new folders (no Pubky session here): no code
+        let (st, v) = call(&app, "POST", "/v1/auth/pubky/renewal", None).await;
+        assert_eq!(
+            (st, &v["renewal"]),
+            (StatusCode::OK, &serde_json::Value::Null),
+            "{v}"
+        );
+        // Not without the owner's token
+        *s.token.write().unwrap() = Some("s3cret".into());
+        let (st, _) = call(&app, "POST", "/v1/auth/pubky/renewal", None).await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED);
+        // A code the node gave out works once; a made-up one never
+        s.renewals
+            .lock()
+            .unwrap()
+            .insert("given".into(), std::time::Instant::now());
+        assert!(!take_renewal(&s, "made-up"));
+        assert!(take_renewal(&s, "given"));
+        assert!(!take_renewal(&s, "given"), "used up");
+        // An old one has run out
+        s.renewals.lock().unwrap().insert(
+            "old".into(),
+            std::time::Instant::now() - RENEWAL_TTL - std::time::Duration::from_secs(1),
+        );
+        assert!(!take_renewal(&s, "old"));
+        // The old flag means nothing now
+        assert_eq!(
+            serde_json::from_str::<ControllerLoginStart>(r#"{"renew": true}"#)
+                .unwrap()
+                .renewal,
+            None
+        );
     }
 
     /// Anyone may start a Pubky Ring sign-in, so few wait at once: six per address (IPv6 per

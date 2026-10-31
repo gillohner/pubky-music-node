@@ -158,6 +158,9 @@ pub struct NodeState {
     pub controller_logins: tokio::sync::Mutex<
         std::collections::HashMap<String, (pm_pubky::homeserver::LoginFlow, std::time::Instant, String)>,
     >,
+    /// Renewal codes the owner's page got for its next Pubky Ring log in (`POST
+    /// /v1/auth/pubky/renewal`): code → when. Each is used once.
+    pub renewals: std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
     /// The zones' source factory, also the per-output DSP registry.
     pub sources: Arc<NodeSources>,
     pub events: crate::events::EventBus,
@@ -412,6 +415,7 @@ impl NodeState {
             contact: std::sync::RwLock::new(contact),
             login: tokio::sync::Mutex::new(None),
             controller_logins: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            renewals: Default::default(),
             upload_jobs: Default::default(),
             events,
             sources_off,

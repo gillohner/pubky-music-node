@@ -1272,7 +1272,7 @@ body.offline .nav-label, body.offline .search, body.offline #zonebtn, body.offli
 body.offline [data-bnav="search"], body.offline .track [data-act="more"], body.offline .track .idmark,
 body.offline .track .lnk[data-act="song"], body.offline .track .lnk[data-act="tartist"] { pointer-events: none; }
 body.offline .nav-item:not([data-view="downloads"]):not([data-view="queue"]):not([data-view="settings"]),
-body.offline .nav-label, body.offline .search, body.offline #zonebtn, body.offline #jobchip,
+body.offline .nav-label, body.offline .search, body.offline #zonebtn, body.offline #jobchip, body.offline #volbtn,
 body.offline [data-bnav="search"], body.offline .track [data-act="more"], body.offline .track .idmark { display: none; }
 .dl-note { margin-top: 4px; }
 body.offline [data-bnav="home"], body.offline [data-bnav="sources"] { display: none; }

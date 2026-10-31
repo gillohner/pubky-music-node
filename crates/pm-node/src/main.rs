@@ -324,6 +324,12 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
     }
     // A "Bring files here" job the node was running carries on
     pm_api::files::resume_jobs(&state);
+    // A token changed in the config ends the owner's browser sessions, as a new one made here does
+    match pm_api::accounts::end_sessions_of_an_old_token(&state) {
+        Ok(true) => tracing::info!("the API token changed: the owner's browser sessions ended"),
+        Ok(false) => {}
+        Err(e) => tracing::warn!("checking the owner's browser sessions failed: {}", e.message),
+    }
     {
         let ocfg = cfg.outputs.clone();
         state.set_discover(std::sync::Arc::new(move || {

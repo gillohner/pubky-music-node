@@ -1813,10 +1813,18 @@ pub struct LoginStarted {
 /// `POST /v1/auth/pubky/start` body (optional).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ControllerLoginStart {
-    /// The owner's page asks for the node's folders too, as the node needs new ones; ignored
-    /// while it doesn't.
+    /// A renewal code from `POST /v1/auth/pubky/renewal`: the owner's page asks for the node's
+    /// folders too, as the node needs new ones. Used once; ignored while the node needs none.
     #[serde(default)]
-    pub renew: bool,
+    pub renewal: Option<String>,
+}
+
+/// `POST /v1/auth/pubky/renewal`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoginRenewal {
+    /// For the next `/v1/auth/pubky/start`, once, within 15 minutes; `null` while the node needs
+    /// no new folders.
+    pub renewal: Option<String>,
 }
 
 /// `POST /v1/auth/pubky/start`: a controller or browser sign-in with Pubky Ring.
@@ -1831,9 +1839,9 @@ pub struct ControllerLoginStarted {
     pub owner_face: crate::profiles::LoginFace,
     /// The node's name ("Log in to …").
     pub node_name: String,
-    /// Pubky Ring also asks the owner to approve new folders for the node (asked for with
-    /// `renew`, and its own session lacks them); an approval by the owner renews the node's
-    /// session.
+    /// Pubky Ring also asks the owner to approve new folders for the node (asked for with a
+    /// `renewal` code, and its own session lacks them); an approval by the owner renews the
+    /// node's session.
     #[serde(default)]
     pub renews: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]

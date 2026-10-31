@@ -788,13 +788,27 @@ async fn the_owner_logs_in_and_out_and_a_wrong_identity_is_named() {
     assert_eq!(v["role"], "owner", "{v}");
     let (_, pk) = call_auth(&app, "GET", "/v1/pubky", API, None).await;
     assert_eq!(pk["needs_resign"], true, "nothing renewed: {pk}");
-    // The owner's page asks for the renewal: the log in asks for the folders, and the owner's
-    // approval renews the node's session
+    // Anyone may say "renew" (the old flag) or make up a code: still only reading
+    for body in [
+        serde_json::json!({"renew": true}),
+        serde_json::json!({"renewal": "made-up"}),
+    ] {
+        let (_, started) = call_json(&app, "POST", "/v1/auth/pubky/start", body).await;
+        assert_eq!(started["renews"], false, "{started}");
+    }
+    // The owner's page gets a code and asks for the renewal: the log in asks for the folders,
+    // and the owner's approval renews the node's session
+    let (st, code) = call_auth(&app, "POST", "/v1/auth/pubky/renewal", API, None).await;
+    assert_eq!(st, StatusCode::OK, "{code}");
+    let code = code["renewal"]
+        .as_str()
+        .expect("a code while folders are missing")
+        .to_string();
     let (st, started) = call_json(
         &app,
         "POST",
         "/v1/auth/pubky/start",
-        serde_json::json!({"renew": true}),
+        serde_json::json!({"renewal": code}),
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{started}");

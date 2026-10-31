@@ -698,9 +698,10 @@
     ? `<img class="face ${cls}" src="${esc(f.avatar)}" alt="">`
     : `<span class="face mono ${cls}" style="background:hsl(${hue(f && f.id)} 35% 34%)">${esc(initials((f && f.name) || '?'))}</span>`);
   // One poll at a time: `timer` is a poll waiting to run, `asking` one under way
-  // `renew`: the owner logged out from the notice that the node needs new folders, so this log in
-  // asks for them too. Only then: anyone scanning a plain QR code is asked to read, nothing more
-  const lg = { flow: null, timer: null, asking: false, showQr: false, gen: 0, renew: false };
+  // `renewal`: the owner logged out while the node needs new folders, with a code from the node
+  // (good once), so this log in asks for them too. Only then: anyone scanning a plain QR code is
+  // asked to read, nothing more
+  const lg = { flow: null, timer: null, asking: false, showQr: false, gen: 0, renewal: null };
   const loginStop = () => { clearTimeout(lg.timer); lg.timer = null; lg.gen += 1; };
   const drawLoginFlow = () => {
     const f = lg.flow; if (!f) return;
@@ -738,7 +739,7 @@
       if (gen !== lg.gen) return;
       if (p.status === 'pending') return loginPoll(gen);
       if (p.status === 'ok' && p.token) {
-        loginStop(); lg.renew = false; state.token = p.token; try { localStorage.setItem('pm.token', p.token); } catch { /* this tab keeps it */ }
+        loginStop(); state.token = p.token; try { localStorage.setItem('pm.token', p.token); } catch { /* this tab keeps it */ }
         hideLogin(); connect(); return;
       }
       if (p.status === 'denied') { loginStop(); drawRefused(p); return; }
@@ -749,7 +750,9 @@
     loginStop(); const gen = lg.gen;
     $('#loginbody').innerHTML = '<p class="loginwait"><span class="spin" aria-hidden="true"></span>Starting…</p>';
     try {
-      const r = await fetch('/v1/auth/pubky/start', lg.renew ? { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"renew":true}' } : { method: 'POST' }); const j = await r.json();
+      // The code is good once: a later start (Try again, an expired one) is a plain log in
+      const renewal = lg.renewal; lg.renewal = null;
+      const r = await fetch('/v1/auth/pubky/start', renewal ? { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ renewal }) } : { method: 'POST' }); const j = await r.json();
       if (gen !== lg.gen) return;
       if (r.status === 412) {
         $('#loginbody').innerHTML = '<p class="muted">Pubky Ring can’t log you in here right now: this node isn’t linked to a Pubky identity, or couldn’t reach it when it started. Use its API token below.</p>';
@@ -773,7 +776,7 @@
     $('#loginpage').hidden = false;
     const w = $('#loginwhy'); w.hidden = !LOGIN_WHY[why]; w.textContent = LOGIN_WHY[why] || '';
     $('#tok').value = ''; $('#logintoken').open = false;
-    try { lg.renew = sessionStorage.getItem('pm.loginRenew') === '1'; sessionStorage.removeItem('pm.loginRenew'); } catch { /* a plain log in; Settings asks again */ }
+    try { lg.renewal = sessionStorage.getItem('pm.loginRenew'); sessionStorage.removeItem('pm.loginRenew'); } catch { /* a plain log in; Settings asks again */ }
     // The app behind is hidden: the screen's heading takes the focus, so it is announced
     $('#loginh').focus();
     loginStart();
@@ -796,10 +799,11 @@
   // While the node needs new folders, the owner's next log in from here asks for them (only the
   // owner's page asks: anyone scanning a plain QR code is asked to read, nothing more).
   const logOut = async () => {
-    let renew = false;
+    // Asked while still logged in: the node gives a code only to the owner, and only when needed
+    let renewal = null;
     if (state.token && !isListener()) {
-      const pk = await fetch('/v1/pubky', { headers: { authorization: 'Bearer ' + state.token } }).then((r) => (r.ok ? r.json() : null)).catch(() => null);
-      renew = !!(pk && pk.needs_resign);
+      const r = await fetch('/v1/auth/pubky/renewal', { method: 'POST', headers: { authorization: 'Bearer ' + state.token } }).then((x) => (x.ok ? x.json() : null)).catch(() => null);
+      renewal = (r && r.renewal) || null;
     }
     if (state.token) {
       let why = '';
@@ -813,7 +817,7 @@
         return;
       }
     }
-    try { if (renew) sessionStorage.setItem('pm.loginRenew', '1'); } catch { /* a plain log in */ }
+    try { if (renewal) sessionStorage.setItem('pm.loginRenew', renewal); } catch { /* a plain log in */ }
     forgetAccount();
     try { sessionStorage.setItem('pm.loginWhy', 'out'); } catch { /* no reason shown */ }
     // From a menu: its history entry goes first, or popping it later would cancel this navigation
@@ -1651,7 +1655,10 @@
     // The devices' models: the owner's output list, fetched once
     if (isOwner() && !state.outputs) api('GET', '/outputs').then((o) => { state.outputs = o; if (!zonePop.hidden) renderZonePop(); }).catch(() => {});
   };
-  $$('[data-bnav]').forEach((b) => b.onclick = () => { const k = b.dataset.bnav; if (k === 'search') { if (!overlay.hidden) toggleNowPlaying(false); search.focus(); const q = search.value.trim(); setView('search', q ? { q } : undefined); return; } setView(k === 'library' ? (state.lastLib || 'library') : k); });
+  // The rail's Library: the library page last open, but never Sources on a tablet, where Sources
+  // has its own button (it may have been recorded while this was a phone)
+  const libHome = () => (state.lastLib && !(state.lastLib === 'sources' && shellMode() === 'tablet') ? state.lastLib : 'library');
+  $$('[data-bnav]').forEach((b) => b.onclick = () => { const k = b.dataset.bnav; if (k === 'search') { if (!overlay.hidden) toggleNowPlaying(false); search.focus(); const q = search.value.trim(); setView('search', q ? { q } : undefined); return; } setView(k === 'library' ? libHome() : k); });
   // The account menu: who you are here, Settings and Log out (on every shell). A node that needs
   // no token has nothing to log out of.
   $('#me').onclick = async () => {
@@ -2044,19 +2051,24 @@
     v.oninput = () => setFill(v);
     v.onchange = () => { bar.value = v.value; setFill(bar); if (isBrowser()) { audio.volume = Math.pow(10, v.value / 20); return; } api('POST', `/zones/${state.zone}/volume`, { volume: { db: Number(v.value) } }).catch((e) => toast(e.message, 'error')); };
   };
-  $('#quality').onclick = () => {
-    if (!qPanel.hidden) { closeQPanel(); return; }
+  // Opened from `opener` (the pill or the volume button): only that one says it is expanded, and
+  // the focus goes back to it on close
+  const openQPanel = (opener) => {
     closePop(); closeJobPop();
     renderQPanel();
-    qPanel.hidden = false; $('#scrim').hidden = false; $('#quality').setAttribute('aria-expanded', 'true'); pushTransient();
-    const first = $('[data-dsp]:not(:disabled), #qpvol, button', qPanel); if (first) first.focus();
+    qPanel.hidden = false; $('#scrim').hidden = false; qOpener = opener; $(opener).setAttribute('aria-expanded', 'true'); pushTransient();
     loadDsp();
     if (isOwner() && !state.outputs) api('GET', '/outputs').then((o) => { state.outputs = o; syncQPanel(); }).catch(() => {});
+  };
+  $('#quality').onclick = () => {
+    if (!qPanel.hidden) { closeQPanel(); return; }
+    openQPanel('#quality');
+    const first = $('[data-dsp]:not(:disabled), #qpvol, button', qPanel); if (first) first.focus();
   };
   // Where the bar has no room for the slider (narrow tablets and desktops): the Sound panel, at its volume
   $('#volbtn').onclick = () => {
     if (!qPanel.hidden) { closeQPanel(); return; }
-    $('#quality').click(); qOpener = '#volbtn'; $('#volbtn').setAttribute('aria-expanded', 'true');
+    openQPanel('#volbtn');
     const v = $('#qpvol', qPanel); if (v) { v.focus(); v.scrollIntoView({ block: 'nearest' }); }
   };
 
