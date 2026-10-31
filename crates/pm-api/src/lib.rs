@@ -895,12 +895,22 @@ async fn auth(
     let token = bearer(&headers, &query);
     let Some(caller) = accounts::caller(&state, token.as_deref()) else {
         // An owner's browser session while the node has no identity loaded: not refused for good
-        // (the page keeps it), it works again once the identity is
-        if token
+        // (the page keeps it), it works again once the identity is. Log out still ends it, so the
+        // browser can get to Log in (and the API token) meanwhile
+        if let Some(t) = token
             .as_deref()
-            .is_some_and(|t| t.starts_with(accounts::OWNER_PREFIX))
-            && state.sync_handle().is_none()
+            .filter(|t| t.starts_with(accounts::OWNER_PREFIX))
+            .filter(|_| state.sync_handle().is_none())
         {
+            // (Paths here are inside `/v1`)
+            if req.method() == axum::http::Method::DELETE && req.uri().path() == "/me/token" {
+                return match accounts::end_owner_session(&state, t) {
+                    Ok(ended) => {
+                        Json(serde_json::json!({"signed_out": true, "ended": ended})).into_response()
+                    }
+                    Err(e) => e.into_response(),
+                };
+            }
             return ApiError::new(StatusCode::SERVICE_UNAVAILABLE, accounts::IDENTITY_NOT_LOADED)
                 .into_response();
         }
@@ -5375,6 +5385,19 @@ mod tests {
         assert_eq!(v["error"], accounts::IDENTITY_NOT_LOADED);
         let (st, _) = send("GET", "/v1/me".into(), "s3cret".into(), None).await;
         assert_eq!(st, StatusCode::OK, "the API token logs in meanwhile");
+        // Log out still works then, so the browser gets to Log in and the API token (Hermes
+        // review of #209 at 6bf5f7d)
+        sessions(&[OLD, NEW, "logsout"]);
+        let (st, v) = send("DELETE", "/v1/me/token".into(), "pmo_logsout".into(), None).await;
+        assert_eq!((st, v["ended"].as_bool()), (StatusCode::OK, Some(true)), "{v}");
+        let (st, v) = send("DELETE", "/v1/me/token".into(), "pmo_logsout".into(), None).await;
+        assert_eq!(
+            (st, v["ended"].as_bool()),
+            (StatusCode::OK, Some(false)),
+            "already ended: {v}"
+        );
+        let (st, _) = send("POST", "/v1/node/token".into(), format!("pmo_{OLD}"), None).await;
+        assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "only Log out goes through");
         // The node takes on another identity: the old owner's sessions are gone for good, the new
         // owner's stay
         accounts::keep_owner_sessions_of(&s, &format!("pubky{NEW}")).unwrap();
