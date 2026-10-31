@@ -140,6 +140,14 @@ pub trait AudioSink: Send {
         Ok(())
     }
 
+    /// Whether [`Self::resume`] can carry on from what the device held, without resuming yet: an
+    /// error when it would fail (the device was stopped for the pause, or dropped the stream). A
+    /// group asks every member first, so none plays before another turns out to need a fresh
+    /// start.
+    fn ready_to_resume(&mut self) -> Result<(), SinkError> {
+        Ok(())
+    }
+
     /// Frames written so far, for position reporting.
     fn frames_written(&self) -> u64;
 

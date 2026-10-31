@@ -628,11 +628,10 @@ impl AudioSink for GroupSink {
         Ok(true)
     }
 
-    /// Carry on when every member held its buffer, all at once. When only some did, they would
-    /// play seconds of it while the others start after it: an error, so the zone opens the group
-    /// again from what was heard and the members start in step.
-    fn resume(&mut self) -> Result<(), SinkError> {
-        let Some(held) = self.paused.take() else {
+    /// Every member held its buffer and can carry on from it (each asked at once). When only
+    /// some can, they would play seconds of it while the others start after it.
+    fn ready_to_resume(&mut self) -> Result<(), SinkError> {
+        let Some(held) = &self.paused else {
             return Ok(());
         };
         if held.contains(&false) {
@@ -641,6 +640,19 @@ impl AudioSink for GroupSink {
                     .into(),
             ));
         }
+        self.each_at_once(|s| s.ready_to_resume()).into_iter().collect()
+    }
+
+    /// Carry on, all at once, only once every member can ([`Self::ready_to_resume`]): else an
+    /// error before any member plays, so the zone opens the group again from what was heard and
+    /// the members start in step.
+    fn resume(&mut self) -> Result<(), SinkError> {
+        if self.paused.is_none() {
+            return Ok(());
+        }
+        let ready = self.ready_to_resume();
+        self.paused = None;
+        ready?;
         self.each_at_once(|s| s.resume()).into_iter().collect()
     }
 
@@ -1181,6 +1193,8 @@ mod tests {
     struct Pausing {
         id: &'static str,
         holds: bool,
+        /// Can carry on from its buffer (a Cast receiver stopped for the pause can't).
+        ready: bool,
         delay: std::time::Duration,
         log: Arc<std::sync::Mutex<Vec<String>>>,
         caps: OutputCaps,
@@ -1191,6 +1205,7 @@ mod tests {
             Arc::new(Self {
                 id,
                 holds,
+                ready: true,
                 delay: std::time::Duration::from_millis(300),
                 log: log.clone(),
                 caps: OutputCaps::unlimited(),
@@ -1250,7 +1265,15 @@ mod tests {
                 .push(format!("{} pause", self.out.id));
             Ok(self.out.holds)
         }
+        fn ready_to_resume(&mut self) -> Result<(), SinkError> {
+            if self.out.ready {
+                Ok(())
+            } else {
+                Err(SinkError::Device(format!("{} was stopped", self.out.id)))
+            }
+        }
         fn resume(&mut self) -> Result<(), SinkError> {
+            self.ready_to_resume()?;
             self.out
                 .log
                 .lock()
@@ -1309,6 +1332,37 @@ mod tests {
         assert!(sink.pause().unwrap());
         let e = sink.resume().unwrap_err().to_string();
         assert!(e.contains("starting the group again"), "{e}");
+        assert!(
+            !log.lock().unwrap().iter().any(|l| l.ends_with("resume")),
+            "{:?}",
+            log.lock().unwrap()
+        );
+    }
+
+    /// A member that held but can't carry on (a Cast receiver stopped for the pause) fails the
+    /// group's resume before any member plays: the others don't play a blip of their buffer
+    /// before the group starts again.
+    #[tokio::test]
+    async fn no_member_resumes_when_one_cannot_carry_on() {
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let stopped = Arc::new(Pausing {
+            id: "cast",
+            holds: true,
+            ready: false,
+            delay: std::time::Duration::ZERO,
+            log: log.clone(),
+            caps: OutputCaps::unlimited(),
+        });
+        let g = GroupOutput::new(
+            "g",
+            vec![Arc::new(Pausing::new("mpd", true, &log)), Arc::new(stopped)],
+        )
+        .unwrap();
+        let mut sink = g.open(AudioFormat::pcm(48_000, 16, 2)).await.unwrap();
+        assert!(sink.pause().unwrap());
+        assert!(sink.ready_to_resume().is_err());
+        let e = sink.resume().unwrap_err().to_string();
+        assert!(e.contains("cast was stopped"), "{e}");
         assert!(
             !log.lock().unwrap().iter().any(|l| l.ends_with("resume")),
             "{:?}",

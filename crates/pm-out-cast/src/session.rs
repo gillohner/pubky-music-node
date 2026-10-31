@@ -15,6 +15,7 @@ use crate::{CastError, Meta};
 use serde_json::{json, Value};
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadHalf, WriteHalf};
@@ -26,8 +27,10 @@ const RECEIVER_0: &str = "receiver-0";
 pub const PING_EVERY: Duration = Duration::from_secs(5);
 /// Reconnect attempts after the link drops, with doubling waits from 1 s.
 const RESUME_TRIES: u32 = 5;
-/// How long a PAUSE waits for the receiver to report PAUSED before it is stopped instead.
+/// How long a PAUSE waits for the receiver to say: one that says it plays on is stopped instead.
 pub const PAUSE_CONFIRM: Duration = Duration::from_secs(1);
+/// How long a PLAY waits for the receiver to say it plays the paused media again.
+pub const PLAY_CONFIRM: Duration = Duration::from_secs(2);
 /// `supportedMediaCommands` bit for PAUSE.
 const CAN_PAUSE: u64 = 1;
 
@@ -48,7 +51,8 @@ enum Cmd {
     Volume(Option<f64>, Option<bool>),
     Stop(oneshot::Sender<()>),
     Pause(oneshot::Sender<Paused>),
-    /// Play after a pause; the answer is false when there is no media to play on.
+    /// Play after a pause; true once the receiver says it plays the paused media again, false
+    /// when it can't (an error, no media, a reload it needs first).
     Play(oneshot::Sender<bool>),
 }
 
@@ -82,7 +86,15 @@ pub struct Session {
 
 impl Session {
     /// Take over a launched and loaded `link`. `reconnect` opens a fresh link to the same device.
-    pub fn spawn<S, F, Fut>(link: CastLink<S>, media: Media, ping_every: Duration, reconnect: F) -> Self
+    /// `pause_stops` is the device's, kept across sessions: set once its receiver plays on after a
+    /// PAUSE, so later pauses stop it at once.
+    pub fn spawn<S, F, Fut>(
+        link: CastLink<S>,
+        media: Media,
+        ping_every: Duration,
+        reconnect: F,
+        pause_stops: Arc<AtomicBool>,
+    ) -> Self
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
         F: Fn() -> Fut + Send + Sync + 'static,
@@ -92,7 +104,7 @@ impl Session {
         let status = Arc::new(Mutex::new(SessionStatus::default()));
         let reconnect: Reconnect<S> = Arc::new(move || Box::pin(reconnect()));
         let st = status.clone();
-        crate::link::runtime().spawn(run(link, media, ping_every, reconnect, rx, st));
+        crate::link::runtime().spawn(run(link, media, ping_every, reconnect, rx, st, pause_stops));
         Self { tx, status }
     }
 
@@ -223,6 +235,7 @@ async fn run<S>(
     reconnect: Reconnect<S>,
     mut rx: mpsc::UnboundedReceiver<Cmd>,
     status: Arc<Mutex<SessionStatus>>,
+    pause_stops: Arc<AtomicBool>,
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -232,10 +245,15 @@ async fn run<S>(
         media_session_id: link.media_session_id,
         commands: None,
     };
-    // A PAUSE waiting for the receiver to say PAUSED, and until when
-    let mut pausing: Option<(oneshot::Sender<Paused>, tokio::time::Instant)> = None;
-    // The receiver played on after a PAUSE: later pauses stop it at once
-    let mut pause_stops = false;
+    // A PAUSE waiting for the receiver to say, until when, and the state it reported since
+    let mut pausing: Option<(oneshot::Sender<Paused>, tokio::time::Instant, Option<String>)> = None;
+    // A PLAY waiting for the receiver to play the paused media again, and until when
+    let mut playing: Option<(oneshot::Sender<bool>, tokio::time::Instant)> = None;
+    // The zone paused: nothing loads (and so plays) by itself until its PLAY
+    let mut paused = false;
+    // The media needs loading again (an error, a relaunch) while paused: the PLAY can't carry on,
+    // so the zone opens the output again from what was heard
+    let mut stale = false;
     let mut live = Some(Live::new(link));
     let mut ping = tokio::time::interval(ping_every);
     ping.tick().await;
@@ -246,7 +264,8 @@ async fn run<S>(
             finish(&mut rx).await;
             return;
         };
-        let pause_due = pausing.as_ref().map(|(_, at)| *at);
+        let pause_due = pausing.as_ref().map(|(_, at, _)| *at);
+        let play_due = playing.as_ref().map(|(_, at)| *at);
         tokio::select! {
             cmd = rx.recv() => match cmd {
                 Some(Cmd::Volume(level, muted)) => {
@@ -256,11 +275,15 @@ async fn run<S>(
                     let _ = l.writer.send(RECEIVER_0, NS_RECEIVER, json!({"type": "SET_VOLUME", "volume": Value::Object(vol)})).await;
                 }
                 Some(Cmd::Pause(ack)) => {
-                    if let Some((earlier, _)) = pausing.take() {
+                    paused = true;
+                    if let Some((earlier, _, _)) = pausing.take() {
                         let _ = earlier.send(Paused::Held);
                     }
+                    if let Some((earlier, _)) = playing.take() {
+                        let _ = earlier.send(false);
+                    }
                     let can_pause = ids.commands.is_none_or(|c| c & CAN_PAUSE != 0);
-                    let kind = if pause_stops || !can_pause { "STOP" } else { "PAUSE" };
+                    let kind = if pause_stops.load(Ordering::SeqCst) || !can_pause { "STOP" } else { "PAUSE" };
                     let sent = match ids.media(kind) {
                         Some((t, payload)) => l.writer.send(&t, NS_MEDIA, payload).await.is_ok(),
                         None => false,
@@ -270,16 +293,22 @@ async fn run<S>(
                     } else if kind == "STOP" {
                         let _ = ack.send(Paused::Stopped);
                     } else {
-                        pausing = Some((ack, tokio::time::Instant::now() + PAUSE_CONFIRM));
+                        pausing = Some((ack, tokio::time::Instant::now() + PAUSE_CONFIRM, None));
                     }
                 }
                 Some(Cmd::Play(ack)) => {
                     let idle = status.lock().expect("cast status").player_state.as_deref() == Some("IDLE");
                     let sent = match ids.media("PLAY") {
-                        Some((t, payload)) if !idle => l.writer.send(&t, NS_MEDIA, payload).await.is_ok(),
+                        Some((t, payload)) if !idle && !stale => l.writer.send(&t, NS_MEDIA, payload).await.is_ok(),
                         _ => false,
                     };
-                    let _ = ack.send(sent);
+                    if sent {
+                        if let Some((earlier, _)) = playing.replace((ack, tokio::time::Instant::now() + PLAY_CONFIRM)) {
+                            let _ = earlier.send(false);
+                        }
+                    } else {
+                        let _ = ack.send(false);
+                    }
                 }
                 Some(Cmd::Stop(ack)) => {
                     if let Some(sid) = &ids.session_id {
@@ -309,11 +338,35 @@ async fn run<S>(
                                 }
                             }
                         }
+                        // The receiver turned a media command down (a PLAY for media it no longer has)
+                        (NS_MEDIA, "INVALID_REQUEST" | "INVALID_PLAYER_STATE" | "LOAD_FAILED" | "LOAD_CANCELLED") => {
+                            if let Some((ack, _)) = playing.take() {
+                                tracing::info!("the Cast receiver refused PLAY after the pause ({t})");
+                                let _ = ack.send(false);
+                            }
+                        }
                         (NS_MEDIA, "MEDIA_STATUS") => {
                             let s0 = v.pointer("/status/0");
                             let state = s0.and_then(|s| s.get("playerState")).and_then(Value::as_str).map(str::to_string);
                             let idle_error = s0.and_then(|s| s.get("idleReason")).and_then(Value::as_str) == Some("ERROR");
-                            if let Some(m) = s0.and_then(|s| s.get("mediaSessionId")).and_then(Value::as_u64) {
+                            let media_id = s0.and_then(|s| s.get("mediaSessionId")).and_then(Value::as_u64);
+                            // PLAY confirmed only by the paused media playing again
+                            let ours = media_id.is_some() && media_id == ids.media_session_id;
+                            match state.as_deref() {
+                                Some("PLAYING" | "BUFFERING") if ours => {
+                                    if let Some((ack, _)) = playing.take() {
+                                        paused = false;
+                                        let _ = ack.send(true);
+                                    }
+                                }
+                                Some("IDLE") => {
+                                    if let Some((ack, _)) = playing.take() {
+                                        let _ = ack.send(false);
+                                    }
+                                }
+                                _ => {}
+                            }
+                            if let Some(m) = media_id {
                                 ids.media_session_id = Some(m);
                             }
                             if let Some(c) = s0.and_then(|s| s.get("supportedMediaCommands")).and_then(Value::as_u64) {
@@ -325,12 +378,18 @@ async fn run<S>(
                                 _ => None,
                             };
                             if let Some(how) = outcome {
-                                if let Some((ack, _)) = pausing.take() {
+                                if let Some((ack, _, _)) = pausing.take() {
                                     let _ = ack.send(how);
                                 }
+                            } else if let Some((_, _, seen)) = pausing.as_mut() {
+                                *seen = state.clone();
                             }
                             status.lock().expect("cast status").player_state = state;
-                            if idle_error && last_reload.elapsed() > Duration::from_secs(10) {
+                            if idle_error && paused {
+                                // Loading now would play while the zone is paused
+                                tracing::info!("the Cast receiver reported a media error while paused; the resume starts it again");
+                                stale = true;
+                            } else if idle_error && last_reload.elapsed() > Duration::from_secs(10) {
                                 last_reload = tokio::time::Instant::now();
                                 tracing::warn!("the Cast receiver reported a media error; loading the stream again");
                                 if let Some(t) = ids.transport_id.clone() {
@@ -344,7 +403,7 @@ async fn run<S>(
                 None => {
                     // The link dropped: come back to the same session if it still runs.
                     live = None;
-                    match resume(&reconnect, &mut ids, &media).await {
+                    match resume(&reconnect, &mut ids, &media, !paused).await {
                         Some(link) => {
                             status.lock().expect("cast status").resumed += 1;
                             live = Some(Live::new(link));
@@ -357,20 +416,26 @@ async fn run<S>(
                 }
             },
             _ = async { tokio::time::sleep_until(pause_due.expect("pausing")).await }, if pause_due.is_some() => {
-                let Some((ack, _)) = pausing.take() else { continue };
-                let state = status.lock().expect("cast status").player_state.clone();
-                // Only a receiver last seen playing on is stopped; one that didn't say may well have paused
-                if !matches!(state.as_deref(), Some("PLAYING" | "BUFFERING")) {
+                let Some((ack, _, seen)) = pausing.take() else { continue };
+                // Only a receiver that said it plays on since the PAUSE is stopped; one that didn't
+                // say (slow to answer) may well have paused
+                if !matches!(seen.as_deref(), Some("PLAYING" | "BUFFERING")) {
                     let _ = ack.send(Paused::Held);
                     continue;
                 }
                 tracing::info!("the Cast receiver plays on after PAUSE; stopping it for pauses from now on");
-                pause_stops = true;
+                pause_stops.store(true, Ordering::SeqCst);
                 let stopped = match ids.media("STOP") {
                     Some((t, payload)) => l.writer.send(&t, NS_MEDIA, payload).await.is_ok(),
                     None => false,
                 };
                 let _ = ack.send(if stopped { Paused::Stopped } else { Paused::Refused });
+            }
+            _ = async { tokio::time::sleep_until(play_due.expect("playing")).await }, if play_due.is_some() => {
+                if let Some((ack, _)) = playing.take() {
+                    tracing::info!("the Cast receiver didn't say it plays again after PLAY");
+                    let _ = ack.send(false);
+                }
             }
             _ = ping.tick() => {
                 let _ = l.writer.send(RECEIVER_0, NS_HEARTBEAT, json!({"type": "PING"})).await;
@@ -403,8 +468,15 @@ fn load_payload(media: &Media) -> Value {
     })
 }
 
-/// Reconnect; join our session if the receiver still runs it, else launch and load again.
-async fn resume<S>(reconnect: &Reconnect<S>, ids: &mut Ids, media: &Media) -> Option<CastLink<S>>
+/// Reconnect; join our session if the receiver still runs it, else launch and load again
+/// (unless `may_load` is false: paused, a load would play by itself; the zone's resume opens the
+/// output again instead).
+async fn resume<S>(
+    reconnect: &Reconnect<S>,
+    ids: &mut Ids,
+    media: &Media,
+    may_load: bool,
+) -> Option<CastLink<S>>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -423,6 +495,10 @@ where
             Ok(true) => {
                 tracing::info!("Cast session resumed");
                 return Some(link);
+            }
+            Ok(false) if !may_load => {
+                tracing::info!("the Cast session ended during the pause; the resume starts it again");
+                return None;
             }
             Ok(false) => {
                 // The session ended on the device (it was idle too long, or rebooted): start again.
@@ -461,6 +537,8 @@ pub(crate) mod tests {
         /// Another sender launched something else.
         TakeOver,
         Ping,
+        /// The media failed (the stream broke): IDLE with idleReason ERROR.
+        MediaError,
     }
 
     #[derive(Default)]
@@ -468,7 +546,13 @@ pub(crate) mod tests {
         log: Mutex<Vec<String>>,
         connections: Mutex<u32>,
         /// Answers PAUSE but plays on (as a Linn does on the live stream).
-        pub(crate) ignores_pause: std::sync::atomic::AtomicBool,
+        pub(crate) ignores_pause: AtomicBool,
+        /// Answers PAUSE only after this long (weak Wi-Fi).
+        pub(crate) pause_answer_ms: std::sync::atomic::AtomicU64,
+        /// Turns PLAY down (INVALID_REQUEST: media it no longer has).
+        pub(crate) refuses_play: AtomicBool,
+        /// Has forgotten the session (idle too long, rebooted): GET_STATUS lists no app.
+        pub(crate) forgot_session: AtomicBool,
     }
 
     /// A default media receiver over plain TCP that keeps its session across connections.
@@ -507,6 +591,9 @@ pub(crate) mod tests {
                             fake.log.lock().unwrap().push(format!("{n} {ns} {t}{media_session}"));
                             let media_status = |state: &str| json!({"type": "MEDIA_STATUS", "status": [{"mediaSessionId": 9, "playerState": state, "supportedMediaCommands": 15}]});
                             match (ns.as_str(), t.as_str()) {
+                                (_, "GET_STATUS") if fake.forgot_session.load(Ordering::SeqCst) => {
+                                    let _ = send(&mut w, NS_RECEIVER, json!({"type": "RECEIVER_STATUS", "status": {"applications": []}})).await;
+                                }
                                 (_, "LAUNCH" | "GET_STATUS") => {
                                     let _ = send(&mut w, NS_RECEIVER, json!({"type": "RECEIVER_STATUS", "status": {"applications": [app]}})).await;
                                 }
@@ -514,8 +601,13 @@ pub(crate) mod tests {
                                     let _ = send(&mut w, NS_MEDIA, json!({"type": "MEDIA_STATUS", "status": [{"mediaSessionId": 9, "playerState": "PLAYING"}]})).await;
                                 }
                                 ("media", "PAUSE") => {
-                                    let plays_on = fake.ignores_pause.load(std::sync::atomic::Ordering::SeqCst);
+                                    let plays_on = fake.ignores_pause.load(Ordering::SeqCst);
+                                    let wait = fake.pause_answer_ms.load(Ordering::SeqCst);
+                                    tokio::time::sleep(Duration::from_millis(wait)).await;
                                     let _ = send(&mut w, NS_MEDIA, media_status(if plays_on { "PLAYING" } else { "PAUSED" })).await;
+                                }
+                                ("media", "PLAY") if fake.refuses_play.load(Ordering::SeqCst) => {
+                                    let _ = send(&mut w, NS_MEDIA, json!({"type": "INVALID_REQUEST", "reason": "INVALID_MEDIA_SESSION_ID"})).await;
                                 }
                                 ("media", "PLAY") => {
                                     let _ = send(&mut w, NS_MEDIA, media_status("PLAYING")).await;
@@ -535,6 +627,9 @@ pub(crate) mod tests {
                             Ok(Ctl::Ping) => {
                                 let _ = send(&mut w, NS_HEARTBEAT, json!({"type": "PING"})).await;
                             }
+                            Ok(Ctl::MediaError) => {
+                                let _ = send(&mut w, NS_MEDIA, json!({"type": "MEDIA_STATUS", "status": [{"mediaSessionId": 9, "playerState": "IDLE", "idleReason": "ERROR"}]})).await;
+                            }
                             Err(_) => return,
                         }
                     }
@@ -549,9 +644,16 @@ pub(crate) mod tests {
     }
 
     pub(crate) async fn setup() -> (Session, Arc<Fake>, broadcast::Sender<Ctl>) {
+        setup_with(Arc::new(Fake::default()), Default::default()).await
+    }
+
+    /// A session on `fake`, with the device's learned `pause_stops`.
+    pub(crate) async fn setup_with(
+        fake: Arc<Fake>,
+        pause_stops: Arc<AtomicBool>,
+    ) -> (Session, Arc<Fake>, broadcast::Sender<Ctl>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let fake = Arc::new(Fake::default());
         let (ctl, _) = broadcast::channel(8);
         crate::link::runtime().spawn(fake_device(listener, fake.clone(), ctl.clone()));
         let connect =
@@ -572,7 +674,7 @@ pub(crate) mod tests {
                 let mut link = connect().await.unwrap();
                 link.launch().await.unwrap();
                 link.load(&m.url, &m.content_type, &m.meta).await.unwrap();
-                Session::spawn(link, m, Duration::from_millis(200), connect)
+                Session::spawn(link, m, Duration::from_millis(200), connect, pause_stops)
             })
             .await
             .unwrap();
@@ -683,35 +785,102 @@ pub(crate) mod tests {
         session.stop().await;
     }
 
-    /// A receiver that answers PAUSE but plays on is stopped instead, at once from then on.
+    fn media_log(f: &Fake) -> Vec<String> {
+        log(f).into_iter().filter(|l| l.contains(" media ")).collect()
+    }
+
+    /// A receiver that says it plays on after PAUSE is stopped instead, and from then on at once:
+    /// the device remembers it, as each resume after a STOP starts a new session.
     #[tokio::test]
-    async fn a_receiver_that_plays_on_after_pause_is_stopped() {
-        let (session, fake, _ctl) = setup().await;
-        fake.ignores_pause
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+    async fn a_receiver_that_plays_on_after_pause_is_stopped_from_then_on() {
+        let stops = Arc::new(AtomicBool::new(false));
+        let fake = Arc::new(Fake::default());
+        fake.ignores_pause.store(true, Ordering::SeqCst);
+        let (first, _, _c1) = setup_with(fake.clone(), stops.clone()).await;
         let t = std::time::Instant::now();
-        assert_eq!(session.pause().await.unwrap(), Paused::Stopped);
+        assert_eq!(first.pause().await.unwrap(), Paused::Stopped);
         assert!(t.elapsed() >= PAUSE_CONFIRM, "{:?}", t.elapsed());
         until(&fake, "1 media STOP 9").await;
-        // Learned: the next pause stops without trying PAUSE
+        first.stop().await;
+        // The resume opened the output again: a new session
+        let (second, _, _c2) = setup_with(fake.clone(), stops).await;
         let t = std::time::Instant::now();
-        assert_eq!(session.pause().await.unwrap(), Paused::Stopped);
+        assert_eq!(second.pause().await.unwrap(), Paused::Stopped);
         assert!(t.elapsed() < PAUSE_CONFIRM, "{:?}", t.elapsed());
-        for _ in 0..200 {
-            if log(&fake).iter().filter(|l| *l == "1 media STOP 9").count() == 2 {
+        until(&fake, "2 media STOP 9").await;
+        assert!(
+            !log(&fake).contains(&"2 media PAUSE 9".to_string()),
+            "{:?}",
+            log(&fake)
+        );
+        second.stop().await;
+    }
+
+    /// A receiver slow to answer PAUSE (weak Wi-Fi) is not taken for one that plays on: only a
+    /// state it reports after the PAUSE counts, not the PLAYING from before.
+    #[tokio::test]
+    async fn a_receiver_slow_to_answer_pause_is_not_stopped() {
+        let (session, fake, _ctl) = setup().await;
+        // Seen playing: a pause and play before
+        assert_eq!(session.pause().await.unwrap(), Paused::Held);
+        assert!(session.play().await.unwrap());
+        assert_eq!(session.status().player_state.as_deref(), Some("PLAYING"));
+        fake.pause_answer_ms.store(1500, Ordering::SeqCst);
+        assert_eq!(session.pause().await.unwrap(), Paused::Held);
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        assert!(
+            !media_log(&fake).iter().any(|l| l.contains("STOP")),
+            "{:?}",
+            media_log(&fake)
+        );
+        session.stop().await;
+    }
+
+    /// PLAY counts only once the receiver plays the paused media again: one that turns it down
+    /// (INVALID_REQUEST, a stale media session) answers false, so the zone starts it again.
+    #[tokio::test]
+    async fn a_play_the_receiver_turns_down_is_not_taken_for_playing() {
+        let (session, fake, _ctl) = setup().await;
+        assert_eq!(session.pause().await.unwrap(), Paused::Held);
+        fake.refuses_play.store(true, Ordering::SeqCst);
+        assert!(!session.play().await.unwrap());
+        session.stop().await;
+    }
+
+    /// Nothing plays by itself while paused: a media error doesn't load the stream again (with
+    /// autoplay), and a session the device forgot isn't launched and loaded again on reconnect.
+    /// The resume can't carry on either way, so the zone opens the output from what was heard.
+    #[tokio::test]
+    async fn nothing_loads_by_itself_while_paused() {
+        let (session, fake, ctl) = setup().await;
+        assert_eq!(session.pause().await.unwrap(), Paused::Held);
+        // Past the 10 s between reloads after a media error
+        tokio::time::sleep(Duration::from_millis(10_200)).await;
+        ctl.send(Ctl::MediaError).unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(!session.play().await.unwrap(), "the media must load again first");
+        assert_eq!(media_log(&fake), ["1 media LOAD", "1 media PAUSE 9"]);
+        session.stop().await;
+
+        let (session, fake, ctl) = setup().await;
+        assert_eq!(session.pause().await.unwrap(), Paused::Held);
+        fake.forgot_session.store(true, Ordering::SeqCst);
+        ctl.send(Ctl::Drop).unwrap();
+        until(&fake, "2 receiver GET_STATUS").await;
+        for _ in 0..100 {
+            if session.status().lost {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
-        let media: Vec<String> = log(&fake).into_iter().filter(|l| l.contains(" media ")).collect();
-        assert_eq!(
-            media,
-            [
-                "1 media LOAD",
-                "1 media PAUSE 9",
-                "1 media STOP 9",
-                "1 media STOP 9"
-            ]
+        assert!(session.status().lost, "{:?}", session.status());
+        assert!(!matches!(session.play().await, Ok(true)));
+        assert!(
+            !log(&fake)
+                .iter()
+                .any(|l| l.starts_with("2 ") && (l.ends_with("LAUNCH") || l.ends_with("LOAD"))),
+            "{:?}",
+            log(&fake)
         );
         session.stop().await;
     }

@@ -16,14 +16,15 @@ use async_trait::async_trait;
 use pm_model::{AudioBlock, AudioFormat, OutputCaps, QualityCeiling, SampleKind, Volume, VolumeKind};
 use pm_zones::outputs::PullOutput;
 use pm_zones::{AudioSink, BufferLevel, Output, OutputId, QueueItem, SinkError};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::oneshot;
 
 /// How long a resume waits for its pause's outcome (the receiver's PAUSED, or the STOP after it).
 const PAUSE_OUTCOME_WAIT: Duration = Duration::from_secs(3);
-/// How long a resume waits for the session to send PLAY.
-const PLAY_WAIT: Duration = Duration::from_secs(2);
+/// How long a resume waits for the receiver to play again (the session gives up before).
+const PLAY_WAIT: Duration = Duration::from_secs(3);
 
 pub use pm_zones::Describe;
 
@@ -37,6 +38,8 @@ pub struct CastOutput {
     describe: Option<Describe>,
     /// The track about to play or playing (`Output::now_playing`).
     meta: Mutex<Option<Meta>>,
+    /// The receiver plays on after PAUSE: pauses stop it at once (every session learns from it).
+    pause_stops: Arc<AtomicBool>,
 }
 
 impl CastOutput {
@@ -64,6 +67,7 @@ impl CastOutput {
             session: Arc::new(Mutex::new(None)),
             describe: None,
             meta: Mutex::new(None),
+            pause_stops: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -148,6 +152,7 @@ impl Output for CastOutput {
         };
         // A sink left open (a format change) hands over to the new one.
         let old = self.session.lock().expect("session").take();
+        let pause_stops = self.pause_stops.clone();
         let session = block_on(async move {
             if let Some(old) = old {
                 old.stop().await;
@@ -155,14 +160,22 @@ impl Output for CastOutput {
             let mut link = connect_tls(addr).await?;
             link.launch().await?;
             link.load(&media.url, &media.content_type, &media.meta).await?;
-            Ok::<_, CastError>(Session::spawn(link, media, PING_EVERY, move || connect_tls(addr)))
+            Ok::<_, CastError>(Session::spawn(
+                link,
+                media,
+                PING_EVERY,
+                move || connect_tls(addr),
+                pause_stops,
+            ))
         })
         .map_err(cast_err)?;
         *self.session.lock().expect("session") = Some(session);
         Ok(Box::new(CastSink {
             inner,
             session: self.session.clone(),
-            paused: None,
+            paused: false,
+            outcome: None,
+            how: None,
         }))
     }
 
@@ -192,8 +205,35 @@ impl Output for CastOutput {
 struct CastSink {
     inner: Box<dyn AudioSink>,
     session: Arc<Mutex<Option<Session>>>,
-    /// Paused on the receiver: how it went, once the session knows.
-    paused: Option<oneshot::Receiver<Paused>>,
+    /// Paused on the receiver.
+    paused: bool,
+    /// How the pause went, once the session knows...
+    outcome: Option<oneshot::Receiver<Paused>>,
+    /// ...and once read (`None` inside: the session ended, or never said).
+    how: Option<Option<Paused>>,
+}
+
+impl CastSink {
+    /// How the pause went: waits for the session's answer once.
+    fn pause_outcome(&mut self) -> Option<Paused> {
+        if let Some(rx) = self.outcome.take() {
+            self.how = Some(answer(rx, PAUSE_OUTCOME_WAIT));
+        }
+        self.how.flatten()
+    }
+}
+
+/// Why a resume after this pause outcome can't carry on (the zone opens the output again).
+fn cannot_carry_on(how: Option<Paused>) -> Option<&'static str> {
+    match how {
+        Some(Paused::Stopped) => Some("the receiver was stopped for the pause"),
+        None => Some("the session ended during the pause"),
+        Some(Paused::Held | Paused::Refused) => None,
+    }
+}
+
+fn reopen(why: &str) -> Result<(), SinkError> {
+    Err(SinkError::Device(format!("Cast: {why}; starting it again")))
 }
 
 /// Wait for a session's answer on the Cast runtime; `None` when it doesn't come in time or the
@@ -224,29 +264,42 @@ impl AudioSink for CastSink {
         let Some(rx) = self.session.lock().expect("session").as_ref().map(Session::pause) else {
             return self.inner.flush().map(|()| false);
         };
-        self.paused = Some(rx);
+        self.paused = true;
+        self.outcome = Some(rx);
+        self.how = None;
         self.inner.pause()?;
         Ok(true)
+    }
+    /// Whether the receiver held its buffer (it wasn't stopped for the pause).
+    fn ready_to_resume(&mut self) -> Result<(), SinkError> {
+        if !self.paused {
+            return Ok(());
+        }
+        match cannot_carry_on(self.pause_outcome()) {
+            Some(why) => reopen(why),
+            None => Ok(()),
+        }
     }
     /// PLAY after a PAUSE. A receiver stopped for the pause (or a session that ended meanwhile)
     /// is an error: the zone opens the output again from what was last heard.
     fn resume(&mut self) -> Result<(), SinkError> {
-        let Some(rx) = self.paused.take() else {
+        if !std::mem::take(&mut self.paused) {
             return self.inner.resume();
-        };
-        let reopen = |why: &str| Err(SinkError::Device(format!("Cast: {why}; starting it again")));
-        match answer(rx, PAUSE_OUTCOME_WAIT) {
-            Some(Paused::Stopped) => return reopen("the receiver was stopped for the pause"),
-            None => return reopen("the session ended during the pause"),
-            // Nothing was paused: the stream carries on
-            Some(Paused::Refused) => return self.inner.resume(),
-            Some(Paused::Held) => {}
+        }
+        let how = self.pause_outcome();
+        self.how = None;
+        if let Some(why) = cannot_carry_on(how) {
+            return reopen(why);
+        }
+        // Nothing was paused: the stream carries on
+        if how == Some(Paused::Refused) {
+            return self.inner.resume();
         }
         let Some(play) = self.session.lock().expect("session").as_ref().map(Session::play) else {
             return reopen("the session ended during the pause");
         };
         if answer(play, PLAY_WAIT) != Some(true) {
-            return reopen("the receiver has no media to play on");
+            return reopen("the receiver didn't play again after the pause");
         }
         self.inner.resume()
     }
@@ -273,7 +326,9 @@ mod tests {
         CastSink {
             inner: pull.open(AudioFormat::pcm(44_100, 16, 2)).await.unwrap(),
             session: Arc::new(Mutex::new(Some(session))),
-            paused: None,
+            paused: false,
+            outcome: None,
+            how: None,
         }
     }
 
@@ -306,14 +361,17 @@ mod tests {
         fake.ignores_pause
             .store(true, std::sync::atomic::Ordering::SeqCst);
         let mut sink = sink(session, "cast-stop").await;
-        let (paused, resumed, sink) = std::thread::spawn(move || {
+        let (paused, ready, resumed, sink) = std::thread::spawn(move || {
             let paused = sink.pause().unwrap();
+            // A group asks before any member resumes
+            let ready = sink.ready_to_resume();
             let resumed = sink.resume();
-            (paused, resumed, sink)
+            (paused, ready, resumed, sink)
         })
         .join()
         .unwrap();
         assert!(paused);
+        assert!(ready.is_err(), "it can't carry on: {ready:?}");
         let e = resumed.unwrap_err().to_string();
         assert!(e.contains("stopped for the pause"), "{e}");
         assert!(
@@ -321,6 +379,26 @@ mod tests {
             "{:?}",
             log(&fake)
         );
+        drop(sink);
+    }
+
+    /// A receiver that turns the PLAY down (or never plays again) is not left paused while the
+    /// zone says playing: the resume is an error, so the zone starts it again.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_receiver_that_doesnt_play_again_is_opened_again() {
+        let (session, fake, _ctl) = setup().await;
+        fake.refuses_play.store(true, std::sync::atomic::Ordering::SeqCst);
+        let mut sink = sink(session, "cast-refuse").await;
+        let (ready, resumed, sink) = std::thread::spawn(move || {
+            assert!(sink.pause().unwrap());
+            let ready = sink.ready_to_resume();
+            (ready, sink.resume(), sink)
+        })
+        .join()
+        .unwrap();
+        assert!(ready.is_ok(), "it held its buffer: {ready:?}");
+        let e = resumed.unwrap_err().to_string();
+        assert!(e.contains("didn't play again"), "{e}");
         drop(sink);
     }
 }

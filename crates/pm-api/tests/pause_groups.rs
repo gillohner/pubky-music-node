@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 
 type Log = Arc<Mutex<Vec<String>>>;
 
-/// An MPD that logs its commands, gives the added stream id 42 and plays it.
+/// An MPD that logs its commands, gives the added stream id 42 and holds it paused.
 fn fake_mpd(log: Log) -> u16 {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -28,7 +28,7 @@ fn fake_mpd(log: Log) -> u16 {
                     let cmd = line.trim_end().to_string();
                     let answer = match cmd.split_whitespace().next() {
                         Some("addid") => "Id: 42\nOK\n",
-                        Some("status") => "state: play\nsongid: 42\nOK\n",
+                        Some("status") => "state: pause\nsongid: 42\nOK\n",
                         _ => "OK\n",
                     };
                     log.lock().unwrap().push(cmd);
@@ -108,8 +108,10 @@ async fn a_mixed_group_pauses_each_member_with_its_own_protocol() {
             "addid \"http://node/mpd.wav\"",
             "playid 42",
             "pause 1",
-            "pause 0",
+            // Every member is asked whether it can carry on before any resumes
             "status",
+            "status",
+            "pause 0",
             "stop",
             "deleteid 42",
         ]
