@@ -24,6 +24,10 @@ use std::sync::Arc;
 
 const TOKENS: &str = "accounts.tokens";
 const OWNER_SESSIONS: &str = "accounts.owner_sessions";
+/// A hash of the API token the owner's browser sessions were made under: one changed in the config
+/// ends them at the next start, as Make a new token does.
+/// Never in a backup (`backup::NODE_OWN`).
+pub(crate) const OWNER_SESSIONS_TOKEN: &str = "accounts.owner_sessions_token";
 /// The start of an owner's browser session token.
 pub const OWNER_PREFIX: &str = "pmo_";
 const ZONES: &str = "accounts.listener_zones";
@@ -82,7 +86,15 @@ fn update<R>(
     setting: &str,
     f: impl FnOnce(&mut Vec<PersonToken>) -> R,
 ) -> Result<R, ApiError> {
-    let lib = s.library.lock().expect("library poisoned");
+    update_in(&s.library.lock().expect("library poisoned"), setting, f)
+}
+
+/// [`update`] with the library already held.
+fn update_in<R>(
+    lib: &pm_library::Library,
+    setting: &str,
+    f: impl FnOnce(&mut Vec<PersonToken>) -> R,
+) -> Result<R, ApiError> {
     let mut all: Vec<PersonToken> = lib
         .get_setting(setting)
         .ok()
@@ -92,6 +104,11 @@ fn update<R>(
     let r = f(&mut all);
     lib.set_setting(setting, &serde_json::to_string(&all).expect("serializes"))?;
     Ok(r)
+}
+
+/// What [`OWNER_SESSIONS_TOKEN`] keeps: a hash of the API token in use (none: of nothing).
+fn token_mark(s: &NodeState) -> String {
+    hash(&s.token().unwrap_or_default())
 }
 
 fn load_tokens(s: &NodeState) -> Vec<PersonToken> {
@@ -127,7 +144,8 @@ pub fn mint(s: &NodeState, key: &str) -> Result<String, ApiError> {
 pub fn mint_owner(s: &NodeState, key: &str) -> Result<String, ApiError> {
     let token = format!("{OWNER_PREFIX}{}", crate::tidal::random_urlsafe(32));
     let key = key.trim_start_matches("pubky").to_string();
-    let made = update(s, OWNER_SESSIONS, |all| {
+    let lib = s.library.lock().expect("library poisoned");
+    let made = update_in(&lib, OWNER_SESSIONS, |all| {
         // Still the node's identity, checked under the same hold as the cleanup when it takes on
         // another one (`keep_owner_sessions_of`), so no session of the old one slips past it
         let current = s
@@ -145,6 +163,10 @@ pub fn mint_owner(s: &NodeState, key: &str) -> Result<String, ApiError> {
         }
         current
     })?;
+    if made {
+        lib.set_setting(OWNER_SESSIONS_TOKEN, &token_mark(s))?;
+    }
+    drop(lib);
     if !made {
         return Err(ApiError::new(
             StatusCode::CONFLICT,
@@ -183,6 +205,27 @@ pub fn end_owner_session(s: &NodeState, token: &str) -> Result<bool, ApiError> {
         all.retain(|t| t.hash != h);
         all.len() < before
     })
+}
+
+/// At start: the API token differs from the one the owner's browser sessions were made under (it
+/// was changed in the config, `PM_TOKEN` or `[api] token`), so they end, as with Make a new token.
+/// Whether any did.
+pub fn end_sessions_of_an_old_token(s: &NodeState) -> Result<bool, ApiError> {
+    let lib = s.library.lock().expect("library poisoned");
+    let mark = token_mark(s);
+    let was = lib.get_setting(OWNER_SESSIONS_TOKEN).ok().flatten();
+    let ended = match was.as_deref() {
+        Some(w) if w != mark => update_in(&lib, OWNER_SESSIONS, |all| {
+            let any = !all.is_empty();
+            all.clear();
+            any
+        })?,
+        _ => false,
+    };
+    if was.as_deref() != Some(mark.as_str()) {
+        lib.set_setting(OWNER_SESSIONS_TOKEN, &mark)?;
+    }
+    Ok(ended)
 }
 
 /// Ends every browser session of the owner (a new API token: the answer to a leak).

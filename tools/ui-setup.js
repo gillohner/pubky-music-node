@@ -186,7 +186,12 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
         check(!missed.length, `${w}×${h} (${shell}): every sidebar place within two taps${missed.length ? ` (missing ${missed.join(', ')})` : ''}`);
         check(await shown('#search') || await shown('[data-bnav="search"]'), `${w}×${h}: search`);
         let vol = await shown('#vol');
-        if (!vol && await shown('#volbtn')) { await p.click('#volbtn'); vol = await visible(p, '#qpanel #qpvol', 5000); }
+        if (!vol && await shown('#volbtn')) {
+          await p.click('#volbtn'); vol = await visible(p, '#qpanel #qpvol', 5000);
+          check(await p.getAttribute('#volbtn', 'aria-expanded') === 'true' && await p.getAttribute('#quality', 'aria-expanded') === 'false', `${w}×${h}: only the volume button says the panel is open`);
+          const off = await p.evaluate(() => { document.body.classList.add('offline'); const d = getComputedStyle(document.querySelector('#volbtn')).display; document.body.classList.remove('offline'); return d; });
+          check(off === 'none', `${w}×${h}: offline, no volume button into the Sound panel (${off})`);
+        }
         if (!vol && shell === 'phone' && await shown('#quality')) { await p.click('#quality'); vol = await visible(p, '#qpanel #qpvol', 5000); }
         check(vol, `${w}×${h}: volume (${(await shown('#vol')) ? 'slider in the bar' : 'in the Sound panel'})`);
         if (shell === 'tablet') {
@@ -200,6 +205,13 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
           check(new URL(p.url()).pathname !== '/sources' && await p.$eval('[data-bnav="library"]', (b) => b.classList.contains('on')) && !(await p.$eval('[data-bnav="sources"]', (b) => b.classList.contains('on'))), `${w}×${h}: after Sources, Library opens the library, marked`);
         }
         if (w === 1080) check(await shown('#volbtn') && !(await shown('#vol')), `${w}×${h}: a narrow desktop has the volume button`);
+        if (w === 390) {
+          // Sources recorded on the phone, then the window becomes a tablet: Library is the library
+          await p.goto(BASE + '/sources'); await p.waitForTimeout(800);
+          await p.setViewportSize({ width: 834, height: 1194 }); await p.waitForSelector('[data-bnav="sources"]', { state: 'visible', timeout: 5000 }).catch(() => {});
+          await p.click('[data-bnav="home"]'); await p.waitForTimeout(500); await p.click('[data-bnav="library"]'); await p.waitForTimeout(800);
+          check(new URL(p.url()).pathname === '/library', `phone then tablet: Library opens the library, not Sources (${new URL(p.url()).pathname})`);
+        }
         if (OUT_SHOTS && (layout || w === 834)) { await p.goto(BASE + '/albums'); await p.waitForTimeout(1500); await p.screenshot({ path: `${OUT_SHOTS}/tablet-rail-${w}x${h}.png` }); }
         await c.close();
       }
@@ -733,7 +745,7 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
       check(await loginShown(15000), 'Log out shows the Log in screen');
       check(await waitText(p, '#loginwhy', 'You logged out.'), 'it says you logged out');
       check(await p.evaluate(() => document.activeElement && document.activeElement.id === 'loginh'), 'the screen’s heading has the focus, so it is announced');
-      check(startBodies.length > 0 && startBodies.every((b) => !b || !JSON.parse(b).renew), 'a plain log in doesn’t ask for the node’s folders');
+      check(startBodies.length > 0 && startBodies.every((b) => !b || !JSON.parse(b).renewal), 'a plain log in doesn’t ask for the node’s folders');
       check(logouts === 1, 'the node was asked to end this browser’s session');
       check(await p.evaluate(() => localStorage.getItem('pm.token') === null && localStorage.getItem('pm.zone') === null), 'the browser forgot the token and the account’s state');
       check(!(await p.isVisible('.shell')) && !(await p.isVisible('#np')), 'no half of the app behind it');
@@ -817,12 +829,18 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
       check(await visible(p, '#pkresign [data-resign]', 20000), 'Settings says the node needs approval, with Log out');
       check(!(await p.$('#pklogin')), 'no separate "Sign in again"');
       // Its Log out asks the next log in for the folders (only the owner's page does)
-      const renewBodies = [];
+      const renewBodies = []; let codes = 0;
+      await c.route(/\/v1\/auth\/pubky\/renewal$/, (r) => { codes++; return r.fulfill({ json: { renewal: 'code-from-the-node' } }); });
       await c.route(/\/v1\/auth\/pubky\/start$/, (r) => { renewBodies.push(r.request().postData()); return r.fulfill({ json: { id: 'renew1', url: 'pubkyauth:///?caps=/pub/pubky.app/:r&secret=c2VjcmV0&relay=https://relay.example/link', owner: OWNER_K, owner_face: { id: OWNER_K, name: 'Alice' }, node_name: 'CI node', renews: true, qr_svg: QR } }); });
-      await c.route(/\/v1\/auth\/pubky\/poll/, (r) => r.fulfill({ json: { status: 'pending' } }));
+      let renewPoll = { status: 'pending' };
+      await c.route(/\/v1\/auth\/pubky\/poll/, (r) => r.fulfill({ json: renewPoll }));
       await p.click('#pkresign [data-resign]');
       check(await visible(p, '#loginpage', 15000) && await p.waitForFunction(() => /approve the new folders this node needs/.test(document.querySelector('#loginbody').textContent), null, { timeout: 10000 }).then(() => true).catch(() => false), 'its Log out leads to a log in that asks for the new folders');
-      check(renewBodies.length === 1 && JSON.parse(renewBodies[0] || '{}').renew === true, `the log in asks the node for a renewal (${renewBodies.join(' ')})`);
+      check(codes === 1 && renewBodies.length === 1 && JSON.parse(renewBodies[0] || '{}').renewal === 'code-from-the-node', `the log in asks for the renewal with the node's code (${renewBodies.join(' ')})`);
+      // A wrong identity, then Try again: still the renewal
+      renewPoll = { status: 'denied', reason: 'not_owner', user: OTHER_K, approver: { id: OTHER_K, name: 'Bob' }, owner_face: { id: OWNER_K, name: 'Alice' } };
+      await visible(p, '#loginagain', 10000); renewPoll = { status: 'pending' }; await p.click('#loginagain'); await p.waitForTimeout(800);
+      check(renewBodies.length === 2 && JSON.parse(renewBodies[1] || '{}').renewal === 'code-from-the-node', 'Try again after a wrong identity still asks for the renewal');
       await c.close();
       c = await ctx(); p = await c.newPage();
       await c.route(/\/v1\/pubky$/, (r) => r.fulfill({ json: { user: 'pubky' + OWNER_K, unsynced: 0, needs_resign: true, missing: ['/pub/music/v1/'], notice: 'This node needs your approval for new folders on your homeserver. Log out and log in again with Pubky Ring to give it.', sync: null } }));
