@@ -1,4 +1,4 @@
-// Sign-in chooser regression checks. Provider replies are mocked here; pm-api's Rust tests
+// Sign-in chooser regression checks (Qobuz has its own guided page: tools/ui-stream-setup.js). Provider replies are mocked here; pm-api's Rust tests
 // cover validation against mock provider servers and the private files on disk.
 // Run against a disposable fixture node:
 //   node tools/ui-signin.js <api token> <node URL> [screenshot directory]
@@ -10,7 +10,6 @@ const TOKEN = process.argv[2] || 'ci-token';
 const BASE = process.argv[3] || 'http://127.0.0.1:7788';
 const SHOTS = process.argv[4];
 const cases = [
-  { source: 'qobuz', url: '/sources/qobuz', mount: '#signin-qobuz', way: 'import', label: 'Pasted config', text: '[DEFAULT]\napp_id=100000000\nsecrets=fixture\nemail=listener@example.org\npassword=00000000000000000000000000000000\n', file: true },
   { source: 'spotify', url: '/sources/spotify', mount: '#signin-spotify', way: 'librespot-file', label: 'librespot, from a credentials file', text: '{"username":"listener","auth_type":1,"auth_data":"c3ludGhldGlj"}' },
   { source: 'youtube', url: '/sources/youtube', mount: '#signin-youtube', way: 'cookies', label: 'yt-dlp cookies', text: '# Netscape HTTP Cookie File\n#HttpOnly_.youtube.com\tTRUE\t/\tTRUE\t4000000000\tSID\tsynthetic-cookie\n' },
   { source: 'lastfm', url: '/settings/accounts', mount: '#lfbody', way: 'paste', label: 'Pasted sign-in', text: '0123456789abcdef0123456789abcdef\nfedcba9876543210fedcba9876543210\nsynthetic-session\n' },

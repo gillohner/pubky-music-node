@@ -648,24 +648,11 @@ pub(crate) async fn put(
     }
     if let Some(id) = &u.app_id {
         let id = id.trim();
-        let secret = u.app_secret.as_deref().unwrap_or_default().trim();
         let lib = s.library.lock().expect("library poisoned");
         if id.is_empty() {
             lib.delete_setting(APP_KEY)?;
         } else {
-            if !id.bytes().all(|b| b.is_ascii_digit()) || id.len() > 20 {
-                return Err(ApiError::bad_request("A Qobuz app ID is digits only"));
-            }
-            if secret.is_empty() || secret.len() > 128 || !secret.bytes().all(|b| b.is_ascii_alphanumeric()) {
-                return Err(ApiError::bad_request(
-                    "The Qobuz app secret is letters and digits",
-                ));
-            }
-            let a = App {
-                id: id.into(),
-                secret: secret.into(),
-                from: "settings".into(),
-            };
+            let a = valid_app(id, u.app_secret.as_deref().unwrap_or_default())?;
             lib.set_setting(APP_KEY, &serde_json::to_string(&a).expect("app serializes"))?;
         }
     }
@@ -683,6 +670,113 @@ pub(crate) async fn put(
     });
     crate::search::forget_answers(&s);
     Ok(Json(view(&s)))
+}
+
+/// An app as the owner typed it, in the shape Qobuz issues them (so a paste of the wrong thing is
+/// said at once).
+fn valid_app(id: &str, secret: &str) -> Result<App, ApiError> {
+    let (id, secret) = (id.trim(), secret.trim());
+    if id.is_empty() || !id.bytes().all(|b| b.is_ascii_digit()) || id.len() > 20 {
+        return Err(ApiError::bad_request("A Qobuz app ID is digits only"));
+    }
+    if secret.is_empty() || secret.len() > 128 || !secret.bytes().all(|b| b.is_ascii_alphanumeric()) {
+        return Err(ApiError::bad_request(
+            "The Qobuz app secret is letters and digits",
+        ));
+    }
+    Ok(App {
+        id: id.into(),
+        secret: secret.into(),
+        from: "settings".into(),
+    })
+}
+
+#[derive(Deserialize)]
+pub struct AppCheck {
+    pub app_id: String,
+    pub app_secret: String,
+}
+
+/// What a check found: `ok`, and the words for the page either way.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CheckResult {
+    pub ok: bool,
+    pub detail: String,
+}
+
+/// A track Qobuz has everywhere, for the app check (streamrip and qobuz-dl use it too).
+const CHECK_TRACK: &str = "5966783";
+
+/// `POST /v1/sources/qobuz/unofficial/app/check {app_id, app_secret}`: asks Qobuz whether it takes
+/// this app, without saving anything and without an account: one signed `track/getFileUrl`. An
+/// unknown app ID and a wrong secret are each refused with their own words before the sign-in is
+/// looked at (401), so the answer tells them apart. Always 200 with `{ok, detail}`.
+pub(crate) async fn check_app(
+    State(s): State<Arc<NodeState>>,
+    Json(c): Json<AppCheck>,
+) -> ApiResult<CheckResult> {
+    let app = match valid_app(&c.app_id, &c.app_secret) {
+        Ok(a) => a,
+        Err(e) => {
+            return Ok(Json(CheckResult {
+                ok: false,
+                detail: e.message,
+            }))
+        }
+    };
+    let resp = s
+        .http_client()
+        .get(format!("{}/track/getFileUrl", api_base()))
+        .header("X-App-Id", &app.id)
+        .query(&file_url_query(&app, CHECK_TRACK, 6, now()))
+        .send()
+        .await;
+    let resp = match resp {
+        Ok(r) => r,
+        Err(e) => {
+            return Ok(Json(CheckResult {
+                ok: false,
+                detail: format!("Couldn't reach Qobuz: {}", e.without_url()),
+            }))
+        }
+    };
+    let status = resp.status().as_u16();
+    let v: Value = resp.json().await.unwrap_or(Value::Null);
+    Ok(Json(judge_app_check(status, &v)))
+}
+
+/// What Qobuz's answer to the app check means.
+fn judge_app_check(status: u16, v: &Value) -> CheckResult {
+    let msg = message(v);
+    let low = msg.to_lowercase();
+    let (ok, detail) = match status {
+        400 if low.contains("signature") => (
+            false,
+            "Qobuz knows this app ID, but the secret doesn't go with it. Check the secret.".to_string(),
+        ),
+        400 if low.contains("app") => (
+            false,
+            "Qobuz doesn't know this app ID. Check it, or ask Qobuz for API access.".to_string(),
+        ),
+        // Without an account Qobuz stops here: the app itself was accepted
+        401 => (
+            true,
+            "OK: Qobuz accepts this app ID and secret. Your Qobuz account is next.".to_string(),
+        ),
+        200..=299 | 403 => (true, "OK: Qobuz accepts this app ID and secret.".to_string()),
+        _ => (
+            false,
+            format!(
+                "Qobuz answered {status}{}",
+                if msg.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {msg}")
+                }
+            ),
+        ),
+    };
+    CheckResult { ok, detail }
 }
 
 #[derive(Deserialize)]
@@ -742,6 +836,15 @@ pub(crate) async fn sign_in_hashed(
     let v: Value = resp.json().await.unwrap_or(Value::Null);
     if status.as_u16() == 400 && message(&v).to_lowercase().contains("app") {
         return Err(upstream(format!("Qobuz refused the app ID: {}", message(&v))));
+    }
+    if status.as_u16() == 401 {
+        return Err(ApiError::new(
+            StatusCode::UNAUTHORIZED,
+            format!(
+                "Qobuz doesn't know that email and password. Check them and try again ({})",
+                message(&v)
+            ),
+        ));
     }
     if !status.is_success() {
         return Err(ApiError::new(
@@ -1246,6 +1349,25 @@ mod tests {
         ));
         assert_eq!(sig, &want);
         assert!(format!("{app:?}").contains("<set>") && !format!("{app:?}").contains("abc123"));
+    }
+
+    #[test]
+    fn the_app_check_tells_an_unknown_id_a_wrong_secret_and_an_accepted_app_apart() {
+        let r = judge_app_check(
+            400,
+            &serde_json::json!({"message": "Invalid Request Signature parameter (request_sig)"}),
+        );
+        assert!(!r.ok && r.detail.contains("secret"), "{r:?}");
+        let r = judge_app_check(
+            400,
+            &serde_json::json!({"message": "Invalid Request Parameters app_id"}),
+        );
+        assert!(!r.ok && r.detail.contains("app ID"), "{r:?}");
+        let r = judge_app_check(401, &serde_json::json!({"message": "Invalid user auth token"}));
+        assert!(r.ok && r.detail.starts_with("OK"), "{r:?}");
+        let r = judge_app_check(503, &Value::Null);
+        assert!(!r.ok && r.detail.contains("503"), "{r:?}");
+        assert!(valid_app("12ab", "s").is_err() && valid_app("100", "s3-cret").is_err());
     }
 
     #[test]

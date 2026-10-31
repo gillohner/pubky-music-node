@@ -456,6 +456,10 @@ pub fn router(state: Arc<NodeState>) -> Router {
             "/sources/tidal/unofficial/login",
             post(tidal_unofficial::login).delete(tidal_unofficial::logout),
         )
+        .route(
+            "/sources/tidal/unofficial/client/check",
+            post(tidal_unofficial::check_client),
+        )
         .route("/sources/tidal/session", axum::routing::delete(tidal::logout))
         .route("/sources/tidal/collection", get(tidal::collection))
         .route("/sources/tidal/callback", post(tidal::pasted_callback))
@@ -468,6 +472,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
             "/sources/qobuz/unofficial",
             get(qobuz::get_status).put(qobuz::put),
         )
+        .route("/sources/qobuz/unofficial/app/check", post(qobuz::check_app))
         .route(
             "/sources/qobuz/unofficial/login",
             post(qobuz::login).delete(qobuz::logout),
@@ -3875,6 +3880,9 @@ mod tests {
                     if body.contains("client_id=portal-app") {
                         return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "invalid_request", "error_description": "Client is not a Limited Input Device client"})));
                     }
+                    if body.contains("client_id=nobody") {
+                        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "invalid_client"})));
+                    }
                     assert!(body.contains("client_id=dev-id"), "{body}");
                     (StatusCode::OK, Json(serde_json::json!({"deviceCode": "DC", "userCode": "ABCDE", "verificationUriComplete": "link.tidal.com/ABCDE", "expiresIn": 300, "interval": 1})))
                 }),
@@ -3886,8 +3894,10 @@ mod tests {
                     move |body: String| {
                         let polls = polls.clone();
                         async move {
-                            assert!(body.contains("client_secret=dev-secret"), "{body}");
-                            // The owner approves at the second poll
+                            if !body.contains("client_secret=dev-secret") {
+                                return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "invalid_client", "error_description": "Client authentication failed"})));
+                            }
+                            // The first token request (the check's, below) waits; the owner approves at the next
                             if polls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
                                 return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "authorization_pending"})));
                             }
@@ -3945,6 +3955,52 @@ mod tests {
         let (st, r) = call(&app, "POST", "/v1/sources/tidal/unofficial/login", None).await;
         assert_eq!(st, StatusCode::BAD_REQUEST, "{r}");
         assert_eq!(r["error"], tidal_unofficial::NOT_A_DEVICE_CLIENT, "{r}");
+        // The client check (the step card's Check): an unknown ID, a portal app, a wrong secret and
+        // a good client, each in its own words, nothing saved
+        let check = |id: &str, secret: &str| {
+            let app = app.clone();
+            let body = serde_json::json!({"client_id": id, "client_secret": secret});
+            async move {
+                call(
+                    &app,
+                    "POST",
+                    "/v1/sources/tidal/unofficial/client/check",
+                    Some(body),
+                )
+                .await
+                .1
+            }
+        };
+        let r = check("nobody", "x").await;
+        assert_eq!(r["ok"], false, "{r}");
+        assert!(
+            r["detail"]
+                .as_str()
+                .unwrap()
+                .contains("doesn't know this client ID"),
+            "{r}"
+        );
+        let r = check("portal-app", "x").await;
+        assert_eq!(
+            (r["ok"].as_bool(), r["detail"].as_str()),
+            (Some(false), Some(tidal_unofficial::NOT_A_DEVICE_CLIENT)),
+            "{r}"
+        );
+        let r = check("dev-id", "wrong").await;
+        assert!(
+            r["ok"] == false && r["detail"].as_str().unwrap().contains("secret"),
+            "{r}"
+        );
+        let r = check("dev-id", "dev-secret").await;
+        assert!(
+            r["ok"] == true && r["detail"].as_str().unwrap().starts_with("OK"),
+            "{r}"
+        );
+        let (_, st) = call(&app, "GET", "/v1/sources/tidal/unofficial", None).await;
+        assert_eq!(
+            st["client_from"], "settings",
+            "a check saves nothing: the portal app is still set: {st}"
+        );
         let (_, r) = call(
             &app,
             "PUT",
@@ -9114,12 +9170,19 @@ mod tests {
             .route("/album/get", get({ let album = album.clone(); move || { let album = album.clone(); async move { Json(album) } } }))
             .route(
                 "/track/getFileUrl",
-                get(move |axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>| {
+                get(move |headers: axum::http::HeaderMap, axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>| {
                     let (base, ok, format) = (file_base.clone(), ok2.clone(), format2.clone());
                     async move {
+                        if headers.get("x-app-id").is_some_and(|a| a != "100000000") {
+                            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"status": "error", "code": 400, "message": "Invalid Request Parameters app_id"})));
+                        }
                         let want = format!("{:x}", md5::Md5::digest(format!("trackgetFileUrlformat_id{}intentstreamtrack_id{}{}s3cret", q["format_id"], q["track_id"], q["request_ts"]).as_bytes()));
                         if !ok.load(std::sync::atomic::Ordering::SeqCst) || q["request_sig"] != want {
                             return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"status": "error", "code": 400, "message": "Invalid Request Signature parameter (request_sig)"})));
+                        }
+                        // Qobuz looks at the account only once the app is in order
+                        if headers.get("x-user-auth-token").is_none() {
+                            return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"status": "error", "code": 401, "message": "Invalid user auth token"})));
                         }
                         if q["track_id"] == "2" {
                             return (StatusCode::OK, Json(serde_json::json!({"url": format!("{base}/file.flac"), "sample": true})));
@@ -9167,6 +9230,39 @@ mod tests {
         )
         .await;
         assert_eq!(st, StatusCode::BAD_REQUEST);
+        // The app check (the step card's Check): a malformed, an unknown, a wrong-secret and a
+        // good app each in its own words, without an account and saving nothing
+        let check = |id: &str, secret: &str| {
+            let app = app.clone();
+            let body = serde_json::json!({"app_id": id, "app_secret": secret});
+            async move {
+                call(&app, "POST", "/v1/sources/qobuz/unofficial/app/check", Some(body))
+                    .await
+                    .1
+            }
+        };
+        let r = check("abc", "s3cret").await;
+        assert!(
+            r["ok"] == false && r["detail"].as_str().unwrap().contains("digits"),
+            "{r}"
+        );
+        let r = check("200000000", "s3cret").await;
+        assert!(
+            r["ok"] == false && r["detail"].as_str().unwrap().contains("doesn't know this app ID"),
+            "{r}"
+        );
+        let r = check("100000000", "wrong").await;
+        assert!(
+            r["ok"] == false && r["detail"].as_str().unwrap().contains("secret"),
+            "{r}"
+        );
+        let r = check("100000000", "s3cret").await;
+        assert!(
+            r["ok"] == true && r["detail"].as_str().unwrap().contains("account is next"),
+            "{r}"
+        );
+        let (_, q) = call(&app, "GET", "/v1/sources/qobuz/unofficial", None).await;
+        assert!(q.get("app_from").is_none(), "a check saves nothing: {q}");
         let (st, q) = call(
             &app,
             "PUT",
@@ -12129,19 +12225,20 @@ exec sleep 300
             .iter()
             .map(|w| w["id"].as_str().unwrap())
             .collect();
-        assert_eq!(ids, ["app", "import", "device", "own", "paste"]);
+        assert_eq!(ids, ["app", "import", "device", "paste"]);
         assert_eq!(si["ways"][0]["recommended"], true, "{si}");
         assert_eq!(
             si["ways"][0]["label"], "Your own TIDAL app",
             "no project app in a test build"
         );
         assert_eq!(si["ways"][0]["available"], true);
-        assert_eq!(si["ways"][2]["available"], false);
+        // The device way is open without a client: its page asks for one first (a step card)
+        assert_eq!(si["ways"][2]["available"], true);
         assert!(
-            si["ways"][2]["reason"]
+            si["ways"][2]["note"]
                 .as_str()
                 .unwrap()
-                .contains("device client"),
+                .contains("no built-in device client"),
             "{si}"
         );
         assert_eq!(si["ways"][3]["available"], true);
@@ -12149,17 +12246,14 @@ exec sleep 300
         assert_eq!(si["line"], "Not signed in");
         assert_eq!(si["details"]["unofficial"]["enabled"], false);
         assert_eq!(si["details"]["status"]["signed_in"], false);
-        // A way that is not available, or not a way, is refused in plain words
-        let (st, r) = call(&app, "PUT", signin, Some(serde_json::json!({"way": "device"}))).await;
-        assert_eq!(st, StatusCode::BAD_REQUEST, "{r}");
-        assert!(r["error"].as_str().unwrap().contains("device client"), "{r}");
+        // Something that is not a way is refused in plain words
         let (st, r) = call(&app, "PUT", signin, Some(serde_json::json!({"way": "nope"}))).await;
         assert_eq!(st, StatusCode::BAD_REQUEST, "{r}");
         assert!(
             r["error"]
                 .as_str()
                 .unwrap()
-                .contains("one of app, import, device, own, paste"),
+                .contains("one of app, import, device, paste"),
             "{r}"
         );
         // Your own device client makes the device way available, labelled as yours; picking it is

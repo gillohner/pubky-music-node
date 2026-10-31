@@ -372,6 +372,118 @@ pub(crate) async fn put(
     Ok(Json(view(&s)))
 }
 
+#[derive(Deserialize)]
+pub struct ClientCheck {
+    pub client_id: String,
+    pub client_secret: String,
+}
+
+/// `POST /v1/sources/tidal/unofficial/client/check {client_id, client_secret}`: asks TIDAL whether
+/// this is a device client it knows, and whether the secret goes with it, without saving anything
+/// and without an account: a device-code request (the ID), then one token request for that code
+/// (the secret; "authorization_pending" means TIDAL took the secret and waits for a person). The
+/// code is never shown, so nobody can approve it. Always 200 with `{ok, detail}`.
+pub(crate) async fn check_client(
+    State(s): State<Arc<NodeState>>,
+    Json(c): Json<ClientCheck>,
+) -> ApiResult<crate::qobuz::CheckResult> {
+    let answer = |ok: bool, detail: String| Ok(Json(crate::qobuz::CheckResult { ok, detail }));
+    let (id, secret) = (c.client_id.trim(), c.client_secret.trim());
+    if id.is_empty() || secret.is_empty() {
+        return answer(false, "Enter the device client's ID and secret.".into());
+    }
+    let post = |path: &str, body: String| {
+        s.http_client()
+            .post(format!("{}{path}", auth_base(&s)))
+            .header(reqwest::header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(body)
+            .send()
+    };
+    let resp = match post(
+        "/v1/oauth2/device_authorization",
+        form(&[("client_id", id), ("scope", SCOPE)]),
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => return answer(false, format!("Couldn't reach TIDAL: {}", e.without_url())),
+    };
+    let status = resp.status();
+    let v: Value = resp.json().await.unwrap_or(Value::Null);
+    let detail_of = |v: &Value| {
+        v["error_description"]
+            .as_str()
+            .or(v["error"].as_str())
+            .unwrap_or("")
+            .to_string()
+    };
+    if !status.is_success() {
+        let d = detail_of(&v);
+        if d.to_ascii_lowercase().contains("limited input device") {
+            return answer(false, NOT_A_DEVICE_CLIENT.into());
+        }
+        return answer(
+            false,
+            format!(
+                "TIDAL doesn't know this client ID ({status}{})",
+                if d.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {d}")
+                }
+            ),
+        );
+    }
+    let Some(device_code) = v["deviceCode"].as_str().filter(|d| !d.is_empty()) else {
+        return answer(false, "TIDAL sent no device code".into());
+    };
+    let resp = match post(
+        "/v1/oauth2/token",
+        form(&[
+            ("client_id", id),
+            ("client_secret", secret),
+            ("device_code", device_code),
+            ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
+            ("scope", SCOPE),
+        ]),
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => return answer(false, format!("Couldn't reach TIDAL: {}", e.without_url())),
+    };
+    let status = resp.status();
+    let v: Value = resp.json().await.unwrap_or(Value::Null);
+    Ok(Json(judge_client_check(status.as_u16(), &v)))
+}
+
+/// What TIDAL's answer to the token request of the client check means.
+fn judge_client_check(status: u16, v: &Value) -> crate::qobuz::CheckResult {
+    let err = v["error"].as_str().unwrap_or("");
+    let (ok, detail) = match (status, err) {
+        (_, "authorization_pending" | "slow_down") | (200..=299, _) => (
+            true,
+            "OK: TIDAL accepts this device client. Sign in with a code next.".to_string(),
+        ),
+        (401, _) | (_, "invalid_client" | "unauthorized_client") => (
+            false,
+            "TIDAL knows this client ID, but the secret doesn't go with it. Check the secret.".to_string(),
+        ),
+        _ => (
+            false,
+            format!(
+                "TIDAL answered {status}{}",
+                v["error_description"]
+                    .as_str()
+                    .or(v["error"].as_str())
+                    .map(|d| format!(": {d}"))
+                    .unwrap_or_default()
+            ),
+        ),
+    };
+    crate::qobuz::CheckResult { ok, detail }
+}
+
 /// `POST /v1/sources/tidal/unofficial/login`: the device code to enter at link.tidal.com; the
 /// node waits for the approval in the background.
 pub(crate) async fn login(State(s): State<Arc<NodeState>>) -> ApiResult<UnofficialStatus> {

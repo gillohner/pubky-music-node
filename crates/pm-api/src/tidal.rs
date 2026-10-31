@@ -1288,7 +1288,6 @@ pub(crate) fn app_changed(s: &NodeState) -> Result<(), ApiError> {
 pub(crate) const WAY_APP: &str = "app";
 pub(crate) const WAY_IMPORT: &str = "import";
 pub(crate) const WAY_DEVICE: &str = "device";
-pub(crate) const WAY_OWN: &str = "own";
 pub(crate) const WAY_PASTE: &str = "paste";
 
 /// The official app's name by where it comes from: the project's built-in one or the node's own.
@@ -1384,22 +1383,17 @@ pub(crate) fn sign_in(s: &NodeState, headers: Option<&axum::http::HeaderMap>) ->
                 }
             }),
         },
+        // Without a device client the way is still the place to go: its page asks for one first
+        // (a step card with Check), so there is no separate "Your own app" way
         Way {
             id: WAY_DEVICE.into(),
             label: device_label.into(),
-            note: "Full tracks (unofficial): the device sign-in tidal-dl-ng and python-tidal use, with a code you enter at link.tidal.com. TIDAL has not approved this for other apps and can stop it at any time.".into(),
+            note: if device_client.is_some() {
+                "Full tracks (unofficial): the device sign-in tidal-dl-ng and python-tidal use, with a code you enter at link.tidal.com. TIDAL has not approved this for other apps and can stop it at any time.".into()
+            } else {
+                "Full tracks (unofficial): a code you enter at link.tidal.com, as tidal-dl-ng and python-tidal do. This build has no built-in device client: enter one you are allowed to use first. TIDAL has not approved this for other apps and can stop it at any time.".into()
+            },
             action: "code".into(),
-            recommended: false,
-            available: device_client.is_some(),
-            reason: device_client.is_none().then(|| {
-                "This build has no built-in device client; enter one under Your own app.".to_string()
-            }),
-        },
-        Way {
-            id: WAY_OWN.into(),
-            label: "Your own app".into(),
-            note: "A TIDAL device client id and secret you are allowed to use, entered here; An app of your own goes in Settings › This node › Service apps.".into(),
-            action: "setup".into(),
             recommended: false,
             available: true,
             reason: None,

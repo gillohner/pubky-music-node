@@ -1013,6 +1013,20 @@ code.path { font-size: 13px; overflow-wrap: anywhere; }
 }
 @media (prefers-reduced-motion: reduce) { .switch, .switch::after { transition: none; } }
 .tf-code { font-size: 22px; font-weight: 700; letter-spacing: 0.12em; padding: 4px 10px; border-radius: var(--radius-sm); background: var(--surface-2); }
+/* Guided setup (Sources › Qobuz, TIDAL full tracks): numbered step cards, secret fields with
+   Show, a Check's answer in place, and the device code big enough to read across a room */
+.card-step { padding: 14px 0; }
+.card-step .sub { margin-bottom: 10px; }
+.card-step .stack { gap: 8px; }
+.card-step .small { max-width: 70ch; }
+.secretwrap { display: inline-flex; align-items: center; gap: 4px; flex: 1 1 200px; min-width: 0; }
+.secretwrap .input { flex: 1 1 auto; min-width: 0; }
+.showpw { flex: none; }
+.check-out { display: inline-block; min-height: 1em; }
+.check-out.ok { color: var(--ok); }
+.check-out.bad { color: var(--bad); }
+.codebox { display: grid; gap: 10px; }
+.tf-code.big { font-size: 34px; letter-spacing: 0.2em; padding: 8px 16px; user-select: all; }
 .set-body .notice code { display: inline-block; max-width: 100%; overflow-wrap: anywhere; vertical-align: bottom; }
 .ytpanel .ytbox { aspect-ratio: 16 / 9; background: #000; }
 .ytpanel .ytbox iframe, .ytpanel #ytframe { width: 100%; height: 100%; border: 0; display: block; }
