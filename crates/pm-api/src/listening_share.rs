@@ -12,7 +12,9 @@
 //!   the song's end (an hour ahead when its length is unknown), renewed with each version.
 //! - **Only the owner's plays** (not a listener's, not a party's: `listens::plays_are_the_owners`),
 //!   and only what has a canonical link (a library file with no identity or a radio stream is not
-//!   shared). A refused write (a full homeserver) turns sharing off, once, instead of retrying.
+//!   shared). A refused write (a full homeserver) turns sharing off, once, instead of retrying;
+//!   one the homeserver didn't answer is tried again (sooner than the next change when a live
+//!   post would otherwise keep saying the wrong thing, a paused one for up to a day).
 
 use crate::state::NodeState;
 use crate::{ApiError, ApiResult};
@@ -123,31 +125,26 @@ pub(crate) fn zone_event(s: &Arc<NodeState>, zone: &str, event: &pm_zones::ZoneE
     if !started && written(s).is_some_and(|w| w.zone != zone) {
         return;
     }
-    if !crate::listens::plays_are_the_owners(s, zone) {
-        // A listener or a party took over the shared zone: what plays there isn't the owner's,
-        // so the owner's post ends now (not when it expires)
-        if let Some(w) = written(s).filter(|w| w.zone == zone) {
-            let s = s.clone();
-            tokio::spawn(async move {
-                let _turn = writer().lock().await;
-                if let Err(e) = end(&s, &w, pm_pubky::ids::now_micros()).await {
-                    tracing::info!(error = %e, "ending the listening post; tried again at the next change");
-                }
-            });
-        }
+    // A listener or a party took over the shared zone: what plays there isn't the owner's, so
+    // the owner's post ends now (not when it expires); `reconcile` sees that under its turn
+    if !crate::listens::plays_are_the_owners(s, zone) && !written(s).is_some_and(|w| w.zone == zone) {
         return;
     }
     let s = s.clone();
     let zone = zone.to_string();
     tokio::spawn(async move {
-        if let Err(e) = reconcile(&s, &zone).await {
-            failed(&s, &e);
+        if let Err(f) = reconcile(&s, &zone).await {
+            failed(&s, &zone, &f);
         }
     });
 }
 
-/// What the zone does now, as the post's next version: `None` when nothing (shareable) plays.
+/// What the zone does now, as the post's next version: `None` when nothing (shareable) plays,
+/// or what plays isn't the owner's.
 fn wanted(s: &NodeState, zone: &str, now: i64) -> Option<(String, i64, Option<i64>, Option<i64>)> {
+    if !crate::listens::plays_are_the_owners(s, zone) {
+        return None;
+    }
     let st = s.zones.get(&pm_zones::ZoneId::new(zone))?.state();
     if st.transport == pm_zones::Transport::Stopped {
         return None;
@@ -161,7 +158,7 @@ fn wanted(s: &NodeState, zone: &str, now: i64) -> Option<(String, i64, Option<i6
 
 /// Write the version of the owner's listening post that says what `zone` does now, if it differs
 /// from the last one written.
-pub(crate) async fn reconcile(s: &Arc<NodeState>, zone: &str) -> Result<(), String> {
+pub(crate) async fn reconcile(s: &Arc<NodeState>, zone: &str) -> Result<(), Failure> {
     let _turn = writer().lock().await;
     let share = setting(s);
     let now = pm_pubky::ids::now_micros();
@@ -217,7 +214,7 @@ pub(crate) async fn reconcile(s: &Arc<NodeState>, zone: &str) -> Result<(), Stri
     sync.homeserver()
         .write_object(sync.session(), &path, &post)
         .await
-        .map_err(|e| format!("your homeserver: {e}"))?;
+        .map_err(Failure::homeserver)?;
     store_written(
         s,
         Some(&Written {
@@ -258,12 +255,22 @@ fn version(
     }
 }
 
-/// The session ends: a last version with `ended_at`, and the next play starts a new post.
-async fn end(s: &NodeState, w: &Written, now: i64) -> Result<(), String> {
-    store_written(s, None);
+/// The session ends: a last version with `ended_at`, and the next play starts a new post. Until
+/// that version is written the session stays (a failed end is tried again, or the next play
+/// goes on with the same post); a refused one is given up.
+async fn end(s: &NodeState, w: &Written, now: i64) -> Result<(), Failure> {
     if now >= w.expires_at {
+        store_written(s, None);
         return Ok(()); // readers stopped showing it already
     }
+    let r = write_end(s, w, now).await;
+    if r.as_ref().err().is_none_or(|f| f.refused) {
+        store_written(s, None);
+    }
+    r
+}
+
+async fn write_end(s: &NodeState, w: &Written, now: i64) -> Result<(), Failure> {
     let sync = s.sync_handle().ok_or("not signed in with Pubky")?;
     let key = raw_key(sync.z32()).to_string();
     let owner = pubky_music_specs::PubkyId::try_from(key.as_str()).map_err(|e| e.to_string())?;
@@ -280,38 +287,99 @@ async fn end(s: &NodeState, w: &Written, now: i64) -> Result<(), String> {
     sync.homeserver()
         .write_object(sync.session(), &v.path, &post)
         .await
-        .map_err(|e| format!("your homeserver: {e}"))
+        .map_err(Failure::homeserver)
 }
 
-/// Whether the homeserver refused the write (a 4xx other than a timeout or too many requests,
-/// or a full homeserver), as opposed to not answering: only a refusal turns sharing off.
-fn refused(why: &str) -> bool {
-    let lower = why.to_ascii_lowercase();
-    [
-        "forbidden",
-        "unauthorized",
-        "quota",
-        "insufficient storage",
-        "too large",
-        "payload",
-    ]
-    .iter()
-    .any(|w| lower.contains(w))
-        || why
-            .split(|c: char| !c.is_ascii_digit())
-            .filter_map(|n| n.parse::<u16>().ok())
-            .any(|code| (code == 507 || (400..500).contains(&code)) && code != 408 && code != 429)
+/// Why writing the post failed, and whether the homeserver refused it (it answered a 4xx other
+/// than a timeout or too many requests, or a full homeserver's 507) as opposed to not answering
+/// (or a local reason): only a refusal turns sharing off.
+#[derive(Debug)]
+pub(crate) struct Failure {
+    why: String,
+    refused: bool,
 }
 
-/// A reconcile that failed: a refusal turns sharing off (once, and the page is told); anything
-/// else (a timeout, a homeserver briefly down, a sign-in being restored) waits for the next
-/// change, which tries again.
-fn failed(s: &NodeState, why: &str) {
-    if refused(why) {
-        stop_sharing(s, why);
-    } else {
-        tracing::info!(error = %why, "the listening post could not be written; tried again at the next change");
+impl Failure {
+    fn homeserver(e: pm_pubky::homeserver::HomeserverError) -> Self {
+        Failure {
+            refused: pm_pubky::homeserver::status(&e).is_some_and(refusal),
+            why: format!("your homeserver: {e}"),
+        }
     }
+}
+
+impl From<String> for Failure {
+    fn from(why: String) -> Self {
+        Failure { why, refused: false }
+    }
+}
+
+impl From<&str> for Failure {
+    fn from(why: &str) -> Self {
+        why.to_string().into()
+    }
+}
+
+/// An HTTP status that refuses the write for good.
+fn refusal(code: u16) -> bool {
+    (code == 507 || (400..500).contains(&code)) && code != 408 && code != 429
+}
+
+/// A reconcile of `zone` that failed: a refusal turns sharing off (once, and the page is told);
+/// anything else (a timeout, a homeserver briefly down, a sign-in being restored) is tried again.
+fn failed(s: &Arc<NodeState>, zone: &str, f: &Failure) {
+    if f.refused {
+        stop_sharing(s, &f.why);
+    } else {
+        tracing::info!(error = %f.why, "the listening post could not be written; tried again");
+        retry(s, zone);
+    }
+}
+
+const RETRY_FIRST: std::time::Duration = std::time::Duration::from_secs(30);
+const RETRY_MOST: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// Reconcile `zone` again after a while (half a minute, doubling up to a quarter of an hour)
+/// while the session's post is live and the writes fail: the next change would try too, but a
+/// stopped or paused zone has none. One retry waits at a time; a later failure gives it its zone.
+fn retry(s: &Arc<NodeState>, zone: &str) {
+    if s.listening_retry
+        .lock()
+        .expect("listening retry")
+        .replace(zone.to_string())
+        .is_some()
+    {
+        return;
+    }
+    let s = s.clone();
+    tokio::spawn(async move {
+        let mut wait = RETRY_FIRST;
+        loop {
+            tokio::time::sleep(wait).await;
+            let Some(zone) = s.listening_retry.lock().expect("listening retry").clone() else {
+                return;
+            };
+            let now = pm_pubky::ids::now_micros();
+            // Nothing live to set right (it ran out, or it never went out): the next play writes
+            let live = written(&s).is_some_and(|w| now < w.expires_at);
+            match if live { reconcile(&s, &zone).await } else { Ok(()) } {
+                Err(f) if !f.refused => {
+                    tracing::info!(error = %f.why, "the listening post could not be written; tried again");
+                    wait = (wait * 2).min(RETRY_MOST);
+                    continue;
+                }
+                Err(f) => stop_sharing(&s, &f.why),
+                Ok(()) => {}
+            }
+            let mut pending = s.listening_retry.lock().expect("listening retry");
+            if pending.as_deref() == Some(zone.as_str()) {
+                *pending = None;
+                return;
+            }
+            // Another zone failed meanwhile: that one next
+            wait = RETRY_FIRST;
+        }
+    });
 }
 
 /// A write the homeserver refused: sharing turns off, once, instead of retrying, and the page's
@@ -434,9 +502,9 @@ pub(crate) async fn put(
         if set.share && !crate::listens::plays_are_the_owners(&s, &zone) {
             return Ok(Json(view(&s)));
         }
-        if let Err(e) = reconcile(&s, &zone).await {
-            failed(&s, &e);
-            return Err(ApiError::new(StatusCode::BAD_GATEWAY, e));
+        if let Err(f) = reconcile(&s, &zone).await {
+            failed(&s, &zone, &f);
+            return Err(ApiError::new(StatusCode::BAD_GATEWAY, f.why));
         }
     }
     Ok(Json(view(&s)))
@@ -444,27 +512,30 @@ pub(crate) async fn put(
 
 #[cfg(test)]
 mod tests {
-    /// Review of #163: only a homeserver that refuses the post turns sharing off; one that
-    /// doesn't answer (or a sign-in being restored) is tried again at the next change.
+    use pm_pubky::homeserver::HomeserverError;
+
+    fn server(status: u16) -> HomeserverError {
+        HomeserverError::Pubky(pubky::Error::Request(pubky::errors::RequestError::Server {
+            status: reqwest::StatusCode::from_u16(status).unwrap(),
+            message: String::new(),
+        }))
+    }
+
+    /// Review of #163 and #192: only a homeserver that refuses the post turns sharing off, by the
+    /// status it answered; one that doesn't answer is tried again, whatever digits its address
+    /// or the message carry.
     #[test]
     fn only_a_refusal_turns_sharing_off() {
-        for no in [
-            "your homeserver: HTTP status client error (403 Forbidden) for url (https://hs/pub/…)",
-            "your homeserver: 507 Insufficient Storage",
-            "your homeserver: quota exceeded",
-            "your homeserver: status 413",
-        ] {
-            assert!(super::refused(no), "{no}");
+        for no in [403, 401, 413, 507] {
+            assert!(super::Failure::homeserver(server(no)).refused, "{no}");
         }
-        for again in [
-            "your homeserver: operation timed out",
-            "your homeserver: error sending request: connection refused",
-            "your homeserver: 503 Service Unavailable",
-            "your homeserver: 429 Too Many Requests",
-            "your homeserver: 408 Request Timeout",
-            "not signed in with Pubky",
-        ] {
-            assert!(!super::refused(again), "{again}");
+        for again in [503, 500, 429, 408] {
+            assert!(!super::Failure::homeserver(server(again)).refused, "{again}");
         }
+        let unreachable = HomeserverError::Transport(
+            "error sending request for url (https://hs.example:403/pub/music/v1/posts/0034A0Z4013): 413 bytes".into(),
+        );
+        assert!(!super::Failure::homeserver(unreachable).refused);
+        assert!(!super::Failure::from("not signed in with Pubky").refused);
     }
 }

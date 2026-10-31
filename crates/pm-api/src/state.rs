@@ -220,6 +220,8 @@ pub struct NodeState {
     pub info_bases: std::sync::RwLock<crate::artist_info::InfoBases>,
     /// `/v1/search`'s answers, cached a few minutes per query and source (search.rs).
     pub(crate) search_answers: crate::search::AnswerCache,
+    /// The zone whose listening post a retry writes, while one waits (`listening_share::retry`).
+    pub(crate) listening_retry: Mutex<Option<String>>,
     /// Who on this node listens where, and the listen-along groups (presence.rs).
     pub presence: crate::presence::Presence,
     /// Shared async HTTP client for upstream lookups, rebuilt when the contact
@@ -445,6 +447,7 @@ impl NodeState {
             pinakes_reader: Default::default(),
             presence: Default::default(),
             search_answers: Default::default(),
+            listening_retry: Mutex::new(None),
             tidal,
             http: Mutex::new(None),
             scanning: Mutex::new(false),
