@@ -4,6 +4,10 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-10-31
+
+- **Pause stops a Chromecast, an MPD server and a group of devices at once too.** Like a UPnP renderer or BluOS player before, they went on with the seconds of stream they had buffered (about 5 s). A Cast device now gets its own media PAUSE and PLAY. One that answers PAUSE but plays on, or can't pause the live stream, is stopped for the pause and started again from where it was heard. MPD gets `pause 1` and `pause 0`. If MPD isn't playing the node's stream after the pause (it dropped it during a long pause, or someone played something else), it starts again from where it was heard. A group pauses every member with its own device's command, all at once, so the group falls silent together. If only some of a group's members kept their buffer (a BluOS player next to a sound card), the group starts again from where it was heard, so the members stay in step.
+
 ### 2026-10-30
 
 - **Pause stops a UPnP renderer or BluOS player at once.** Pause only stopped sending the stream, so a Linn or a BluOS player went on with the seconds it had buffered (about 5 s on a PULSE FLEX). The node now sends the device's own Pause and Play (UPnP AVTransport, BluOS `/Pause` and `/Play`), and the device keeps its buffer over the pause. A renderer that answers Pause but plays on (a Linn on the node's live stream) is stopped for the pause instead and started again from where it was heard. A device that hung up during a long pause gets the stream again when told to play (a UPnP renderer that refuses Play is given the stream again), and one that can't carry on starts again from what was last heard. A new song or a seek while paused starts on a fresh stream, so the old song's buffered seconds don't play first. A renderer that refuses Pause is stopped for it; one that refuses Stop as well plays out its buffer as before. The play/pause button sends what it shows (pause or play), so a double press or a late update no longer plays again instead of pausing.

@@ -2,18 +2,28 @@
 //! the pull stream with the track's metadata and art; a [`Session`] keeps the
 //! link alive while it plays; the sink is the pull sink; close stops the app.
 //!
+//! Pause is the receiver's own media PAUSE (it plays out seconds of buffer otherwise), or a
+//! media STOP when it plays on; the resume after a STOP opens the output again.
+//!
 //! Metadata changes at each LOAD, which is each time the zone opens the
 //! output (a new format run). Inside a gapless run the stream continues and
 //! the screen keeps the first track's details: reloading would break the gap.
 
 use crate::link::{block_on, connect_tls};
-use crate::session::{Media, Session, PING_EVERY};
+use crate::session::{Media, Paused, Session, PING_EVERY};
 use crate::{CastError, Device, Meta};
 use async_trait::async_trait;
 use pm_model::{AudioBlock, AudioFormat, OutputCaps, QualityCeiling, SampleKind, Volume, VolumeKind};
 use pm_zones::outputs::PullOutput;
 use pm_zones::{AudioSink, BufferLevel, Output, OutputId, QueueItem, SinkError};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use tokio::sync::oneshot;
+
+/// How long a resume waits for its pause's outcome (the receiver's PAUSED, or the STOP after it).
+const PAUSE_OUTCOME_WAIT: Duration = Duration::from_secs(3);
+/// How long a resume waits for the session to send PLAY.
+const PLAY_WAIT: Duration = Duration::from_secs(2);
 
 pub use pm_zones::Describe;
 
@@ -152,6 +162,7 @@ impl Output for CastOutput {
         Ok(Box::new(CastSink {
             inner,
             session: self.session.clone(),
+            paused: None,
         }))
     }
 
@@ -181,6 +192,14 @@ impl Output for CastOutput {
 struct CastSink {
     inner: Box<dyn AudioSink>,
     session: Arc<Mutex<Option<Session>>>,
+    /// Paused on the receiver: how it went, once the session knows.
+    paused: Option<oneshot::Receiver<Paused>>,
+}
+
+/// Wait for a session's answer on the Cast runtime; `None` when it doesn't come in time or the
+/// session ended.
+fn answer<T: Send + 'static>(rx: oneshot::Receiver<T>, within: Duration) -> Option<T> {
+    block_on(async move { tokio::time::timeout(within, rx).await.ok()?.ok() })
 }
 
 impl AudioSink for CastSink {
@@ -199,6 +218,38 @@ impl AudioSink for CastSink {
     fn drain(&mut self) -> Result<(), SinkError> {
         self.inner.drain()
     }
+    /// The receiver's own PAUSE, sent by the session without holding the zone; the stream keeps
+    /// its place and pacing for the resume.
+    fn pause(&mut self) -> Result<bool, SinkError> {
+        let Some(rx) = self.session.lock().expect("session").as_ref().map(Session::pause) else {
+            return self.inner.flush().map(|()| false);
+        };
+        self.paused = Some(rx);
+        self.inner.pause()?;
+        Ok(true)
+    }
+    /// PLAY after a PAUSE. A receiver stopped for the pause (or a session that ended meanwhile)
+    /// is an error: the zone opens the output again from what was last heard.
+    fn resume(&mut self) -> Result<(), SinkError> {
+        let Some(rx) = self.paused.take() else {
+            return self.inner.resume();
+        };
+        let reopen = |why: &str| Err(SinkError::Device(format!("Cast: {why}; starting it again")));
+        match answer(rx, PAUSE_OUTCOME_WAIT) {
+            Some(Paused::Stopped) => return reopen("the receiver was stopped for the pause"),
+            None => return reopen("the session ended during the pause"),
+            // Nothing was paused: the stream carries on
+            Some(Paused::Refused) => return self.inner.resume(),
+            Some(Paused::Held) => {}
+        }
+        let Some(play) = self.session.lock().expect("session").as_ref().map(Session::play) else {
+            return reopen("the session ended during the pause");
+        };
+        if answer(play, PLAY_WAIT) != Some(true) {
+            return reopen("the receiver has no media to play on");
+        }
+        self.inner.resume()
+    }
     fn frames_written(&self) -> u64 {
         self.inner.frames_written()
     }
@@ -209,5 +260,67 @@ impl Drop for CastSink {
         if let Some(session) = self.session.lock().expect("session").take() {
             block_on(session.stop());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::tests::{log, setup, until};
+
+    async fn sink(session: Session, name: &str) -> CastSink {
+        let pull = PullOutput::controlled(name);
+        CastSink {
+            inner: pull.open(AudioFormat::pcm(44_100, 16, 2)).await.unwrap(),
+            session: Arc::new(Mutex::new(Some(session))),
+            paused: None,
+        }
+    }
+
+    /// The zone's pause reaches the receiver (it played out ~5 s of buffer before: the sink only
+    /// stopped feeding the stream), and its resume plays on.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_zones_pause_and_resume_reach_the_receiver() {
+        let (session, fake, _ctl) = setup().await;
+        let mut sink = sink(session, "cast-pause").await;
+        let sink = std::thread::spawn(move || {
+            assert!(sink.pause().unwrap(), "the receiver holds its buffer");
+            sink.resume().unwrap();
+            // Not paused: nothing to tell the receiver
+            sink.resume().unwrap();
+            sink
+        })
+        .join()
+        .unwrap();
+        until(&fake, "1 media PLAY 9").await;
+        let media: Vec<String> = log(&fake).into_iter().filter(|l| l.contains(" media ")).collect();
+        assert_eq!(media, ["1 media LOAD", "1 media PAUSE 9", "1 media PLAY 9"]);
+        drop(sink);
+    }
+
+    /// A receiver stopped for the pause (it played on) has nothing to play on: the resume is an
+    /// error, so the zone opens the output again from what was last heard.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_receiver_stopped_for_the_pause_is_opened_again() {
+        let (session, fake, _ctl) = setup().await;
+        fake.ignores_pause
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let mut sink = sink(session, "cast-stop").await;
+        let (paused, resumed, sink) = std::thread::spawn(move || {
+            let paused = sink.pause().unwrap();
+            let resumed = sink.resume();
+            (paused, resumed, sink)
+        })
+        .join()
+        .unwrap();
+        assert!(paused);
+        let e = resumed.unwrap_err().to_string();
+        assert!(e.contains("stopped for the pause"), "{e}");
+        assert!(
+            !log(&fake).iter().any(|l| l.contains("media PLAY")),
+            "{:?}",
+            log(&fake)
+        );
+        drop(sink);
     }
 }
