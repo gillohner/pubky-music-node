@@ -68,9 +68,15 @@ pub const SECRET_SETTINGS: &[(&str, &str)] = &[
     ("podcasts.gpodder", "your gPodder account"),
     ("drives.accounts", "your Google Drive and OneDrive sign-ins"),
 ];
-/// Settings that belong to this node and are never carried over (its stream key, its id, and
-/// the backup schedule with its passphrase).
-const NODE_OWN: &[&str] = &["stream.secret", "node.id", SCHEDULE_KEY];
+/// Settings that belong to this node and are never carried over (its stream key, its id, the
+/// backup schedule with its passphrase, and the hash of its API token the owner's browser
+/// sessions were made under: a short token set in the config could be guessed from it offline).
+const NODE_OWN: &[&str] = &[
+    "stream.secret",
+    "node.id",
+    SCHEDULE_KEY,
+    crate::accounts::OWNER_SESSIONS_TOKEN,
+];
 const SCHEDULE_KEY: &str = "backup.schedule";
 /// The passphrase arrives in this header, never in a URL (URLs end up in logs).
 pub const PASSPHRASE_HEADER: &str = "x-backup-passphrase";
