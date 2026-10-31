@@ -3081,8 +3081,10 @@ pub(crate) fn qr_svg(text: &str) -> Option<String> {
 const RENEWAL_TTL: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
 /// `POST /v1/auth/pubky/renewal` (owner): while the node needs new folders, a code for the next
-/// Pubky Ring log in from this page to ask for them, so only the owner's own page can start a log
+/// Pubky Ring log ins from this page to ask for them, so only the owner's own page can start a log
 /// in that asks anyone for write access (Kimi review of #209). The page gets it before logging out.
+/// Good for 15 minutes, until a renewal succeeds: a wrong identity, Try again or an expired QR
+/// code still renews.
 async fn login_renewal(State(s): State<Arc<NodeState>>) -> ApiResult<LoginRenewal> {
     if !s.sync_handle().is_some_and(|h| h.needs_resign()) {
         return Ok(Json(LoginRenewal { renewal: None }));
@@ -3100,13 +3102,11 @@ async fn login_renewal(State(s): State<Arc<NodeState>>) -> ApiResult<LoginRenewa
     Ok(Json(LoginRenewal { renewal: Some(code) }))
 }
 
-/// Uses up a renewal code: whether it was one the node gave out, still good.
-fn take_renewal(s: &NodeState, code: &str) -> bool {
-    s.renewals
-        .lock()
-        .expect("renewals lock")
-        .remove(code)
-        .is_some_and(|at| at.elapsed() < RENEWAL_TTL)
+/// Whether `code` is a renewal code the node gave out, still good.
+fn renewal_good(s: &NodeState, code: &str) -> bool {
+    let mut all = s.renewals.lock().expect("renewals lock");
+    all.retain(|_, at| at.elapsed() < RENEWAL_TTL);
+    all.contains_key(code)
 }
 
 /// What a Pubky Ring log in asks for: the node's own folders only when the owner's page asked for
@@ -3140,7 +3140,7 @@ async fn controller_login_start(
         serde_json::from_slice::<ControllerLoginStart>(&body)
             .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, e.to_string()))?
             .renewal
-            .is_some_and(|code| take_renewal(&s, &code))
+            .is_some_and(|code| renewal_good(&s, &code))
     };
     // Held from the check to the insert: sign-ins started at once can't pass the caps together
     let mut logins = s.controller_logins.lock().await;
@@ -3252,6 +3252,8 @@ async fn controller_login_poll(
                 .is_empty();
             if renew {
                 adopt_session(&s, session).await?;
+                // Renewed: the codes for it are used up
+                s.renewals.lock().expect("renewals lock").clear();
             }
             let token = accounts::mint_owner(&s, &who)?;
             tracing::info!(%who, renew, "controller signed in with Pubky Ring");
@@ -8561,10 +8563,10 @@ mod tests {
         assert!(!CONTROLLER_CAPABILITIES.contains(":rw"), "a log in only reads");
     }
 
-    /// A renewal needs a code only the owner's page can get, good once (Kimi review of #209 at
-    /// 6bf5f7d): a made-up one, or `{renew: true}` as before, asks for nothing more.
+    /// A renewal needs a code only the owner's page can get, good until it renews (Kimi review of
+    /// #209 at 6bf5f7d): a made-up one, or `{renew: true}` as before, asks for nothing more.
     #[tokio::test]
-    async fn a_renewal_code_comes_from_the_owner_and_is_good_once() {
+    async fn a_renewal_code_comes_from_the_owner_only() {
         let dir = tempfile::tempdir().unwrap();
         let s = state(dir.path(), None).await;
         let app = router(s.clone());
@@ -8579,20 +8581,39 @@ mod tests {
         *s.token.write().unwrap() = Some("s3cret".into());
         let (st, _) = call(&app, "POST", "/v1/auth/pubky/renewal", None).await;
         assert_eq!(st, StatusCode::UNAUTHORIZED);
-        // A code the node gave out works once; a made-up one never
+        // Nor with a listener's
+        let key = "o3ftkuxjd9k6zgnc4hhbhbg5jusubr4zqyb1dtzi8hhm3hf5wbmy";
+        s.library.lock().unwrap().set_setting("people", &serde_json::json!({"people": [{"key": key, "access": "music", "music_enabled": true, "added_at": 1}]}).to_string()).unwrap();
+        let listener = accounts::mint(&s, key).unwrap();
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/auth/pubky/renewal")
+                    .header("authorization", format!("Bearer {listener}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        // A code the node gave out stays good (a wrong identity, Try again, an expired QR code)
+        // until a renewal succeeds, which uses the codes up (tests/bundled_homeserver.rs); a
+        // made-up one never is
         s.renewals
             .lock()
             .unwrap()
             .insert("given".into(), std::time::Instant::now());
-        assert!(!take_renewal(&s, "made-up"));
-        assert!(take_renewal(&s, "given"));
-        assert!(!take_renewal(&s, "given"), "used up");
+        assert!(!renewal_good(&s, "made-up"));
+        assert!(renewal_good(&s, "given"));
+        assert!(renewal_good(&s, "given"), "still, for Try again");
         // An old one has run out
         s.renewals.lock().unwrap().insert(
             "old".into(),
             std::time::Instant::now() - RENEWAL_TTL - std::time::Duration::from_secs(1),
         );
-        assert!(!take_renewal(&s, "old"));
+        assert!(!renewal_good(&s, "old"));
         // The old flag means nothing now
         assert_eq!(
             serde_json::from_str::<ControllerLoginStart>(r#"{"renew": true}"#)

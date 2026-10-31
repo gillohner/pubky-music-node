@@ -699,8 +699,8 @@
     : `<span class="face mono ${cls}" style="background:hsl(${hue(f && f.id)} 35% 34%)">${esc(initials((f && f.name) || '?'))}</span>`);
   // One poll at a time: `timer` is a poll waiting to run, `asking` one under way
   // `renewal`: the owner logged out while the node needs new folders, with a code from the node
-  // (good once), so this log in asks for them too. Only then: anyone scanning a plain QR code is
-  // asked to read, nothing more
+  // (good until a renewal), so this log in asks for them too, also after Try again or an expired
+  // QR code. Only then: anyone scanning a plain QR code is asked to read, nothing more
   const lg = { flow: null, timer: null, asking: false, showQr: false, gen: 0, renewal: null };
   const loginStop = () => { clearTimeout(lg.timer); lg.timer = null; lg.gen += 1; };
   const drawLoginFlow = () => {
@@ -739,7 +739,7 @@
       if (gen !== lg.gen) return;
       if (p.status === 'pending') return loginPoll(gen);
       if (p.status === 'ok' && p.token) {
-        loginStop(); state.token = p.token; try { localStorage.setItem('pm.token', p.token); } catch { /* this tab keeps it */ }
+        loginStop(); lg.renewal = null; state.token = p.token; try { localStorage.setItem('pm.token', p.token); } catch { /* this tab keeps it */ }
         hideLogin(); connect(); return;
       }
       if (p.status === 'denied') { loginStop(); drawRefused(p); return; }
@@ -750,9 +750,7 @@
     loginStop(); const gen = lg.gen;
     $('#loginbody').innerHTML = '<p class="loginwait"><span class="spin" aria-hidden="true"></span>Starting…</p>';
     try {
-      // The code is good once: a later start (Try again, an expired one) is a plain log in
-      const renewal = lg.renewal; lg.renewal = null;
-      const r = await fetch('/v1/auth/pubky/start', renewal ? { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ renewal }) } : { method: 'POST' }); const j = await r.json();
+      const r = await fetch('/v1/auth/pubky/start', lg.renewal ? { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ renewal: lg.renewal }) } : { method: 'POST' }); const j = await r.json();
       if (gen !== lg.gen) return;
       if (r.status === 412) {
         $('#loginbody').innerHTML = '<p class="muted">Pubky Ring can’t log you in here right now: this node isn’t linked to a Pubky identity, or couldn’t reach it when it started. Use its API token below.</p>';
@@ -2069,7 +2067,8 @@
   $('#volbtn').onclick = () => {
     if (!qPanel.hidden) { closeQPanel(); return; }
     openQPanel('#volbtn');
-    const v = $('#qpvol', qPanel); if (v) { v.focus(); v.scrollIntoView({ block: 'nearest' }); }
+    // At its volume; without a zone (no slider) the panel's first control, so focus is inside
+    const v = $('#qpvol', qPanel) || $('[data-dsp]:not(:disabled), button', qPanel); if (v) { v.focus(); v.scrollIntoView({ block: 'nearest' }); }
   };
 
   // Now Playing's Pubky row: the heart, your tags on this song (added here), and its full page

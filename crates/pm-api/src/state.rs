@@ -159,7 +159,7 @@ pub struct NodeState {
         std::collections::HashMap<String, (pm_pubky::homeserver::LoginFlow, std::time::Instant, String)>,
     >,
     /// Renewal codes the owner's page got for its next Pubky Ring log in (`POST
-    /// /v1/auth/pubky/renewal`): code → when. Each is used once.
+    /// /v1/auth/pubky/renewal`): code → when. Good until a renewal succeeds.
     pub renewals: std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
     /// The zones' source factory, also the per-output DSP registry.
     pub sources: Arc<NodeSources>,

@@ -1814,7 +1814,7 @@ pub struct LoginStarted {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ControllerLoginStart {
     /// A renewal code from `POST /v1/auth/pubky/renewal`: the owner's page asks for the node's
-    /// folders too, as the node needs new ones. Used once; ignored while the node needs none.
+    /// folders too, as the node needs new ones. Good until a renewal succeeds; ignored while the node needs none.
     #[serde(default)]
     pub renewal: Option<String>,
 }
@@ -1822,8 +1822,8 @@ pub struct ControllerLoginStart {
 /// `POST /v1/auth/pubky/renewal`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoginRenewal {
-    /// For the next `/v1/auth/pubky/start`, once, within 15 minutes; `null` while the node needs
-    /// no new folders.
+    /// For the next `/v1/auth/pubky/start` log ins, within 15 minutes and until a renewal
+    /// succeeds; `null` while the node needs no new folders.
     pub renewal: Option<String>,
 }
 

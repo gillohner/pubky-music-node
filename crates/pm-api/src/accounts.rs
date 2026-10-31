@@ -26,7 +26,8 @@ const TOKENS: &str = "accounts.tokens";
 const OWNER_SESSIONS: &str = "accounts.owner_sessions";
 /// A hash of the API token the owner's browser sessions were made under: one changed in the config
 /// ends them at the next start, as Make a new token does.
-const OWNER_SESSIONS_TOKEN: &str = "accounts.owner_sessions_token";
+/// Never in a backup (`backup::NODE_OWN`).
+pub(crate) const OWNER_SESSIONS_TOKEN: &str = "accounts.owner_sessions_token";
 /// The start of an owner's browser session token.
 pub const OWNER_PREFIX: &str = "pmo_";
 const ZONES: &str = "accounts.listener_zones";

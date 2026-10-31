@@ -832,10 +832,15 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
       const renewBodies = []; let codes = 0;
       await c.route(/\/v1\/auth\/pubky\/renewal$/, (r) => { codes++; return r.fulfill({ json: { renewal: 'code-from-the-node' } }); });
       await c.route(/\/v1\/auth\/pubky\/start$/, (r) => { renewBodies.push(r.request().postData()); return r.fulfill({ json: { id: 'renew1', url: 'pubkyauth:///?caps=/pub/pubky.app/:r&secret=c2VjcmV0&relay=https://relay.example/link', owner: OWNER_K, owner_face: { id: OWNER_K, name: 'Alice' }, node_name: 'CI node', renews: true, qr_svg: QR } }); });
-      await c.route(/\/v1\/auth\/pubky\/poll/, (r) => r.fulfill({ json: { status: 'pending' } }));
+      let renewPoll = { status: 'pending' };
+      await c.route(/\/v1\/auth\/pubky\/poll/, (r) => r.fulfill({ json: renewPoll }));
       await p.click('#pkresign [data-resign]');
       check(await visible(p, '#loginpage', 15000) && await p.waitForFunction(() => /approve the new folders this node needs/.test(document.querySelector('#loginbody').textContent), null, { timeout: 10000 }).then(() => true).catch(() => false), 'its Log out leads to a log in that asks for the new folders');
-      check(codes === 1 && renewBodies.length === 1 && JSON.parse(renewBodies[0] || '{}').renewal === 'code-from-the-node', `the log in asks for the renewal with the node's code, once (${renewBodies.join(' ')})`);
+      check(codes === 1 && renewBodies.length === 1 && JSON.parse(renewBodies[0] || '{}').renewal === 'code-from-the-node', `the log in asks for the renewal with the node's code (${renewBodies.join(' ')})`);
+      // A wrong identity, then Try again: still the renewal
+      renewPoll = { status: 'denied', reason: 'not_owner', user: OTHER_K, approver: { id: OTHER_K, name: 'Bob' }, owner_face: { id: OWNER_K, name: 'Alice' } };
+      await visible(p, '#loginagain', 10000); renewPoll = { status: 'pending' }; await p.click('#loginagain'); await p.waitForTimeout(800);
+      check(renewBodies.length === 2 && JSON.parse(renewBodies[1] || '{}').renewal === 'code-from-the-node', 'Try again after a wrong identity still asks for the renewal');
       await c.close();
       c = await ctx(); p = await c.newPage();
       await c.route(/\/v1\/pubky$/, (r) => r.fulfill({ json: { user: 'pubky' + OWNER_K, unsynced: 0, needs_resign: true, missing: ['/pub/music/v1/'], notice: 'This node needs your approval for new folders on your homeserver. Log out and log in again with Pubky Ring to give it.', sync: null } }));
