@@ -793,8 +793,14 @@
   // token stays the node's), and the page forgets everything of the account, back to Log in.
   // Only once the node said so (or the session had already ended): else the session would go on
   // working while the page claims it is over, so it says why, still logged in, with Try again.
-  // `renew` (from the notice that the node needs new folders): the next log in asks for them.
-  const logOut = async (renew) => {
+  // While the node needs new folders, the owner's next log in from here asks for them (only the
+  // owner's page asks: anyone scanning a plain QR code is asked to read, nothing more).
+  const logOut = async () => {
+    let renew = false;
+    if (state.token && !isListener()) {
+      const pk = await fetch('/v1/pubky', { headers: { authorization: 'Bearer ' + state.token } }).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+      renew = !!(pk && pk.needs_resign);
+    }
     if (state.token) {
       let why = '';
       try {
@@ -803,11 +809,11 @@
       } catch { why = 'the node didn’t answer'; }
       if (why) {
         popTransient(); if (popPending) await popPending;
-        if (confirm(`Couldn’t log out: ${why}. You are still logged in.\n\nTry again?`)) logOut(renew);
+        if (confirm(`Couldn’t log out: ${why}. You are still logged in.\n\nTry again?`)) logOut();
         return;
       }
     }
-    try { if (renew === true) sessionStorage.setItem('pm.loginRenew', '1'); } catch { /* a plain log in */ }
+    try { if (renew) sessionStorage.setItem('pm.loginRenew', '1'); } catch { /* a plain log in */ }
     forgetAccount();
     try { sessionStorage.setItem('pm.loginWhy', 'out'); } catch { /* no reason shown */ }
     // From a menu: its history entry goes first, or popping it later would cancel this navigation
@@ -3729,11 +3735,11 @@
   // A session approved for fewer folders than the node uses: one plain line with the way out.
   // The node's own Pubky session lacks folders: the owner's next log in with Pubky Ring asks for
   // them (one approval, no separate sign-in), so the way there is Log out
-  const RESIGN_TEXT = 'This node needs your approval for new folders on your homeserver. Use Log out here and log in again with Pubky Ring to give it.';
+  const RESIGN_TEXT = 'This node needs your approval for new folders on your homeserver. Log out and log in again with Pubky Ring to give it.';
   const resignNotice = (pk = state.pubkyStatus) => pk && pk.needs_resign ? `<div class="notice warn resign" role="status"><span>${esc(pk.notice || RESIGN_TEXT)}</span>${state.token ? `<button class="btn sm" data-resign>${icon('logout')} Log out</button>` : '<button class="btn sm primary" data-resign>Approve in Pubky Ring</button>'}</div>` : '';
   // With a token: Log out, as the next log in asks for the folders. A node without one has no log
   // in, so its notice approves them here (Settings › My accounts, the node's own Pubky sign-in).
-  const bindResign = (root) => $$('[data-resign]', root).forEach((b) => b.onclick = state.token ? () => logOut(true) : () => { state.autoResign = true; setView('settings', 'accounts'); });
+  const bindResign = (root) => $$('[data-resign]', root).forEach((b) => b.onclick = state.token ? logOut : () => { state.autoResign = true; setView('settings', 'accounts'); });
   // A sync's answer as one plain line: the re-sign notice instead of a raw 403.
   const syncToast = (r) => { const resign = (r.errors || []).find((e) => e === RESIGN_TEXT); if (resign) { state.pubkyUser = undefined; return toast(RESIGN_TEXT, 'error'); } toast(`Saved: ${r.pushed} sent to your homeserver, ${r.pulled} received${r.errors.length ? `, ${r.errors.length} errors` : ''}${r.pending ? `; ${r.pending} more going out in the background` : ''}${(r.notes || []).length ? `. ${r.notes.join(' ')}` : ''}`); };
   // The API serves at most 1000 rows per call; follow the `after` cursor to the end (capped at 50k rows).

@@ -892,7 +892,18 @@ async fn auth(
     next: middleware::Next,
 ) -> Response {
     // The owner's API token, or a listener's personal one (accounts.rs)
-    let Some(caller) = accounts::caller(&state, bearer(&headers, &query).as_deref()) else {
+    let token = bearer(&headers, &query);
+    let Some(caller) = accounts::caller(&state, token.as_deref()) else {
+        // An owner's browser session while the node has no identity loaded: not refused for good
+        // (the page keeps it), it works again once the identity is
+        if token
+            .as_deref()
+            .is_some_and(|t| t.starts_with(accounts::OWNER_PREFIX))
+            && state.sync_handle().is_none()
+        {
+            return ApiError::new(StatusCode::SERVICE_UNAVAILABLE, accounts::IDENTITY_NOT_LOADED)
+                .into_response();
+        }
         // The web page knows this answer (app.js NODE_REFUSED): it means "log in again"
         return ApiError::new(StatusCode::UNAUTHORIZED, "missing or wrong bearer token").into_response();
     };
@@ -5335,21 +5346,37 @@ mod tests {
         // restored at start (Kimi review of #209); the API token still works
         const OLD: &str = "o3ftkuxjd9k6zgnc4hhbhbg5jusubr4zqyb1dtzi8hhm3hf5wbmy";
         const NEW: &str = "gujx6qd8ksydh1makdphd3bxu351d9b8waqka8hfg6q7hnqkxexo";
-        let session = accounts::mint_owner(&s, OLD).unwrap();
-        assert!(session.starts_with(accounts::OWNER_PREFIX));
-        let (st, v) = send("GET", "/v1/me".into(), session.clone(), None).await;
-        assert_eq!(st, StatusCode::UNAUTHORIZED, "{v}");
+        // No identity loaded, so no session is made for anyone
         assert_eq!(
-            v["error"], "missing or wrong bearer token",
-            "the page logs in again on exactly this"
+            accounts::mint_owner(&s, OLD).unwrap_err().status,
+            StatusCode::CONFLICT
         );
+        // An earlier owner's session, kept from before: not the owner now. The answer is a 503 of
+        // its own, so the page keeps the session instead of logging out for good
+        let sessions = |keys: &[&str]| {
+            s.library
+                .lock()
+                .unwrap()
+                .set_setting(
+                    "accounts.owner_sessions",
+                    &serde_json::to_string(
+                        &keys
+                            .iter()
+                            .map(|k| serde_json::json!({"hash": blake3::hash(format!("pmo_{k}").as_bytes()).to_hex().to_string(), "key": k, "created_at": 1}))
+                            .collect::<Vec<_>>(),
+                    )
+                    .unwrap(),
+                )
+                .unwrap()
+        };
+        sessions(&[OLD, NEW]);
+        let (st, v) = send("GET", "/v1/me".into(), format!("pmo_{OLD}"), None).await;
+        assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{v}");
+        assert_eq!(v["error"], accounts::IDENTITY_NOT_LOADED);
         let (st, _) = send("GET", "/v1/me".into(), "s3cret".into(), None).await;
-        assert_eq!(st, StatusCode::OK);
-        let (st, _) = send("GET", "/v1/me".into(), "pmo_madeup".into(), None).await;
-        assert_eq!(st, StatusCode::UNAUTHORIZED);
+        assert_eq!(st, StatusCode::OK, "the API token logs in meanwhile");
         // The node takes on another identity: the old owner's sessions are gone for good, the new
         // owner's stay
-        let mine = accounts::mint_owner(&s, &format!("pubky{NEW}")).unwrap();
         accounts::keep_owner_sessions_of(&s, &format!("pubky{NEW}")).unwrap();
         let kept: Vec<String> = serde_json::from_str::<Vec<serde_json::Value>>(
             &s.library
@@ -5363,7 +5390,14 @@ mod tests {
         .iter()
         .map(|t| t["key"].as_str().unwrap().to_string())
         .collect();
-        assert_eq!(kept, [NEW], "{mine}");
+        assert_eq!(kept, [NEW]);
+        // A wrong token is still the 401 the page logs in again on
+        let (st, v) = send("GET", "/v1/me".into(), "pml_madeup".into(), None).await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            v["error"], "missing or wrong bearer token",
+            "the page logs in again on exactly this"
+        );
     }
 
     #[tokio::test]

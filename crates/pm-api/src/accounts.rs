@@ -126,18 +126,37 @@ pub fn mint(s: &NodeState, key: &str) -> Result<String, ApiError> {
 /// the node keeps its hash. At most 20; the oldest goes first.
 pub fn mint_owner(s: &NodeState, key: &str) -> Result<String, ApiError> {
     let token = format!("{OWNER_PREFIX}{}", crate::tidal::random_urlsafe(32));
-    update(s, OWNER_SESSIONS, |all| {
-        if all.len() >= 20 {
-            all.remove(0);
+    let key = key.trim_start_matches("pubky").to_string();
+    let made = update(s, OWNER_SESSIONS, |all| {
+        // Still the node's identity, checked under the same hold as the cleanup when it takes on
+        // another one (`keep_owner_sessions_of`), so no session of the old one slips past it
+        let current = s
+            .sync_handle()
+            .is_some_and(|h| h.z32().trim_start_matches("pubky") == key);
+        if current {
+            if all.len() >= 20 {
+                all.remove(0);
+            }
+            all.push(PersonToken {
+                hash: hash(&token),
+                key: key.clone(),
+                created_at: now(),
+            });
         }
-        all.push(PersonToken {
-            hash: hash(&token),
-            key: key.trim_start_matches("pubky").to_string(),
-            created_at: now(),
-        });
+        current
     })?;
+    if !made {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "the node is signed in as someone else now: log in again",
+        ));
+    }
     Ok(token)
 }
+
+/// The answer to an owner's browser session while the node has no Pubky identity loaded (503, not
+/// the 401 that makes the page log in again: the session works again once the identity is).
+pub const IDENTITY_NOT_LOADED: &str = "this node couldn't load its Pubky identity (its homeserver didn't answer when it started), and browser sessions wait for it: restart the node once the homeserver answers. Until then the node's API token logs in";
 
 /// An owner's browser session that is still open, for `owner`: the identity the node has loaded
 /// now (a node signed in as someone else no longer lets the old owner's browsers in).

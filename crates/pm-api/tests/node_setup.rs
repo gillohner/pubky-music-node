@@ -217,9 +217,16 @@ async fn the_owner_replaces_a_token_the_node_made_and_the_old_one_stops_working(
     std::fs::write(&file, OWNER).unwrap();
     let s = node(dir.path(), vec![], just_null());
     let listener = listener(&s);
-    // An owner's browser session (only valid with the node's identity loaded, which needs a
+    // An owner's browser session (made and used with the node's identity loaded, which needs a
     // homeserver: tests/bundled_homeserver.rs; here, that the node keeps it)
-    pm_api::accounts::mint_owner(&s, "o3ftkuxjd9k6zgnc4hhbhbg5jusubr4zqyb1dtzi8hhm3hf5wbmy").unwrap();
+    s.library
+        .lock()
+        .unwrap()
+        .set_setting(
+            "accounts.owner_sessions",
+            r#"[{"hash":"00","key":"o3ftkuxjd9k6zgnc4hhbhbg5jusubr4zqyb1dtzi8hhm3hf5wbmy","created_at":1}]"#,
+        )
+        .unwrap();
     let browsers = || {
         let kept = s
             .library
