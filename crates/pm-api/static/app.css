@@ -801,7 +801,6 @@ button.chip:hover { border-color: var(--line-strong); color: var(--fg); }
 .btn.choice { flex-direction: column; align-items: flex-start; gap: 2px; text-align: left; padding: 12px 14px; height: auto; white-space: normal; border-radius: 12px; }
 .choice-label { font-weight: 600; }
 .choice-note { font-size: 12px; font-weight: 400; opacity: 0.8; }
-/* Item pages: the back arrow and the breadcrumb on one line */
 /* Item pages: the back button and the breadcrumb on one line, their text centred together; the
    gap under them belongs to the bar, not the button, and the two share a size and line height so
    their baselines meet (owner, 2026-10-31) */
