@@ -587,6 +587,35 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
     const backN = await (async () => { const end = Date.now() + 20000; for (;;) { const n = (await api('GET', '/library/tracks?limit=50')).tracks.length; if (n === before || Date.now() > end) return n; await p.waitForTimeout(300); } })();
     check(backN === before, `Bring back returns it (${backN} of ${before})`);
     await c.close();
+    // Item pages: the back button and the breadcrumb line up (owner addendum to TASK-tablet-nav).
+    // Both show when a page is opened from another one in the app; a deep link hides the button on
+    // wide screens where it would repeat a crumb, so it is shown here for the measurement: the
+    // same layout as after an in-app step
+    {
+      const page = (kind, id, title, extra) => ({ kind, id, target: { track_id: 1 }, title, source: 'Your library', source_id: 'library', section: 'albums', songs: [], albums: [], versions: [], about: [], open_on: [], also_on: [], connect: [], ...extra });
+      const A = { id: 'lib-7', name: 'Artist A' }; const B = { id: 'lib-8', name: 'Album B' };
+      for (const [w, h] of [[1280, 900], [834, 1194], [390, 844]]) {
+        const cc = await browser.newContext({ viewport: { width: w, height: h } });
+        await cc.addInitScript((t) => { localStorage.setItem('pm.token', t); localStorage.setItem('pm.zone', 'browser'); }, TOKEN);
+        const pp = await cc.newPage();
+        await pp.route(/\/v1\/item\/song\/lib-1$/, (r) => r.fulfill({ json: page('song', 'lib-1', 'Aligned Song', { artist: A, album: B }) }));
+        await pp.route(/\/v1\/item\/artist\/lib-7$/, (r) => r.fulfill({ json: page('artist', 'lib-7', 'Artist A', {}) }));
+        await pp.route(/\/v1\/item\/[a-z]+\/[^/]+\/extras$/, (r) => r.fulfill({ json: { related: [], concerts: [], similar: [] } }));
+        await pp.goto(BASE + '/song/lib-1'); await pp.waitForSelector('.pagebar .back', { state: 'attached', timeout: 20000 });
+        const m = await pp.evaluate(() => {
+          const bar = document.querySelector('.pagebar'); const back = bar.querySelector('.back'); back.classList.remove('dupback');
+          const crumb = bar.querySelector('.crumbs li[aria-current]'); const mid = (e) => { const r = e.getBoundingClientRect(); return r.top + r.height / 2; };
+          const vis = !!crumb && getComputedStyle(crumb.closest('.crumbs')).display !== 'none';
+          return { trail: vis, diff: vis ? Math.round(Math.abs(mid(back) - mid(crumb)) * 10) / 10 : 0, backFont: getComputedStyle(back).fontSize, crumbFont: vis ? getComputedStyle(crumb).fontSize : null, backMb: getComputedStyle(back).marginBottom, barMb: getComputedStyle(bar).marginBottom };
+        });
+        check(m.trail === (w > 720) && m.diff <= 1.5 && (!m.trail || m.backFont === m.crumbFont) && m.backMb === '0px' && m.barMb === '14px', `${w}: back button and breadcrumb line up (${JSON.stringify(m)})`);
+        // An artist page has no trail: the bar keeps the same gap below
+        await pp.goto(BASE + '/artist/lib-7'); await pp.waitForSelector('.pagebar .back', { state: 'attached', timeout: 20000 });
+        const n = await pp.evaluate(() => { const bar = document.querySelector('.pagebar'); return { crumbs: !!bar.querySelector('.crumbs'), barMb: getComputedStyle(bar).marginBottom, backMb: getComputedStyle(bar.querySelector('.back')).marginBottom }; });
+        check(!n.crumbs && n.barMb === '14px' && n.backMb === '0px', `${w}: without a trail the bar keeps the same gap below (${JSON.stringify(n)})`);
+        await cc.close();
+      }
+    }
     // A listener: My music only, no edit controls
     c = await ctx(); p = await c.newPage();
     await p.route(/\/v1\/me$/, async (r) => { const res = await r.fetch(); const j = await res.json(); return r.fulfill({ json: { ...j, role: 'listener', zones: null } }); });
