@@ -670,12 +670,23 @@ pub fn is_http_uri(uri: &str) -> bool {
     uri.starts_with("http://") || uri.starts_with("https://")
 }
 
+impl NodeSources {
+    /// Whose sign-ins an item plays with: who queued it, while they may still use the music.
+    fn who_of(&self, item: &QueueItem) -> crate::accounts::Who {
+        match self.library.lock() {
+            Ok(lib) => crate::accounts::Who::of_item_in(item, &lib),
+            Err(_) => crate::accounts::Who::Nobody,
+        }
+    }
+}
+
 impl SourceFactory for NodeSources {
     fn open(&self, item: &QueueItem) -> Result<Box<dyn FrameSource>, SourceError> {
         if let Some(id) = item.uri.strip_prefix(crate::youtube::VIDEO_URI_PREFIX) {
             // Through yt-dlp when the owner switched that on (unofficial); else This browser only
             if self.library.lock().is_ok_and(|l| crate::ytdlp::zones_on_lib(&l)) {
-                return crate::ytdlp::open_blocking(&self.library, id);
+                let who = self.who_of(item);
+                return crate::ytdlp::open_blocking(&self.library, id, &who);
             }
             return Err(SourceError::Open {
                 uri: item.uri.clone(),
@@ -692,19 +703,23 @@ impl SourceFactory for NodeSources {
             return crate::librespot::open_live();
         }
         if let Some(id) = item.uri.strip_prefix(crate::tidal::TRACK_URI_PREFIX) {
-            return crate::tidal::open_track_blocking(&self.library, &self.tidal, id);
+            // With the account of whoever queued it, never anyone else's
+            let who = self.who_of(item);
+            return crate::tidal::open_track_blocking(&self.library, &self.tidal, id, &who);
         }
         if let Some(id) = item.uri.strip_prefix(crate::deezer::TRACK_URI_PREFIX) {
             return crate::deezer::open_track_blocking(&self.deezer, id);
         }
         if let Some(id) = item.uri.strip_prefix(crate::qobuz::TRACK_URI_PREFIX) {
-            return crate::qobuz::open_track_blocking(&self.library, id);
+            let who = self.who_of(item);
+            return crate::qobuz::open_track_blocking(&self.library, id, &who);
         }
         if let Some(key) = item.uri.strip_prefix(crate::bandcamp::TRACK_URI_PREFIX) {
             return crate::bandcamp::open_track_blocking(&self.library, key);
         }
         if let Some(id) = item.uri.strip_prefix(crate::soundcloud::TRACK_URI_PREFIX) {
-            return crate::soundcloud::open_track_blocking(&self.library, id);
+            let who = self.who_of(item);
+            return crate::soundcloud::open_track_blocking(&self.library, id, &who);
         }
         if let Some(id) = item.uri.strip_prefix(crate::jamendo::TRACK_URI_PREFIX) {
             return crate::jamendo::open_track_blocking(&self.jamendo, id);

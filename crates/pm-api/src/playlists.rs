@@ -810,6 +810,7 @@ pub(crate) fn local_queue_item(t: &Track) -> pm_zones::QueueItem {
         duration_ms: t.duration_ms,
         image: None,
         limit: None,
+        by: None,
     }
 }
 

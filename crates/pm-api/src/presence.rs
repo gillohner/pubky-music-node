@@ -25,6 +25,11 @@ use std::time::{Duration, Instant};
 /// Who an owner is when they have not signed in to Pubky (no key to name them by).
 pub const OWNER: &str = "owner";
 const VISIBLE_KEY: &str = "presence.visible.";
+
+/// Where a person's "who may see me listening" choice is kept.
+pub(crate) fn visible_key(key: &str) -> String {
+    format!("{VISIBLE_KEY}{key}")
+}
 /// How long whether someone follows someone stays known...
 const FOLLOWS_FOR: Duration = Duration::from_secs(600);
 /// ...and that Nexus couldn't say (taken as no meanwhile, so a page isn't kept waiting).
