@@ -278,12 +278,18 @@ pub(crate) async fn check_key(
         );
     }
     let client = acoustid_client(&s, &key, &base)?;
+    // AcoustID looks at the key before the fingerprint: only its "invalid API key" (code 4) refuses
+    // the key; any other answer of its own (the dummy fingerprint draws "invalid fingerprint",
+    // code 3) means it took the key. Only no answer at all is "couldn't reach"
     match client.lookup("AQAAAA", 30).await {
-        Ok(_) => answer(true, "OK: AcoustID accepts this key.".into()),
         Err(pm_library::LibraryError::AcoustIdKey(why)) => answer(
             false,
             format!("AcoustID refused this key ({why}). Check it, or {KEY_FROM}."),
         ),
+        Ok(_) => answer(true, "OK: AcoustID accepts this key.".into()),
+        Err(pm_library::LibraryError::AcoustId(m)) if m.contains("(code ") => {
+            answer(true, "OK: AcoustID accepts this key.".into())
+        }
         Err(e) => answer(false, format!("Couldn't reach AcoustID: {e}. Try again later.")),
     }
 }

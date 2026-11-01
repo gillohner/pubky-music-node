@@ -5911,7 +5911,9 @@
     const wn = $('#idwritenow'); if (wn) wn.onclick = async () => { wn.disabled = true; try { const r = await api('POST', '/library/identify/write'); toast(`${r.written} file${r.written === 1 ? '' : 's'} updated${r.skipped.length ? `, ${r.skipped.length} left as they were (${r.skipped[0].reason})` : ''}`); } catch (e) { toast(e.message, 'error'); } wn.disabled = false; };
     const run = $('#idrun'); if (run) run.onclick = async () => { try { await api('POST', '/library/identify', { retry: !c.unchecked }); renderIdentify(); } catch (e) { toast(e.message, 'error'); } };
     clearTimeout(idTimer);
-    if (p.running) idTimer = setTimeout(renderIdentify, 1500);
+    // While a run goes on the card is drawn again; not while a Check waits or a key is being typed
+    const idAgain = () => { const k = $('#acidkey'); const ch = $('#acidcheck'); if ((k && k.value) || (ch && ch.disabled)) { idTimer = setTimeout(idAgain, 1500); return; } renderIdentify(); };
+    if (p.running) idTimer = setTimeout(idAgain, 1500);
   };
   const watchScan = (info) => {
     const was = state.wasScanning; state.wasScanning = !!(info && info.scanning);

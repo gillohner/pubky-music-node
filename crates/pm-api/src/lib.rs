@@ -14427,7 +14427,11 @@ exec sleep 300
                 post(move |body: String| {
                     lookups.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     async move {
-                        if body.contains("client=GoodKey") {
+                        if body.contains("client=GoodKey") && body.contains("fingerprint=AQAAAA") {
+                            // As the real service: the key is taken, the dummy fingerprint isn't
+                            Json(serde_json::json!({"status": "error",
+                                "error": {"code": 3, "message": "invalid fingerprint"}}))
+                        } else if body.contains("client=GoodKey") {
                             Json(serde_json::json!({"status": "ok", "results": []}))
                         } else {
                             Json(serde_json::json!({"status": "error",
