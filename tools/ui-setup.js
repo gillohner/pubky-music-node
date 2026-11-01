@@ -193,7 +193,11 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
           check(off === 'none', `${w}×${h}: offline, no volume button into the Sound panel (${off})`);
         }
         if (!vol && shell === 'phone' && await shown('#quality')) { await p.click('#quality'); vol = await visible(p, '#qpanel #qpvol', 5000); }
-        check(vol, `${w}×${h}: volume (${(await shown('#vol')) ? 'slider in the bar' : 'in the Sound panel'})`);
+        // A phone with nothing playing has no sound pill (UX sweep A4): volume is on the zone's card
+        // (Zones, one tap), and in Now playing while something plays
+        let where = (await shown('#vol')) ? 'slider in the bar' : 'in the Sound panel';
+        if (!vol && shell === 'phone') { await p.click('[data-bnav="zones"]'); vol = await visible(p, '#main [data-zvol]', 8000); where = 'on the zone card'; }
+        check(vol, `${w}×${h}: volume (${where})`);
         if (shell === 'tablet') {
           const foot = p.locator('[data-bnav="settings"]'); await foot.scrollIntoViewIfNeeded().catch(() => {});
           const box = await foot.boundingBox();
@@ -654,6 +658,33 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
         check(!n.crumbs && n.barMb === '14px' && n.backMb === '0px', `${w}: without a trail the bar keeps the same gap below (${JSON.stringify(n)})`);
         await cc.close();
       }
+    }
+    // ---- UX sweep 11-01: Sources on phones, and the player bar keeps room for what plays ----
+    for (const [w, h] of [[390, 844], [430, 932], [768, 1024], [834, 1194]]) {
+      const cc = await browser.newContext({ viewport: { width: w, height: h }, hasTouch: true, isMobile: w < 600 });
+      await cc.addInitScript((t) => { localStorage.setItem('pm.token', t); localStorage.setItem('pm.zone', 'browser'); HTMLMediaElement.prototype.play = async function () { this.dispatchEvent(new Event('playing')); }; }, TOKEN);
+      const pp = await cc.newPage(); const errs = []; pp.on('pageerror', (e) => errs.push(e.message));
+      if (w < 600) {
+        await pp.goto(BASE + '/sources'); await pp.waitForSelector('#main [data-srctab]', { timeout: 20000 }).catch(() => {});
+        check(await pp.$$eval('#main [data-srctab]', (x) => x.length) > 3 && !(await pp.evaluate(() => /Cannot read properties/.test(document.querySelector('#main').textContent))), `${w}: Sources lists the sources (no crash with none chosen)`);
+        await pp.goto(BASE + '/'); await pp.waitForSelector('#np', { timeout: 20000 });
+        check(await pp.evaluate(() => getComputedStyle(document.querySelector('#quality')).display === 'none'), `${w}: nothing playing, no sound pill: the bar says Nothing playing`);
+      }
+      // A song from the library in This browser
+      await pp.goto(BASE + '/tracks'); await pp.waitForSelector('.track', { timeout: 20000 });
+      const first = pp.locator('.track').first(); await first.hover().catch(() => {}); await first.locator('[data-act="play"], .play-btn, button[aria-label^="Play"]').first().click().catch(async () => { await first.dblclick(); });
+      const room = await (async () => { const end = Date.now() + 8000; for (;;) { const r = await pp.evaluate(() => { const t = document.querySelector('#np .np-title'); return t && !/Nothing playing|Starting/.test(t.textContent) ? Math.round(document.querySelector('#np').getBoundingClientRect().width) : 0; }); if (r || Date.now() > end) return r; await pp.waitForTimeout(200); } })();
+      const floor = w < 600 ? 150 : 170;
+      check(room >= floor, `${w}: playing, the bar keeps ${room} px for the cover and title (at least ${floor})`);
+      if (w < 600) {
+        const dup = await pp.evaluate(() => { const q = document.querySelector('#quality'); const dev = q && q.querySelector('.qdev'); return !!(dev && getComputedStyle(dev).display !== 'none'); });
+        check(!dup, `${w}: the zone's name is not in the sound pill too`);
+        await pp.click('#np'); await pp.waitForSelector('#nowplaying', { state: 'visible', timeout: 8000 }).catch(() => {});
+        check(await pp.evaluate(() => /^\/(song|item)/.test(location.pathname) === false), `${w}: tapping the bar opens Now playing, not the song page`);
+        check(await pp.isVisible('#npvol'), `${w}: Now playing has a volume slider`);
+      }
+      check(errs.length === 0, `${w}: no page errors${errs.length ? ': ' + errs.join(' | ') : ''}`);
+      await cc.close();
     }
     // A listener: My music only, no edit controls
     c = await ctx(); p = await c.newPage();

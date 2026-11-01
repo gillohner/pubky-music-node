@@ -715,6 +715,10 @@ button.chip:hover { border-color: var(--line-strong); color: var(--fg); }
 .list-row .thumb.round { border-radius: 50%; }
 .list-row .ic.right { transform: rotate(-90deg); color: var(--muted); }
 .snotes { display: flex; flex-direction: column; gap: 4px; margin: 0 0 10px; }
+.sfilters { margin: 0 0 12px; }
+.sfilters > summary { list-style: none; cursor: pointer; }
+.sfilters > summary::-webkit-details-marker { display: none; }
+.sfilters[open] > summary { margin-bottom: 8px; }
 .snote { font-size: 12px; color: var(--muted); display: inline-flex; align-items: center; gap: 6px; }
 .snote .src-badge.ico { width: 18px; height: 18px; }
 .chips.win { display: inline-flex; gap: 4px; margin-left: 10px; }
@@ -741,6 +745,8 @@ button.chip:hover { border-color: var(--line-strong); color: var(--fg); }
 /* "Also on" next to Play/Shuffle: one icon per service */
 .also-icons { display: inline-flex; flex-wrap: wrap; gap: 4px; align-items: center; margin-left: 4px; }
 .also-icons .also-ico { width: 36px; height: 36px; }
+/* The icons say what they are (UX sweep 11-01, A11) */
+.also-icons .also-label { margin-right: 2px; }
 .also-icons .src-badge.ico { width: 24px; height: 24px; margin: 0; box-shadow: none; }
 .btn.icon-only { padding-left: 10px; padding-right: 10px; }
 .idfile { min-width: 0; }
@@ -923,13 +929,22 @@ a.btn { text-decoration: none; }
 .set-back { display: none; margin-bottom: 8px; }
 .set-group { margin-bottom: 28px; }
 .set-h { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin: 0 0 8px; }
-.set-rows { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
+.set-rows { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; container-type: inline-size; }
 .set-row { display: flex; align-items: center; gap: 20px; padding: 14px 16px; border-top: 1px solid var(--line); min-width: 0; }
 .set-rows > :first-child { border-top: 0; }
 .set-label { flex: 1 1 auto; min-width: 0; }
 .set-name { font-weight: 550; overflow-wrap: anywhere; }
 .set-help { margin: 3px 0 0; color: var(--muted); font-size: 13px; max-width: 64ch; overflow-wrap: anywhere; }
-.set-ctl { flex: 0 1 auto; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: flex-end; max-width: 60%; min-width: 0; }
+/* The text takes what is left; the action never shrinks under its button (UX sweep 11-01, A3), and
+   a long button label wraps inside it instead of running over the text */
+.set-ctl { flex: 0 0 auto; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: flex-end; max-width: 60%; min-width: 0; }
+.set-ctl > .btn { white-space: normal; text-align: left; }
+/* A narrow row (a phone, or a tablet's panel): a button or a field goes under the text; a switch,
+   a pill or a small icon button stays at the row's end (A3, A22) */
+@container (max-width: 560px) {
+  .set-row:has(> .set-ctl .btn:not(.icon-btn), > .set-ctl .input, > .set-ctl select) { flex-direction: column; align-items: stretch; gap: 10px; }
+  .set-row:has(> .set-ctl .btn:not(.icon-btn), > .set-ctl .input, > .set-ctl select) > .set-ctl { max-width: none; justify-content: flex-start; }
+}
 .set-block { flex-direction: column; align-items: stretch; gap: 10px; }
 .set-body { min-width: 0; }
 .set-body .toolbar { flex-wrap: wrap; }
@@ -958,8 +973,6 @@ code.path { font-size: 13px; overflow-wrap: anywhere; }
   .set-tab.on { background: none; color: var(--fg-2); font-weight: 400; }
   .set-tab .chev { display: inline; transform: rotate(-90deg); }
   .set-back { display: inline-flex; }
-  .set-row { flex-direction: column; align-items: stretch; gap: 10px; }
-  .set-ctl { max-width: none; justify-content: flex-start; }
 }
 .set-panel { min-width: 0; }
 .set-list .set-item .caps { flex: 0 1 50%; text-align: right; min-width: 0; overflow-wrap: anywhere; }
@@ -1076,6 +1089,15 @@ html[data-shell="phone"] .ytpanel { bottom: calc(150px + env(safe-area-inset-bot
    desktop (the sidebar). The full transport lives in Now playing on phones. */
 .bottomnav { display: none; }
 .np-transport { display: none; }
+/* Touch layouts: every tap target at least 40 px (UX sweep 11-01, A10); the look stays, the
+   hit area grows (min-height, or a transparent inset for the small icon buttons in rows) */
+html[data-shell="phone"] .chip, html[data-shell="tablet"] .chip { min-height: 40px; }
+html[data-shell="phone"] .track .row-actions .icon-btn, html[data-shell="tablet"] .track .row-actions .icon-btn { width: 40px; height: 40px; }
+html[data-shell="phone"] .tagrow .input, html[data-shell="tablet"] .tagrow .input, html[data-shell="phone"] .taginput, html[data-shell="tablet"] .taginput { min-height: 40px; }
+.np-vol { display: none; align-items: center; gap: 10px; max-width: 320px; margin: 10px auto 0; color: var(--muted); }
+.np-vol input { flex: 1; }
+html[data-shell="phone"] .np-vol { display: flex; }
+@media (max-width: 899px) { html[data-shell="tablet"] .np-vol { display: flex; } }
 .me-btn { display: inline-flex; flex: none; width: 40px; height: 40px; border-radius: 50%; background: var(--surface-3); color: var(--fg-2); }
 .bnav { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; min-height: 52px; min-width: 44px; background: none; border: 0; color: var(--muted); font: inherit; font-size: 11px; cursor: pointer; border-radius: 10px; }
 .bnav .ic { width: 22px; height: 22px; }
@@ -1083,6 +1105,9 @@ html[data-shell="phone"] .ytpanel { bottom: calc(150px + env(safe-area-inset-bot
 .bnav.on { color: var(--accent-strong); }
 .bnav:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .libnav { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; padding-bottom: 2px; }
+/* A chip row that scrolls says so: its end fades, and chips snap into place (UX sweep 11-01, A15) */
+html:not([data-shell="desktop"]) :is(.libnav, .scopechips, .np-sheet-tabs) { scroll-snap-type: x proximity; mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent); -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent); }
+.libnav > *, .scopechips > *, .np-sheet-tabs > * { scroll-snap-align: start; }
 .libnav::-webkit-scrollbar { display: none; }
 .libnav .chip { flex: none; }
 .main > .libnav + * { margin-top: 14px; }
@@ -1099,7 +1124,7 @@ html[data-shell="phone"] .topbar .upstreams { width: auto; margin: 0; flex: none
 html[data-shell="phone"] .bottomnav { grid-area: bnav; display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; background: var(--surface); border-top: 1px solid var(--line); padding: 2px 4px calc(2px + env(safe-area-inset-bottom)); }
 html[data-shell="phone"] .bnav.rail-only { display: none; }
 /* The mini player: a card above the tabs with the cover and title, the zone, and play/pause */
-html[data-shell="phone"] .player { grid-template-columns: minmax(0, 1fr) auto auto; grid-template-rows: auto; align-items: center; height: auto; min-height: 60px; margin: 0 8px 6px; padding: 6px 8px; gap: 8px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface-2); box-shadow: 0 4px 18px rgba(0, 0, 0, 0.14); }
+html[data-shell="phone"] .player { grid-template-columns: minmax(150px, 1fr) fit-content(48%) auto; grid-template-rows: auto; align-items: center; height: auto; min-height: 60px; margin: 0 8px 6px; padding: 6px 8px; gap: 8px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface-2); box-shadow: 0 4px 18px rgba(0, 0, 0, 0.14); }
 html[data-shell="phone"] .player-right { order: 1; gap: 6px; }
 html[data-shell="phone"] .player-center { order: 2; grid-column: auto; }
 html[data-shell="phone"] .player-center .seek, html[data-shell="phone"] .player-center .transport > :not(#toggle) { display: none; }
@@ -1109,6 +1134,14 @@ html[data-shell="phone"] .quality { padding: 4px 8px; gap: 5px; max-width: 150px
 html[data-shell="phone"] .quality .qdot, html[data-shell="phone"] .quality .qtext, html[data-shell="phone"] .quality .qdsp { display: none; }
 html[data-shell="phone"] .quality .qshort { display: inline-flex; }
 html[data-shell="phone"] .quality .qshort .qdev { max-width: 72px; }
+/* What plays has the room (UX sweep 11-01, A2/A4): the zone button names the device, so the pill
+   shows only where it plays from and the quality, and nothing at all while nothing plays; the
+   pills shrink before the title does */
+html[data-shell="phone"] .quality .qshort .qdev { display: none; }
+html[data-shell="phone"] .quality.idle, html[data-shell="phone"] .quality:not(:has(.qbadge)):not(:has(.qsrc svg)) { display: none; }
+html[data-shell="phone"] .player-right { min-width: 0; overflow: hidden; }
+html[data-shell="phone"] .player-right .zone-btn { min-width: 0; flex: 0 1 auto; }
+html[data-shell="phone"] .player-right .zone-btn span { max-width: 96px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 html[data-shell="phone"] .player .np-art { width: 44px; height: 44px; }
 html[data-shell="phone"] .player .zone-btn { min-height: 44px; }
 html[data-shell="phone"] body.np-open .player { display: none; }
@@ -1134,9 +1167,17 @@ html[data-shell="tablet"] .volbtn { display: none; }
   html[data-shell="tablet"] .volbtn { display: inline-flex; }
 }
 html[data-shell="tablet"] .topbar .upstreams { width: auto; margin: 0; flex: none; }
-html[data-shell="tablet"] .player { grid-template-columns: minmax(0, 1fr) minmax(220px, 1.4fr) auto; }
+html[data-shell="tablet"] .player { grid-template-columns: minmax(170px, 1fr) minmax(200px, 1.2fr) minmax(0, auto); }
+html[data-shell="tablet"] .player-right { min-width: 0; }
+/* Under 900 px (UX sweep 11-01, A2): the sound pill is its dot (the words are in Now playing and
+   the Sound panel), and shuffle and repeat stay in Now playing, so the title keeps its room */
+@media (max-width: 899px) {
+  html[data-shell="tablet"] .quality .qtext, html[data-shell="tablet"] .quality .qsrc { display: none; }
+  html[data-shell="tablet"] .quality { padding: 0; width: 44px; min-width: 44px; justify-content: center; }
+  html[data-shell="tablet"] .player-right .zone-btn span { max-width: 110px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+}
 /* A narrow tablet: shuffle and repeat stay in Now playing so the transport fits its column */
-@media (max-width: 700px) {
+@media (max-width: 899px) {
   html[data-shell="tablet"] .player-center .transport .mode-btn { display: none; }
   html[data-shell="tablet"] .np-transport { display: flex; align-items: center; justify-content: center; gap: 14px; margin-top: 10px; }
   html[data-shell="tablet"] .np-transport .icon-btn { width: 44px; height: 44px; }
@@ -1177,6 +1218,11 @@ html[data-shell="tablet"] .player { grid-template-columns: minmax(0, 1fr) minmax
 body.kiosk .sidebar, body.kiosk .topbar, body.kiosk .player, body.kiosk .bottomnav { display: none !important; }
 body.kiosk .shell { grid-template-columns: 1fr; grid-template-rows: 1fr; grid-template-areas: "content"; }
 body.kiosk .main { padding: 0; }
+.dash-home { position: absolute; top: 12px; left: 14px; z-index: 2; color: var(--muted); font-size: 13px; text-decoration: none; padding: 8px 10px; border-radius: 8px; }
+.dash-home:hover, .dash-home:focus-visible { color: var(--fg); background: var(--surface-2); }
+/* The Log in heading takes the focus to be announced; it shows no ring for that (UX sweep A20) */
+#loginh:focus { outline: none; }
+.still-loading { margin: 6px 0 0; }
 .dash { position: relative; min-height: 100vh; overflow: hidden; display: flex; align-items: center; justify-content: center; background: var(--bg); }
 .dash-bg { position: absolute; inset: -40px; filter: blur(48px) saturate(1.2); opacity: 0.45; }
 .dash-bg .art { width: 100%; height: 100%; border-radius: 0; aspect-ratio: auto; }
