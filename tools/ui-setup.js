@@ -587,6 +587,31 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
     const backN = await (async () => { const end = Date.now() + 20000; for (;;) { const n = (await api('GET', '/library/tracks?limit=50')).tracks.length; if (n === before || Date.now() > end) return n; await p.waitForTimeout(300); } })();
     check(backN === before, `Bring back returns it (${backN} of ${before})`);
     await c.close();
+    // Node library › Identify: the AcoustID key lives here with its state and a Check (owner
+    // addendum to TASK-qobuz-tidal-setup-ux); Settings › Service apps only points here
+    c = await ctx(); p = await c.newPage();
+    let idState = { acoustid_state: 'refused', acoustid_detail: 'invalid API key', acoustid: true, acoustid_own: true };
+    await p.route(/\/v1\/library\/identify$/, async (r) => { const res = await r.fetch(); const j = await res.json(); return r.fulfill({ json: { ...j, ...idState } }); });
+    const keyChecks = [];
+    await p.route(/\/v1\/library\/identify\/key\/check$/, (r) => { const b = r.request().postDataJSON(); keyChecks.push(b); return r.fulfill({ json: b.acoustid_key === 'GoodKey' ? { ok: true, detail: 'OK: AcoustID accepts this key.' } : { ok: false, detail: 'AcoustID refused this key (invalid API key). Check it, or get a free one at acoustid.org/new-application.' } }); });
+    await p.goto(BASE + '/library/node'); await p.waitForSelector('#acidrow', { timeout: 20000 });
+    check(/Key refused/.test(await p.textContent('#acidrow .set-name')) && await p.locator('#acidrow a[href="https://acoustid.org/new-application"]').count() === 1, 'Identify says the key was refused, with where to get one');
+    await p.fill('#acidkey', 'BadKey1'); await p.click('#acidcheck');
+    check(await waitText(p, '#acidout', 'AcoustID refused this key (invalid API key). Check it, or get a free one at acoustid.org/new-application.') && keyChecks.length === 1 && keyChecks[0].acoustid_key === 'BadKey1' && await p.$eval('#acidout', (e) => e.classList.contains('warn-text')), 'Check names the problem, saving nothing');
+    await p.fill('#acidkey', 'GoodKey'); await p.click('#acidcheck');
+    check(await waitText(p, '#acidout', 'OK: AcoustID accepts this key.') && !(await p.$eval('#acidout', (e) => e.classList.contains('warn-text'))), 'Check says OK');
+    idState = { acoustid_state: 'missing', acoustid: false, acoustid_own: false };
+    await p.goto(BASE + '/library/node'); await p.waitForSelector('#acidrow', { timeout: 20000 });
+    check(/Key missing/.test(await p.textContent('#acidrow .set-name')) && await p.locator('#acidrow a[href="https://acoustid.org/new-application"]').count() === 1 && !(await p.$('#acidclear')), 'no key: Key missing, with where to get one');
+    idState = { acoustid_state: 'ok', acoustid: true, acoustid_own: true };
+    await p.goto(BASE + '/library/node'); await p.waitForSelector('#acidrow', { timeout: 20000 });
+    check(/OK/.test(await p.textContent('#acidrow .set-name .pill')) && await p.isVisible('#acidclear'), 'a working key: OK, with Remove');
+    await p.goto(BASE + '/settings/apps'); await p.waitForSelector('#set-apps .set-row', { timeout: 20000 });
+    const acRow = p.locator('#set-apps .set-row', { has: p.locator('.set-name', { hasText: /^AcoustID$/ }) });
+    check(await acRow.locator('form').count() === 0 && await acRow.locator('[data-applib]').count() === 1, 'Settings › Service apps keeps no AcoustID form, only the way to Node library');
+    await acRow.locator('[data-applib]').click();
+    check(await (async () => { const end = Date.now() + 5000; for (;;) { if (new URL(p.url()).pathname === '/library/node') return true; if (Date.now() > end) return false; await p.waitForTimeout(100); } })(), 'which opens Node library');
+    await c.close();
     // A listener: My music only, no edit controls
     c = await ctx(); p = await c.newPage();
     await p.route(/\/v1\/me$/, async (r) => { const res = await r.fetch(); const j = await res.json(); return r.fulfill({ json: { ...j, role: 'listener', zones: null } }); });
