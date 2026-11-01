@@ -1147,7 +1147,7 @@
       // a code waiting, then what is missing
       const st = u.signed_in
         ? (broke ? { cls: 'bad', label: 'Problem', text: `Switched itself off: ${u.health.detail}.` }
-          : !u.enabled ? { cls: '', label: 'Off', text: 'Signed in, switched off here (pick the code sign-in below to use it).' }
+          : !u.enabled ? { cls: '', label: 'Off', text: `Signed in, switched off here (pick ${u.client_from ? 'the code sign-in' : 'the way it came from'} below to use it).` }
           : { cls: 'ok', label: 'Working', text: `Full tracks ${u.quality === 'high' ? 'up to 16-bit/44.1 kHz' : 'up to 24-bit/192 kHz'}.` })
         : u.pending ? { cls: 'warn', label: 'Waiting', text: 'Waiting for the code to be entered at link.tidal.com.' }
         : !u.client_from ? { cls: '', label: 'Needs client', text: 'Needs a TIDAL device client (pick the code sign-in below).' }
@@ -3844,21 +3844,6 @@
     toast(on ? 'Added to favourites' + note : 'Removed from favourites');
   };
   // Whether the node holds a Pubky session (menus offer homeserver uploads then).
-  // "Share what I'm listening to" (listening together): the player bar's Live switch, the owner's,
-  // shown once signed in with Pubky; off by default.
-  const wireLive = async () => {
-    const b = $('#livebtn'); if (!b) return;
-    if (!(await pubkyUser())) { b.hidden = true; return; }
-    const show = (v) => { b.hidden = false; b.setAttribute('aria-pressed', String(!!v.share)); b.classList.toggle('on', !!v.share); };
-    state.liveShow = show;
-    try { show(await api('GET', '/me/listening')); } catch { b.hidden = true; return; }
-    b.onclick = async () => {
-      const on = b.getAttribute('aria-pressed') !== 'true';
-      b.disabled = true;
-      // On an error the switch shows what the node has now, not what was asked
-      try { show(await api('PUT', '/me/listening', { share: on })); toast(on ? 'Live: what you play here is a public post on your homeserver' : 'Live is off: your session post ended'); } catch (e) { toast(e.message, 'error'); try { show(await api('GET', '/me/listening')); } catch { /* keep it */ } } finally { b.disabled = false; }
-    };
-  };
   const pubkyUser = async () => { if (isListener()) return null; if (state.pubkyUser === undefined) { try { const pk = await api('GET', '/pubky'); state.pubkyUser = pk.user || null; state.pubkyStatus = pk; } catch { state.pubkyUser = null; } } return state.pubkyUser; };
   // A session approved for fewer folders than the node uses: one plain line with the way out.
   // The node's own Pubky session lacks folders: the owner's next log in with Pubky Ring asks for
@@ -5062,6 +5047,7 @@
             + (kind === 'song' && pg.versions.length ? `<section class="section" id="iversions"><div class="section-head"><h3>Versions</h3><span class="muted small">other recordings: live, remastered, edits</span></div><div class="list compact">${pg.versions.map((v, k) => `<div class="list-row">${svcBadge(v.source === 'library' ? 'library' : v.source)}<div class="grow"><div class="name">${v.page ? `<a class="lnk" data-vpage="${k}">${esc(v.label.split(' · ')[0])}</a>` : esc(v.label.split(' · ')[0])}</div><div class="sub">${esc(v.label.split(' · ').slice(1).join(' · '))}</div></div><button class="icon-btn" data-vplay="${k}" title="Play this version" aria-label="Play this version">${icon('play')}</button></div>`).join('')}</div></section>` : '')
             + '<div id="isimilar-slot"></div>'
             + `<section class="section" id="itags"><div class="section-head"><h3>Tags</h3>${pg.on_pubky && pg.on_pubky.taggers ? `<button class="faces muted small" data-taggers="${pg.on_pubky.taggers}">${pg.on_pubky.taggers} ${pg.on_pubky.taggers === 1 ? 'person' : 'people'} tagged this on Pubky</button>` : ''}</div>${myTags ? scopedTagRow(myTags, linkTags, linkRef ? pg.source : null, kind, (pg.on_pubky && pg.on_pubky.tags) || []) : `${pg.on_pubky && pg.on_pubky.tags.length ? `<div class="chips">${pg.on_pubky.tags.map(([l, c]) => `<button class="chip" data-tag-open="${esc(l)}">#${esc(l)} <span class="muted">${c}</span></button>`).join('')}</div>` : ''}${empty(`Tagging works once this ${kind} is matched to MusicBrainz, the open music database, so other apps know what it is.`)}`}${myReview !== undefined ? reviewRow(myReview) : ''}</section>`
+            + '<div id="icollections-slot"></div>'
             + (commentUri ? `<section class="section" id="icomments" data-curi="${esc(commentUri)}"><div class="section-head"><h3>Comments</h3></div><div class="comments-body"><div class="skeleton" style="height:48px"></div></div></section>` : '')
             + (aboutTop ? '' : aboutHtml(pg));
           $('[data-back]', main).onclick = () => goBack(pg.section);
@@ -5109,6 +5095,19 @@
               $$('[data-simq]', main).forEach((b) => b.onclick = () => { search.value = b.dataset.simq; runSearch(); });
               if (pg.related.length) bindHome($('#irelated', main), { items: pg.related, tags: [] });
             })();
+            // In collections (TASK-in-collections-client): the public collections on Pubky holding this
+            // item, from Pinakes; the count, the first few (yours first, marked), each opening the
+            // collection. No row while Pinakes doesn't list them, or nothing holds it. Bookmarks stay
+            // private: the heart above is only your own, never a count of other people's
+            const cl = $('#icollections-slot'); if (cl) {
+              const ic = ex.collections;
+              if (!ic || !ic.count || !ic.items.length) cl.remove();
+              else {
+                const nameOf = (c) => c.name || `Collection by ${shortKey(c.author)}`;
+                cl.outerHTML = `<section class="section" id="icollections"><div class="section-head"><h3>In collections</h3><span class="muted small">${ic.count} public ${ic.count === 1 ? 'collection' : 'collections'} on Pubky</span></div><div class="list compact">${ic.items.map((c, k) => `<div class="list-row clickable" data-icoll="${k}" tabindex="0" role="link"><div class="avatar" style="background:hsl(${hue(nameOf(c))} 35% 28%)">${icon('playlist')}</div><div class="grow"><div class="name">${esc(nameOf(c))}${c.mine && isOwner() ? ' <span class="pill ok">Yours</span>' : ''}</div><div class="sub">${c.mine && isOwner() ? 'your collection' : 'by ' + esc(shortKey(c.author))}</div></div>${icon('chevron')}</div>`).join('')}</div>${ic.count > ic.items.length ? `<p class="muted small">and ${ic.count - ic.items.length} more</p>` : ''}</section>`;
+                $$('[data-icoll]', main).forEach((r) => r.onclick = () => { const c = ic.items[Number(r.dataset.icoll)]; setView('shared', { user: c.author, id: c.id }); });
+              }
+            }
             const cs = $('#iconcerts-slot'); if (cs) { cs.outerHTML = (pg.concerts && pg.concerts.length ? `<section class="section" id="iconcerts"><div class="section-head"><h3>Upcoming concerts</h3></div><div class="list">${pg.concerts.map((c, k) => `<div class="list-row clickable" data-iconcert="${k}"><div class="grow"><div class="name">${esc(itemName(c))}</div><div class="sub">${esc([c.description, c.site].filter(Boolean).join(' · '))}</div></div>${icon('external')}</div>`).join('')}</div></section>` : ''); }
             $$('[data-iconcert]', main).forEach((r) => r.onclick = () => { const c = pg.concerts[Number(r.dataset.iconcert)]; openWeb(c.page || c.uri); });
           }).catch(() => { /* extras are a bonus */ });
@@ -5555,7 +5554,9 @@
           // Built in, or the admin's own app (Advanced); the service's limits in plain words
           const appFrom = (a) => a.from === 'settings' ? 'Your own app' : a.from === 'builtin' ? 'Built in' : a.from === 'config' ? 'Your own app, set in node.toml' : a.from ? 'Set' : '';
           const appAdvanced = (a) => !a.set ? '' : `<details class="small app-adv"><summary>Advanced: use your own app</summary><form class="toolbar" data-appform="${esc(a.id)}">${(a.fields || []).map((f) => `<label class="sr-only" for="app-${esc(a.id)}-${esc(f.name)}">${esc(a.name)} ${esc(f.label)}</label><input id="app-${esc(a.id)}-${esc(f.name)}" name="${esc(f.name)}" class="input" type="${f.secret ? 'password' : 'text'}" autocomplete="off" spellcheck="false" placeholder="${esc(f.label)}${f.optional ? ' (if your app has one)' : ''}" ${f.optional ? '' : 'required'}>`).join('')}<button class="btn primary">Save</button></form>${(a.redirects || []).length ? `<p class="muted small">Your app lists ${a.redirects.length > 1 ? 'one of these redirect addresses (the second only with a secret)' : 'this redirect address'}:</p><ul class="app-redirects">${a.redirects.map((r) => `<li><code class="path">${esc(r)}</code></li>`).join('')}</ul>` : ''}${webUrl(a.get_one) ? `<p class="muted small"><a href="${esc(webUrl(a.get_one))}" target="_blank" rel="noopener">${icon('external')} Where to make one</a></p>` : ''}</details>`;
-          const appRow = (a) => `<div class="set-row"><div class="set-label"><div class="set-name">${esc(a.name)}</div>${help([appFrom(a), a.note ? esc(a.note) : ''].filter(Boolean).join(' · '))}${a.limits ? help(esc(a.limits)) : ''}${appAdvanced(a)}</div><div class="set-ctl">${a.configured ? `<span class="pill ok">${a.from === 'builtin' ? 'Built in' : 'Set'}</span>` : '<span class="pill">Not set up</span>'}${a.from === 'settings' && a.set && (a.fields || []).length ? ` <button class="btn ghost sm" data-appreset="${esc(a.id)}">${a.builtin ? 'Use built-in' : 'Remove'}</button>` : ''}</div></div>`;
+          // An app whose value lives on its own page (the AcoustID key with Identify): the way there, no form
+          const appGo = (a) => a.page === 'library:node' ? ` <button class="btn ghost sm" data-applib="node">Open Node library</button>` : '';
+          const appRow = (a) => `<div class="set-row"><div class="set-label"><div class="set-name">${esc(a.name)}</div>${help([appFrom(a), a.note ? esc(a.note) : ''].filter(Boolean).join(' · '))}${a.limits ? help(esc(a.limits)) : ''}${appAdvanced(a)}</div><div class="set-ctl">${a.configured ? `<span class="pill ok">${a.from === 'builtin' ? 'Built in' : 'Set'}</span>` : '<span class="pill">Not set up</span>'}${a.from === 'settings' && a.set && (a.fields || []).length ? ` <button class="btn ghost sm" data-appreset="${esc(a.id)}">${a.builtin ? 'Use built-in' : 'Remove'}</button>` : ''}${appGo(a)}</div></div>`;
           const appsTab = group('Set once, for everyone on this node', apps && apps.length ? apps.map(appRow).join('') : block('', 'No list from this node.', ''));
           // This homeserver: the bundled one
           const hsTab = bundled && bundled.configured ? group('The homeserver', row('Address', esc(bundled.icann_domain || ''), bundled.pubky_address ? `<code class="small">${esc(bundled.pubky_address)}</code>` : '')
@@ -5571,6 +5572,7 @@
           // Service apps: Save sends the fields to the app's own route; Use built-in sends its first field empty
           const appSend = async (a, body, msg) => { const [method, path] = a.set.split(' '); await api(method, path.replace(/^\/v1/, ''), body); toast(msg); render(); };
           $$('[data-appform]').forEach((f) => { f.onsubmit = async (e) => { e.preventDefault(); const a = (apps || []).find((x) => x.id === f.dataset.appform); if (!a) return; const body = {}; for (const fl of a.fields || []) { const v = (f.elements[fl.name] && f.elements[fl.name].value || '').trim(); if (v || !fl.optional) body[fl.name] = v; } const b = f.querySelector('button'); b.disabled = true; try { await appSend(a, body, `${a.name}: your own app is in use`); } catch (err) { b.disabled = false; toast(err.message, 'error'); } }; });
+          $$('[data-applib]', main).forEach((b) => b.onclick = () => setView('library', b.dataset.applib));
           $$('[data-appreset]').forEach((b) => { b.onclick = async () => { const a = (apps || []).find((x) => x.id === b.dataset.appreset); if (!a) return; b.disabled = true; try { await appSend(a, { [a.fields[0].name]: '' }, a.builtin ? `${a.name}: the built-in app is in use` : `${a.name}: your app is removed`); } catch (err) { b.disabled = false; toast(err.message, 'error'); } }; });
           const hd = $('#sethomedefault'); if (hd) hd.onclick = async () => { hd.disabled = true; try { await api('PUT', '/home/layout', { order: mine.order || [], hidden: mine.hidden || [] }); toast('Your Home is the default for everyone now'); render(); } catch (e) { hd.disabled = false; toast(e.message, 'error'); } };
           const hr = $('#sethomereset'); if (hr) hr.onclick = async () => { try { await api('PUT', '/me/prefs', { home_layout: null }); state.homeLayout = null; state.homeSaved = null; toast('Home follows the node’s default'); render(); } catch (e) { toast(e.message, 'error'); } };
@@ -5963,8 +5965,16 @@
       <p class="small">${c.identified} of ${c.total} identified${c.suggested ? ` · <a data-view="identify">${c.suggested} to confirm</a>` : ''}${c.unknown ? ` · ${c.unknown} not found` : ''}${c.unchecked ? ` · ${c.unchecked} not checked yet` : ''}</p>
       ${c.identified && c.by ? `<p class="small muted" id="idby">${[[c.by.tags, 'by their tags'], [c.by.album, 'by their folder as an album'], [c.by.fingerprint, 'by how they sound'], [c.by.you, 'by you']].filter(([n]) => n).map(([n, how]) => `${n} ${how}`).join(' · ')}</p>` : ''}
       ${p.running ? `<p class="small">Working: ${p.done} of ${p.total}…</p>` : (p.finished_at ? `<p class="small muted">Last run: ${p.identified} identified${idHow(p.identified_by)}, ${p.suggested} to confirm, ${p.unknown} not found${p.errors ? `, ${p.errors} errors` : ''}.</p>${p.stopped ? `<p class="small warn-text" role="status">It stopped after ${p.done} of ${p.total}: ${esc(p.stopped)}. Identify carries on from there.</p>` : ''}` : '')}
-      ${p.acoustid_refused ? `<p class="small warn-text" role="status">AcoustID refused the key (${esc(p.acoustid_refused)}), so songs were matched by title and artist only. Enter a new key${st.acoustid_own ? ' or remove this one' : ''}.</p>` : ''}
-      ${st.acoustid && !st.acoustid_own && !p.acoustid_refused ? '' : `<form class="set-group" id="acidform"><p class="small muted">${st.acoustid_own && !p.acoustid_refused ? 'Matching by how songs sound uses your AcoustID key.' : 'Songs are matched by their title and artist. Matching by how they sound (AcoustID) finds more. It needs a free key: sign in at <a href="https://acoustid.org/new-application" target="_blank" rel="noopener">acoustid.org/new-application</a>, register an application, and paste its key here.'}</p><div class="row" style="gap:8px"><input class="input" name="key" id="acidkey" placeholder="${st.acoustid_own ? 'A new key' : 'AcoustID application key'}" autocomplete="off" aria-label="AcoustID key"><button class="btn sm" id="acidsave">Save key</button>${st.acoustid_own ? '<button class="btn ghost sm" type="button" id="acidclear">Remove</button>' : ''}</div></form>`}
+      ${(() => {
+        // The AcoustID key lives here, with its state and a Check (owner, 2026-10-31): Settings
+        // keeps no copy. Matching by how songs sound needs it; without it, title and artist only
+        const ks = st.acoustid_state || (st.acoustid ? 'ok' : 'missing'); const where = '<a href="https://acoustid.org/new-application" target="_blank" rel="noopener">acoustid.org/new-application</a>';
+        const pill = ks === 'ok' ? '<span class="pill ok">OK</span>' : ks === 'refused' ? '<span class="pill bad">Key refused</span>' : '<span class="pill">Key missing</span>';
+        const words = ks === 'ok' ? `Matching by how songs sound uses ${st.acoustid_own ? 'your' : 'the node’s'} AcoustID key.`
+          : ks === 'refused' ? `AcoustID refused the key (${esc(st.acoustid_detail || p.acoustid_refused || '')}), so songs are matched by title and artist only. Get a free one at ${where} and paste it here.`
+          : `Songs are matched by their title and artist only. Matching by how they sound (AcoustID) finds more: get a free key at ${where} (register an application) and paste it here.`;
+        return `<div class="set-row" id="acidrow"><div class="set-label"><div class="set-name">AcoustID key ${pill}</div><p class="set-help">${words}</p><form class="toolbar" id="acidform"><input class="input" name="key" id="acidkey" placeholder="${st.acoustid_own || ks === 'refused' ? 'A new key' : 'AcoustID application key'}" autocomplete="off" spellcheck="false" aria-label="AcoustID key"><button class="btn sm" type="button" id="acidcheck">Check</button><button class="btn sm primary" id="acidsave">Save key</button>${st.acoustid_own ? '<button class="btn ghost sm" type="button" id="acidclear">Remove</button>' : ''}<span class="small" id="acidout" role="status"></span></form></div></div>`;
+      })()}
       <label class="row small" style="gap:8px; margin:8px 0"><input type="checkbox" id="idwrite" ${st.write_ids ? 'checked' : ''}> Write IDs into my files <span class="muted">(MusicBrainz recording and release IDs; each file's tags are backed up first; off by default)</span></label>
       <div class="actions"><button class="btn primary" id="idrun" ${p.running ? 'disabled' : ''}>${c.unchecked ? 'Identify' : 'Identify again'}</button>${c.suggested ? '<button class="btn" data-view="identify">Review matches</button>' : ''}${st.write_ids ? '<button class="btn" id="idwritenow" title="Write the IDs found so far into the files">Write now</button>' : ''}</div>`;
     $$('[data-view="identify"]', box).forEach((b) => b.onclick = () => setView('identify'));
@@ -5972,13 +5982,18 @@
       const saveKey = async (key) => { try { await api('PUT', '/library/identify/settings', { acoustid_key: key }); toast(key ? 'AcoustID key saved: the next Identify also listens to the songs' : 'AcoustID key removed'); renderIdentify(); } catch (e) { toast(e.message, 'error'); } };
       needsText($('#acidkey'), $('#acidsave'));
       acf.onsubmit = (e) => { e.preventDefault(); const k = $('#acidkey').value.trim(); if (k) saveKey(k); };
+      // Check: the key typed, else the one in use; nothing is saved
+      const chk = $('#acidcheck'); const out = $('#acidout');
+      chk.onclick = async () => { chk.disabled = true; out.textContent = 'Checking…'; out.classList.remove('warn-text'); const k = $('#acidkey').value.trim(); try { const r = await api('POST', '/library/identify/key/check', k ? { acoustid_key: k } : {}); out.textContent = r.detail; out.classList.toggle('warn-text', !r.ok); } catch (e) { out.textContent = e.message; out.classList.add('warn-text'); } chk.disabled = false; };
       const clr = $('#acidclear'); if (clr) clr.onclick = () => saveKey('');
     }
     const wr = $('#idwrite'); if (wr) wr.onchange = async () => { try { await api('PUT', '/library/identify/settings', { write_ids: wr.checked }); toast(wr.checked ? 'IDs will be written into your files' : 'Your files stay as they are'); renderIdentify(); } catch (e) { toast(e.message, 'error'); wr.checked = !wr.checked; } };
     const wn = $('#idwritenow'); if (wn) wn.onclick = async () => { wn.disabled = true; try { const r = await api('POST', '/library/identify/write'); toast(`${r.written} file${r.written === 1 ? '' : 's'} updated${r.skipped.length ? `, ${r.skipped.length} left as they were (${r.skipped[0].reason})` : ''}`); } catch (e) { toast(e.message, 'error'); } wn.disabled = false; };
     const run = $('#idrun'); if (run) run.onclick = async () => { try { await api('POST', '/library/identify', { retry: !c.unchecked }); renderIdentify(); } catch (e) { toast(e.message, 'error'); } };
     clearTimeout(idTimer);
-    if (p.running) idTimer = setTimeout(renderIdentify, 1500);
+    // While a run goes on the card is drawn again; not while a Check waits or a key is being typed
+    const idAgain = () => { const k = $('#acidkey'); const ch = $('#acidcheck'); if ((k && k.value) || (ch && ch.disabled)) { idTimer = setTimeout(idAgain, 1500); return; } renderIdentify(); };
+    if (p.running) idTimer = setTimeout(idAgain, 1500);
   };
   const watchScan = (info) => {
     const was = state.wasScanning; state.wasScanning = !!(info && info.scanning);
@@ -6014,7 +6029,6 @@
       document.body.classList.toggle('listener', isListener());
       drawMe().catch(() => {});
       if (isOwner()) {
-        wireLive();
         loadFavourites().catch(() => {});
         api('GET', '/sources').then((l) => { state.sources = l; applySourcesOff(); }).catch(() => {});
       } else { state.favUris = new Set(); state.sources = []; }
@@ -6079,7 +6093,6 @@
         if (yours) refreshAlong().finally(() => { ensureZone(); renderZoneName(); renderBar(); refreshQueue(); });
         else { ensureZone(); renderZoneName(); refreshAlong(); }
       }
-      else if (ev.type === 'listening_stopped') { if (state.liveShow) state.liveShow({ share: false }); toast(`Live is off: your homeserver refused the post (${ev.error})`, 'error'); }
       else if (ev.type === 'library_changed') { if (link.libRev != null) link.libRev++; onLibraryChanged(); }
       renderBar();
     };

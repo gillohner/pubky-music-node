@@ -413,6 +413,47 @@ pub fn wav_header_continuous(fmt: AudioFormat) -> Vec<u8> {
     wav_header_sized(fmt, 0, 0)
 }
 
+/// The most PCM a sized stream ([`wav_header_sized_stream`]) carries: 4 GB, under the WAV
+/// header's 32-bit sizes. A Linn Klimax DS plays and pauses streams up to this long (NUC,
+/// 2026-11-01: 0.6, 1.9, 2.2 and 4.0 GB).
+pub const SIZED_STREAM_BYTES: u64 = 4_000_000_000;
+
+/// Bytes per frame in the stream: little-endian samples at the format's byte width.
+fn bytes_per_frame(fmt: AudioFormat) -> u64 {
+    u64::from((fmt.bits as u32).div_ceil(8)) * u64::from(fmt.channels.max(1))
+}
+
+/// Whole frames of `fmt` a sized stream carries.
+pub fn sized_stream_frames(fmt: AudioFormat) -> u64 {
+    SIZED_STREAM_BYTES / bytes_per_frame(fmt)
+}
+
+/// The header of a stream offered as a WAV file of fixed size ([`sized_stream_frames`] frames),
+/// with its RIFF and data sizes, and that file's whole length (header included) for the answer's
+/// Content-Length. Linn's OpenHome pipeline takes a stream without a length for live radio and
+/// plays on through a Pause; with a length it pauses at once and holds the connection until Play
+/// (NUC, 2026-11-01). The stream ends earlier when the zone closes it.
+pub fn wav_header_sized_stream(fmt: AudioFormat) -> (Vec<u8>, u64) {
+    let data = sized_stream_frames(fmt) * bytes_per_frame(fmt);
+    let header = wav_header_sized(fmt, (36 + data) as u32, data as u32);
+    let len = header.len() as u64 + data;
+    (header, len)
+}
+
+/// Whether a track of `duration_ms` fits in a sink with `room` frames left (`None`: no limit).
+/// An unknown length (a radio stream) never fits a limited one. The margin covers durations that
+/// are a little off.
+pub fn fits_in(room: Option<u64>, fmt: AudioFormat, duration_ms: Option<u64>) -> bool {
+    let Some(room) = room else {
+        return true;
+    };
+    let Some(d) = duration_ms else {
+        return false;
+    };
+    let frames = d.saturating_mul(u64::from(fmt.rate_hz)) / 1000;
+    frames + frames / 50 + u64::from(fmt.rate_hz) * 10 <= room
+}
+
 fn wav_header_sized(fmt: AudioFormat, riff: u32, data: u32) -> Vec<u8> {
     let bytes_per_sample = (fmt.bits as u32).div_ceil(8);
     let block_align = bytes_per_sample as u16 * fmt.channels as u16;
@@ -616,6 +657,27 @@ impl AudioSink for PullSink {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A sized stream's header says exactly how long it is, in whole frames under 4 GB, so the
+    /// Content-Length and the RIFF sizes agree.
+    #[test]
+    fn a_sized_stream_header_matches_its_length() {
+        for (fmt, frames) in [
+            (AudioFormat::pcm(44_100, 16, 2), 1_000_000_000u64),
+            (AudioFormat::pcm(96_000, 24, 2), 666_666_666),
+            (AudioFormat::pcm(192_000, 24, 2), 666_666_666),
+        ] {
+            assert_eq!(sized_stream_frames(fmt), frames);
+            let (h, len) = wav_header_sized_stream(fmt);
+            let data = frames * bytes_per_frame(fmt);
+            assert_eq!(h.len(), 44);
+            assert_eq!(len, 44 + data);
+            assert!(data <= SIZED_STREAM_BYTES);
+            let riff = u32::from_le_bytes(h[4..8].try_into().unwrap()) as u64;
+            let size = u32::from_le_bytes(h[40..44].try_into().unwrap()) as u64;
+            assert_eq!((riff, size), (36 + data, data));
+        }
+    }
 
     #[test]
     fn header_and_packing() {

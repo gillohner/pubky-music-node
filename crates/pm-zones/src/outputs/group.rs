@@ -675,6 +675,11 @@ impl AudioSink for GroupSink {
         self.written
     }
 
+    /// The least room any member has left.
+    fn room_frames(&self) -> Option<u64> {
+        self.members.iter().filter_map(|m| m.sink.room_frames()).min()
+    }
+
     fn members(&self) -> Vec<MemberStatus> {
         let leader = self.members.first().map(|m| m.audible()).unwrap_or(0);
         self.members

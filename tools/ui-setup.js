@@ -458,10 +458,24 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
           await p.unroute(new RegExp(`/v1/item/song/lib-${curId}$`)); await p.unroute(/\/v1\/zones\/[^/]+\/load$/);
           await p.keyboard.press('Escape');
           // Similar: the library's own (playable rows), then what people tagged alike on Pubky
-          await p.route(new RegExp(`/v1/item/song/lib-${curId}/extras$`), (r) => r.fulfill({ json: { related: [{ uri: 'https://musicbrainz.org/release/b1a9c0e9-d987-4042-ae91-78d6a3267d69', title: 'Tagged Alike', kind: 'album', also_on: [] }], concerts: [], similar: [{ kind: 'song', title: other.title, subtitle: (other.artists[0] || {}).name || '', id: `lib-${other.id}`, track_id: other.id, duration_ms: other.duration_ms, keys: [] }] } }));
+          const COLL_A = 'zswn37ir9t8ge4r4posn4r7ow3eh384c8ud4kkxm585igt38x31o'; const COLL_B = 'o3ftkuxjd9k6zgnc4hhbhbg5jusubr4zqyb1dtzi8hhm3hf5wbmy';
+          const inColl = { count: 4, items: [{ uri: `pubky://${COLL_A}/pub/social/v1/posts/0035WKVKQDHSM`, author: COLL_A, id: '0035WKVKQDHSM', name: 'Night drives', mine: true }, { uri: `pubky://${COLL_B}/pub/social/v1/posts/00351MT54YS9G`, author: COLL_B, id: '00351MT54YS9G', mine: false }] };
+          await p.route(new RegExp(`/v1/item/song/lib-${curId}/extras$`), (r) => r.fulfill({ json: { collections: inColl, related: [{ uri: 'https://musicbrainz.org/release/b1a9c0e9-d987-4042-ae91-78d6a3267d69', title: 'Tagged Alike', kind: 'album', also_on: [] }], concerts: [], similar: [{ kind: 'song', title: other.title, subtitle: (other.artists[0] || {}).name || '', id: `lib-${other.id}`, track_id: other.id, duration_ms: other.duration_ms, keys: [] }] } }));
           await p.goto(BASE + `/song/lib-${curId}`); await p.waitForSelector('#isimilar', { timeout: 15000 }).catch(() => {});
           const sim = await p.evaluate(() => { const s = document.querySelector('#isimilar'); return s && { head: s.querySelector('h3').textContent, parts: [...s.querySelectorAll('.simhead')].map((h) => h.textContent), rows: s.querySelectorAll('#isimlib .srow, #isimlib .track').length, play: !!s.querySelector('#isimlib [data-splay]'), tiles: s.querySelectorAll('#irelated .tile').length }; });
           check(sim && sim.head === 'Similar' && sim.parts.join('|') === 'In your library|Tagged alike on Pubky' && sim.rows === 1 && sim.play && sim.tiles === 1, `one Similar section: your library's songs with Play, then Pubky's (${JSON.stringify(sim)})`);
+          // In collections (TASK-in-collections-client): the count, the first few with yours first and
+          // marked, a nameless one by its author; a row opens the shared collection
+          const ic = await p.evaluate(() => { const s = document.querySelector('#icollections'); return s && { head: s.querySelector('h3').textContent, note: s.querySelector('.section-head .muted').textContent, rows: [...s.querySelectorAll('[data-icoll] .name')].map((n) => n.textContent.trim()), more: (s.querySelector('p.muted') || {}).textContent }; });
+          check(ic && ic.head === 'In collections' && ic.note === '4 public collections on Pubky' && ic.rows.length === 2 && /^Night drives\s*Yours$/.test(ic.rows[0]) && /^Collection by /.test(ic.rows[1]) && /and 2 more/.test(ic.more || ''), `In collections: the count and the first few, yours first (${JSON.stringify(ic)})`);
+          await p.click('[data-icoll="0"]');
+          check(await (async () => { const end = Date.now() + 5000; for (;;) { if (new URL(p.url()).pathname === `/shared/${COLL_A}/0035WKVKQDHSM`) return true; if (Date.now() > end) return false; await p.waitForTimeout(100); } })(), 'a collection row opens the shared collection');
+          check(!(await p.evaluate(() => document.body.innerText)).match(/\d+ (people|person) bookmarked/), 'never a count of other people’s bookmarks');
+          await p.goto(BASE + `/song/lib-${curId}`); await p.waitForSelector('#isimilar', { timeout: 15000 }).catch(() => {});
+          await p.unroute(new RegExp(`/v1/item/song/lib-${curId}/extras$`));
+          await p.route(new RegExp(`/v1/item/song/lib-${curId}/extras$`), (r) => r.fulfill({ json: { related: [], concerts: [], similar: [] } }));
+          await p.goto(BASE + `/song/lib-${curId}`); await p.waitForSelector('#itags', { timeout: 15000 }).catch(() => {}); await p.waitForTimeout(800);
+          check(!(await p.$('#icollections')) && !(await p.$('#icollections-slot')), 'no In collections row while Pinakes doesn’t list them');
           await p.unroute(new RegExp(`/v1/item/song/lib-${curId}/extras$`));
         } else check(false, `Play from here needs a playing library song and another one (${curUri})`);
         await api('PUT', `/zones/${encodeURIComponent(nz.id)}/repeat`, { repeat: 'off' }).catch(() => {});
@@ -587,6 +601,60 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
     const backN = await (async () => { const end = Date.now() + 20000; for (;;) { const n = (await api('GET', '/library/tracks?limit=50')).tracks.length; if (n === before || Date.now() > end) return n; await p.waitForTimeout(300); } })();
     check(backN === before, `Bring back returns it (${backN} of ${before})`);
     await c.close();
+    // Node library › Identify: the AcoustID key lives here with its state and a Check (owner
+    // addendum to TASK-qobuz-tidal-setup-ux); Settings › Service apps only points here
+    c = await ctx(); p = await c.newPage();
+    let idState = { acoustid_state: 'refused', acoustid_detail: 'invalid API key', acoustid: true, acoustid_own: true };
+    await p.route(/\/v1\/library\/identify$/, async (r) => { const res = await r.fetch(); const j = await res.json(); return r.fulfill({ json: { ...j, ...idState } }); });
+    const keyChecks = [];
+    await p.route(/\/v1\/library\/identify\/key\/check$/, (r) => { const b = r.request().postDataJSON(); keyChecks.push(b); return r.fulfill({ json: b.acoustid_key === 'GoodKey' ? { ok: true, detail: 'OK: AcoustID accepts this key.' } : { ok: false, detail: 'AcoustID refused this key (invalid API key). Check it, or get a free one at acoustid.org/new-application.' } }); });
+    await p.goto(BASE + '/library/node'); await p.waitForSelector('#acidrow', { timeout: 20000 });
+    check(/Key refused/.test(await p.textContent('#acidrow .set-name')) && await p.locator('#acidrow a[href="https://acoustid.org/new-application"]').count() === 1, 'Identify says the key was refused, with where to get one');
+    await p.fill('#acidkey', 'BadKey1'); await p.click('#acidcheck');
+    check(await waitText(p, '#acidout', 'AcoustID refused this key (invalid API key). Check it, or get a free one at acoustid.org/new-application.') && keyChecks.length === 1 && keyChecks[0].acoustid_key === 'BadKey1' && await p.$eval('#acidout', (e) => e.classList.contains('warn-text')), 'Check names the problem, saving nothing');
+    await p.fill('#acidkey', 'GoodKey'); await p.click('#acidcheck');
+    check(await waitText(p, '#acidout', 'OK: AcoustID accepts this key.') && !(await p.$eval('#acidout', (e) => e.classList.contains('warn-text'))), 'Check says OK');
+    idState = { acoustid_state: 'missing', acoustid: false, acoustid_own: false };
+    await p.goto(BASE + '/library/node'); await p.waitForSelector('#acidrow', { timeout: 20000 });
+    check(/Key missing/.test(await p.textContent('#acidrow .set-name')) && await p.locator('#acidrow a[href="https://acoustid.org/new-application"]').count() === 1 && !(await p.$('#acidclear')), 'no key: Key missing, with where to get one');
+    idState = { acoustid_state: 'ok', acoustid: true, acoustid_own: true };
+    await p.goto(BASE + '/library/node'); await p.waitForSelector('#acidrow', { timeout: 20000 });
+    check(/OK/.test(await p.textContent('#acidrow .set-name .pill')) && await p.isVisible('#acidclear'), 'a working key: OK, with Remove');
+    await p.goto(BASE + '/settings/apps'); await p.waitForSelector('#set-apps .set-row', { timeout: 20000 });
+    const acRow = p.locator('#set-apps .set-row', { has: p.locator('.set-name', { hasText: /^AcoustID$/ }) });
+    check(await acRow.locator('form').count() === 0 && await acRow.locator('[data-applib]').count() === 1, 'Settings › Service apps keeps no AcoustID form, only the way to Node library');
+    await acRow.locator('[data-applib]').click();
+    check(await (async () => { const end = Date.now() + 5000; for (;;) { if (new URL(p.url()).pathname === '/library/node') return true; if (Date.now() > end) return false; await p.waitForTimeout(100); } })(), 'which opens Node library');
+    await c.close();
+    // Item pages: the back button and the breadcrumb line up (owner addendum to TASK-tablet-nav).
+    // Both show when a page is opened from another one in the app; a deep link hides the button on
+    // wide screens where it would repeat a crumb, so it is shown here for the measurement: the
+    // same layout as after an in-app step
+    {
+      const page = (kind, id, title, extra) => ({ kind, id, target: { track_id: 1 }, title, source: 'Your library', source_id: 'library', section: 'albums', songs: [], albums: [], versions: [], about: [], open_on: [], also_on: [], connect: [], ...extra });
+      const A = { id: 'lib-7', name: 'Artist A' }; const B = { id: 'lib-8', name: 'Album B' };
+      for (const [w, h] of [[1280, 900], [834, 1194], [390, 844]]) {
+        const cc = await browser.newContext({ viewport: { width: w, height: h } });
+        await cc.addInitScript((t) => { localStorage.setItem('pm.token', t); localStorage.setItem('pm.zone', 'browser'); }, TOKEN);
+        const pp = await cc.newPage();
+        await pp.route(/\/v1\/item\/song\/lib-1$/, (r) => r.fulfill({ json: page('song', 'lib-1', 'Aligned Song', { artist: A, album: B }) }));
+        await pp.route(/\/v1\/item\/artist\/lib-7$/, (r) => r.fulfill({ json: page('artist', 'lib-7', 'Artist A', {}) }));
+        await pp.route(/\/v1\/item\/[a-z]+\/[^/]+\/extras$/, (r) => r.fulfill({ json: { related: [], concerts: [], similar: [] } }));
+        await pp.goto(BASE + '/song/lib-1'); await pp.waitForSelector('.pagebar .back', { state: 'attached', timeout: 20000 });
+        const m = await pp.evaluate(() => {
+          const bar = document.querySelector('.pagebar'); const back = bar.querySelector('.back'); back.classList.remove('dupback');
+          const crumb = bar.querySelector('.crumbs li[aria-current]'); const mid = (e) => { const r = e.getBoundingClientRect(); return r.top + r.height / 2; };
+          const vis = !!crumb && getComputedStyle(crumb.closest('.crumbs')).display !== 'none';
+          return { trail: vis, diff: vis ? Math.round(Math.abs(mid(back) - mid(crumb)) * 10) / 10 : 0, backFont: getComputedStyle(back).fontSize, crumbFont: vis ? getComputedStyle(crumb).fontSize : null, backMb: getComputedStyle(back).marginBottom, barMb: getComputedStyle(bar).marginBottom };
+        });
+        check(m.trail === (w > 720) && m.diff <= 1.5 && (!m.trail || m.backFont === m.crumbFont) && m.backMb === '0px' && m.barMb === '14px', `${w}: back button and breadcrumb line up (${JSON.stringify(m)})`);
+        // An artist page has no trail: the bar keeps the same gap below
+        await pp.goto(BASE + '/artist/lib-7'); await pp.waitForSelector('.pagebar .back', { state: 'attached', timeout: 20000 });
+        const n = await pp.evaluate(() => { const bar = document.querySelector('.pagebar'); return { crumbs: !!bar.querySelector('.crumbs'), barMb: getComputedStyle(bar).marginBottom, backMb: getComputedStyle(bar.querySelector('.back')).marginBottom }; });
+        check(!n.crumbs && n.barMb === '14px' && n.backMb === '0px', `${w}: without a trail the bar keeps the same gap below (${JSON.stringify(n)})`);
+        await cc.close();
+      }
+    }
     // A listener: My music only, no edit controls
     c = await ctx(); p = await c.newPage();
     await p.route(/\/v1\/me$/, async (r) => { const res = await r.fetch(); const j = await res.json(); return r.fulfill({ json: { ...j, role: 'listener', zones: null } }); });

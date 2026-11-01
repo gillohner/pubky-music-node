@@ -979,7 +979,9 @@ fn spent(report: &SyncReport) -> bool {
     report.pushed + report.deleted >= WRITES_PER_PASS
 }
 
-fn raw_key(z32: &str) -> &str {
+/// The 52-character key out of the `pubky<z32>` form the session gives (`z32()`), as Nexus and
+/// Pinakes name people.
+pub(crate) fn raw_key(z32: &str) -> &str {
     z32.strip_prefix("pubky").filter(|k| k.len() == 52).unwrap_or(z32)
 }
 

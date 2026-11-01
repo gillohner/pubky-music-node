@@ -151,6 +151,13 @@ pub trait AudioSink: Send {
     /// Frames written so far, for position reporting.
     fn frames_written(&self) -> u64;
 
+    /// How many more frames the sink's stream can carry, when it has a fixed size (a renderer's
+    /// stream offered as a file of fixed length); `None` when there is no limit. The zone starts
+    /// a track that doesn't fit on a fresh sink instead of joining it to this one.
+    fn room_frames(&self) -> Option<u64> {
+        None
+    }
+
     /// Members of a grouped sink and their drift; empty for a single output.
     fn members(&self) -> Vec<MemberStatus> {
         Vec::new()

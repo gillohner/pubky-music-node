@@ -41,7 +41,7 @@ folders until then. Nothing else social is kept in app data.
 
 | Path | Objects | Spec |
 | :-- | :-- | :-- |
-| `/pub|priv/music/v1/posts/` | music `review`, `listen` (under the root the listen history setting picks), `listening` and `session` | pubky-music-specs |
+| `/pub|priv/music/v1/posts/` | music `review` and `listen` (under the root the listen history setting picks) | pubky-music-specs |
 | `/pub|priv/social/v1/posts/` | collections as `collection` posts with `ext.music` hints: always the private draft, and the published copy under `/pub/` while public | pubky-social-specs, pubky-music-specs `ext` |
 | `/priv/social/v1/bookmarks/` | bookmarks of music URLs and of public posts (someone's collection) | pubky-social-specs |
 | `/pub/social/v1/tags/` | tags on music URLs | pubky-social-specs |

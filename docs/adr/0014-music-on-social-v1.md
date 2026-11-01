@@ -23,7 +23,7 @@ Music uses the shared social objects and only adds what is musical.
 | Collections (a playlist is one of songs) | social `collection` post with its `layout`; items `{uri, note?, ext.music.source?, ext.music.added_at}` (songs, albums, artists, public posts); the collection's `ext.music.source_order` and, on a duplicate, `ext.music.original` | `/priv/social/v1/posts/`, also `/pub/` while public |
 | Ratings and reviews | music kind `review`: `{rating: 1–10, text?}`, `embed` = the music URL | `/{pub,priv}/music/v1/posts/` |
 | Listening history | music kind `listen`: `{played_at, duration_ms?, source?}`, `embed` = the music URL | `/{pub,priv}/music/v1/posts/` (amended 2026-10-26, below) |
-| Now playing, sessions | music kinds `listening` and `session`, `embed` = the music playing now | `/{pub,priv}/music/v1/posts/` |
+| Now playing | a plain social post (a v1 note) with `embed` = the song, as "Post about this" writes (amended 2026-10-31, below) | `/pub/social/v1/posts/` |
 
 - **`crates/pubky-music-specs`** owns the two music kinds (`MusicPostKind { Review, Listen }` on
   `PostEnvelope`, namespace `music`) and their content rules, plus readers and writers for the
@@ -126,6 +126,10 @@ then. ADR 0011 is amended.
   listening session"`, `"<display name> is listening"`), and a reader shows the same when it is
   absent. Vectors: `crates/pubky-music-specs/tests/vectors/live-v1.json`.
 - Both `embed` the music playing now, never a content `uri`.
+- *Amended 2026-10-31 (owner):* both kinds are dropped from the spec draft, and nothing writes
+  them. Sharing what you listen to is "Post about this": a plain social post with the song as its
+  `embed`, which Nexus indexes like any post. An old `listening` or `session` reads as an unknown
+  kind.
 
 **Service names** are hyphenated (`apple-music`, `youtube-music`; `SERVICE_NAMES` lists the shared
 spellings). A listen's `source` is where it played: an imported listen (ListenBrainz) has none.

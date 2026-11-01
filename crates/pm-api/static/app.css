@@ -251,9 +251,6 @@ input[type=range]:hover::-moz-range-thumb, input[type=range]:focus-visible::-moz
 .quality.q-lossy .qdot { background: var(--q-lossy); }
 .volume { display: flex; align-items: center; gap: 6px; width: 130px; color: var(--muted); }
 .volbtn { display: none; }
-/* The Live switch (share what I'm listening to) next to the device pill */
-.live-btn { border: 1px solid var(--line); background: var(--surface-2); color: var(--muted); border-radius: 999px; padding: 6px 12px; cursor: pointer; font-size: 12px; font-weight: 600; letter-spacing: 0.04em; }
-.live-btn.on { color: var(--accent-fg, #fff); background: var(--accent); border-color: var(--accent); }
 .zone-btn { display: inline-flex; align-items: center; gap: 8px; border: 1px solid var(--line); background: var(--surface-2); color: var(--fg); border-radius: 999px; padding: 6px 10px 6px 12px; cursor: pointer; max-width: 220px; }
 .zone-btn:hover { border-color: var(--line-strong); }
 .zone-btn span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -801,8 +798,12 @@ button.chip:hover { border-color: var(--line-strong); color: var(--fg); }
 .btn.choice { flex-direction: column; align-items: flex-start; gap: 2px; text-align: left; padding: 12px 14px; height: auto; white-space: normal; border-radius: 12px; }
 .choice-label { font-weight: 600; }
 .choice-note { font-size: 12px; font-weight: 400; opacity: 0.8; }
-/* Item pages: the back arrow and the breadcrumb on one line */
-.pagebar { display: flex; align-items: center; gap: 4px 16px; flex-wrap: wrap; }
+/* Item pages: the back button and the breadcrumb on one line, their text centred together; the
+   gap under them belongs to the bar, not the button, and the two share a size and line height so
+   their baselines meet (owner, 2026-10-31) */
+.pagebar { display: flex; align-items: center; gap: 4px 16px; flex-wrap: wrap; margin-bottom: 14px; }
+.pagebar .back { margin-bottom: 0; }
+.pagebar .back, .pagebar .crumbs ol { font-size: inherit; line-height: 20px; }
 .crumbs ol { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; list-style: none; margin: 0; padding: 0; font-size: 13px; color: var(--muted); }
 .crumbs li + li::before { content: '›'; margin-right: 4px; color: var(--muted); }
 .crumbs li[aria-current] { color: var(--fg-2); max-width: 32ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

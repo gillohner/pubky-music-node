@@ -24,12 +24,17 @@ pub struct UpnpOutput {
     stream_url: String,
     caps: OutputCaps,
     kind: StreamKind,
-    /// An OpenHome renderer (Linn): WAV with OpenHome's continuous-stream header (`live.wav`).
+    /// An OpenHome renderer (Linn): the stream as a WAV file of fixed size (`sized.wav`) when the
+    /// track fits in one, else with OpenHome's continuous-stream header (`live.wav`).
     openhome: bool,
     describe: Option<Describe>,
     meta: Mutex<Option<TrackMeta>>,
-    /// The renderer answers Pause on the node's live stream but keeps playing (a Linn does):
-    /// it is stopped for a pause instead, and started again on resume. Learned on the first try.
+    /// The length of the track about to play, when known: an OpenHome renderer gets a sized
+    /// stream only for a track that fits.
+    duration_ms: Mutex<Option<u64>>,
+    /// The renderer answers Pause on the node's live stream but keeps playing: it is stopped for
+    /// a pause instead, and started again on resume. Learned on the first try (an OpenHome
+    /// renderer's live stream starts out stopped for a pause, see [`UpnpOutput::open`]).
     stops_for_pause: Arc<std::sync::atomic::AtomicBool>,
 }
 
@@ -76,6 +81,7 @@ impl UpnpOutput {
             openhome,
             describe: None,
             meta: Mutex::new(None),
+            duration_ms: Mutex::new(None),
             stops_for_pause: Arc::default(),
         }
     }
@@ -106,10 +112,11 @@ impl UpnpOutput {
         &self.kind
     }
 
-    /// The URL for this renderer's stream kind (`…/stream.wav` → `…/stream.l16`, or
-    /// `…/live.wav` for an OpenHome renderer).
-    fn url(&self) -> String {
+    /// The URL for this renderer's stream kind (`…/stream.wav` → `…/stream.l16`; for an OpenHome
+    /// renderer `…/sized.wav`, or `…/live.wav` when the stream can't be `sized`).
+    fn url(&self, sized: bool) -> String {
         let file = match self.kind {
+            StreamKind::Wav { .. } if self.openhome && sized => "sized.wav",
             StreamKind::Wav { .. } if self.openhome => "live.wav",
             ref k => k.file(),
         };
@@ -201,6 +208,7 @@ impl Output for UpnpOutput {
             None => TrackMeta::from_item(it),
         });
         *self.meta.lock().expect("meta") = meta;
+        *self.duration_ms.lock().expect("duration") = item.and_then(|it| it.duration_ms);
     }
 
     async fn open(&self, fmt: AudioFormat) -> Result<Box<dyn AudioSink>, SinkError> {
@@ -208,9 +216,21 @@ impl Output for UpnpOutput {
             return Err(SinkError::UnsupportedFormat(self.id(), fmt));
         }
         let inner = self.pull.open(fmt).await?;
+        // An OpenHome renderer (a Linn) takes a stream without a length for live radio: it
+        // answers Pause and plays on. Offered as a WAV file of fixed size, it pauses at once and
+        // holds its buffer and the connection until Play (NUC, 2026-11-01): so it gets that
+        // whenever the track fits in one. The zone starts a track that doesn't fit the rest on a
+        // fresh stream (`room_frames`). A track of unknown length (radio) stays live.
+        let sized = self.openhome
+            && matches!(self.kind, StreamKind::Wav { .. })
+            && pm_zones::outputs::fits_in(
+                Some(pm_zones::outputs::sized_stream_frames(fmt)),
+                fmt,
+                *self.duration_ms.lock().expect("duration"),
+            );
         // The URL names this stream: the renderer's polls of an older one (a stopped Linn asks
         // for its last URI every 15 s) are answered, never given this stream
-        let url = with_generation(&self.url(), self.pull.generation());
+        let url = with_generation(&self.url(sized), self.pull.generation());
         let protocol_info = self.kind.protocol_info(fmt.rate_hz, fmt.channels);
         let meta = didl(
             &self.meta.lock().expect("meta").clone().unwrap_or_default(),
@@ -234,7 +254,16 @@ impl Output for UpnpOutput {
         let refill = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let emptied = refill.clone();
         let (paused_tx, pause_results) = std::sync::mpsc::channel::<Paused>();
-        let stops_for_pause = self.stops_for_pause.clone();
+        // A sized stream pauses on the renderer's own Pause (what it did is learned for this
+        // stream only); an OpenHome renderer's live stream plays on through it, so it is stopped
+        // at once instead of after a wait for a pause that never comes; others learn it once.
+        let stops_for_pause = if sized {
+            Arc::default()
+        } else if self.openhome {
+            Arc::new(std::sync::atomic::AtomicBool::new(true))
+        } else {
+            self.stops_for_pause.clone()
+        };
         std::thread::Builder::new()
             .name("upnp-play".into())
             .spawn(move || {
@@ -300,6 +329,7 @@ impl Output for UpnpOutput {
             pause_results,
             pauses_pending: 0,
             pause_outcome: None,
+            room: sized.then(|| pm_zones::outputs::sized_stream_frames(fmt)),
         }))
     }
 
@@ -536,6 +566,8 @@ struct UpnpSink {
     pauses_pending: usize,
     /// How the last pause went, once read (see [`UpnpSink::read_pause_outcomes`]).
     pause_outcome: Option<Paused>,
+    /// The frames a sized stream carries in all; `None` for a live one.
+    room: Option<u64>,
 }
 
 impl UpnpSink {
@@ -632,6 +664,9 @@ impl AudioSink for UpnpSink {
     }
     fn frames_written(&self) -> u64 {
         self.inner.frames_written()
+    }
+    fn room_frames(&self) -> Option<u64> {
+        self.room.map(|r| r.saturating_sub(self.inner.frames_written()))
     }
 }
 
@@ -860,7 +895,7 @@ mod tests {
         assert!(actions.iter().any(|a| a == "SetVolume"));
         assert!(actions.iter().any(|a| a == "GetVolume"));
 
-        // A Linn gets the continuous WAV; others keep stream.wav
+        // A Linn gets the sized WAV, or the continuous one; others keep stream.wav
         let linn = Renderer {
             udn: "uuid:4c494e4e-0026".into(),
             friendly_name: "Klimax DS".into(),
@@ -878,11 +913,15 @@ mod tests {
             "http://node.local:7788/v1/outputs/pull/linn/stream.wav?k=1".into(),
         );
         assert_eq!(
-            linn.url(),
+            linn.url(false),
             "http://node.local:7788/v1/outputs/pull/linn/live.wav?k=1"
         );
         assert_eq!(
-            out.url(),
+            linn.url(true),
+            "http://node.local:7788/v1/outputs/pull/linn/sized.wav?k=1"
+        );
+        assert_eq!(
+            out.url(true),
             "http://node.local:7788/v1/outputs/pull/fake/stream.wav"
         );
     }
@@ -1509,5 +1548,119 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+    fn linn_at(base: &str, udn: &str) -> Renderer {
+        Renderer {
+            udn: udn.into(),
+            friendly_name: "Klimax DS".into(),
+            manufacturer: Some("Linn Products Ltd.".into()),
+            model: None,
+            av_transport: format!("{base}/av"),
+            rendering_control: None,
+            connection_manager: None,
+            zone_group_topology: None,
+            location: format!("{base}/desc.xml"),
+        }
+    }
+
+    fn wait_actions(log: &Arc<Mutex<Vec<String>>>, n: usize) -> Vec<String> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while log.lock().unwrap().len() < n && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        log.lock().unwrap().clone()
+    }
+
+    /// A Linn pauses at once and holds the stream when it is offered as a WAV file of fixed size
+    /// (it plays on through Pause on a live one: NUC, 2026-11-01). A track of known length gets
+    /// that stream; the pause is the Linn's own Pause, held, and Play carries on from its buffer
+    /// with no Stop and no new URI. The sink says how much the stream can still take.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_linn_gets_a_sized_stream_for_a_track_of_known_length_and_pauses_on_it() {
+        let (base, log) = fake_renderer();
+        let pull = Arc::new(PullOutput::controlled("linn-sized"));
+        let out = UpnpOutput::new(
+            linn_at(&base, "uuid:4c494e4e-3"),
+            pull.clone(),
+            "http://node/v1/outputs/pull/linn-sized/stream.wav?k=1".into(),
+        );
+        let mut item = QueueItem::new("track:1");
+        item.duration_ms = Some(240_000);
+        out.now_playing(Some(&item));
+        let fmt = AudioFormat::pcm(96_000, 24, 2);
+        let sink = out.open(fmt).await.unwrap();
+        let mut live = pull.take_stream(std::time::Duration::from_secs(2)).await.unwrap();
+        let block = AudioBlock::pcm_i32(fmt, vec![1, -1, 2, -2]);
+        let (log2, room) = (log.clone(), pm_zones::outputs::sized_stream_frames(fmt));
+        let sink = tokio::task::spawn_blocking(move || {
+            let mut sink = sink;
+            sink.write(&block).unwrap();
+            assert_eq!(sink.room_frames(), Some(room - 2));
+            wait_actions(&log2, 3);
+            assert!(sink.pause().unwrap(), "the Linn holds its buffer");
+            assert!(sink.ready_to_resume().is_ok(), "held: it can carry on");
+            sink.resume().unwrap();
+            sink
+        })
+        .await
+        .unwrap();
+        assert!(live.next_chunk().await.is_some());
+        let actions = wait_actions(&log, 5);
+        assert_eq!(
+            actions[1],
+            format!(
+                "SetAVTransportURI http://node/v1/outputs/pull/linn-sized/sized.wav?k=1&g={}",
+                pull.generation()
+            )
+        );
+        let kinds: Vec<&str> = actions
+            .iter()
+            .map(|a| a.split(' ').next().unwrap_or(""))
+            .collect();
+        assert_eq!(kinds, ["Stop", "SetAVTransportURI", "Play", "Pause", "Play"]);
+        tokio::task::spawn_blocking(move || drop(sink)).await.unwrap();
+    }
+
+    /// A track of unknown length (radio) or one longer than a sized stream gets the Linn's live
+    /// stream, which it plays on through Pause: a pause stops it at once, with no Pause and no wait
+    /// to see whether it paused (the first pause after a start took ~7 s, NUC 2026-10-31).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_linn_on_a_live_stream_is_stopped_for_a_pause_without_trying_pause() {
+        let ignores = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let (base, log) =
+            fake_renderer_with(std::time::Duration::ZERO, Arc::default(), ignores, Arc::default());
+        let pull = Arc::new(PullOutput::controlled("linn-live"));
+        let out = UpnpOutput::new(
+            linn_at(&base, "uuid:4c494e4e-4"),
+            pull.clone(),
+            "http://node/v1/outputs/pull/linn-live/stream.wav".into(),
+        );
+        let fmt = AudioFormat::pcm(192_000, 24, 2);
+        let mut long = QueueItem::new("track:long");
+        long.duration_ms = Some(3 * 3_600_000);
+        for item in [QueueItem::new("radio:1"), long] {
+            let before = log.lock().unwrap().len();
+            out.now_playing(Some(&item));
+            let sink = out.open(fmt).await.unwrap();
+            let log2 = log.clone();
+            let (sink, err) = tokio::task::spawn_blocking(move || {
+                let mut sink = sink;
+                assert_eq!(sink.room_frames(), None, "live: no limit");
+                wait_actions(&log2, before + 3);
+                assert!(sink.pause().unwrap());
+                let err = sink.resume().unwrap_err();
+                (sink, err)
+            })
+            .await
+            .unwrap();
+            assert!(err.to_string().contains("starting it again"), "{err}");
+            let actions: Vec<String> = log.lock().unwrap()[before..]
+                .iter()
+                .map(|a| a.split(' ').next().unwrap_or("").to_string())
+                .collect();
+            assert_eq!(actions, ["Stop", "SetAVTransportURI", "Play", "Stop"]);
+            assert!(log.lock().unwrap()[before + 1].contains("/live.wav?g="));
+            tokio::task::spawn_blocking(move || drop(sink)).await.unwrap();
+        }
     }
 }

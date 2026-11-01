@@ -62,7 +62,6 @@ pub mod library_edit;
 pub mod library_match;
 pub mod librespot;
 pub mod listenbrainz;
-pub mod listening_share;
 pub mod listens;
 pub mod loudness;
 pub mod lrclib;
@@ -423,6 +422,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
             get(identify::get_status).post(identify::start),
         )
         .route("/library/identify/settings", put(identify::put_settings))
+        .route("/library/identify/key/check", post(identify::check_key))
         .route("/library/identify/write", post(identify::write_now))
         .route("/library/tag-fixes", get(tag_fixes::list).post(tag_fixes::apply))
         .route("/library/suggestions", get(identify::suggestions))
@@ -710,10 +710,6 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/me/first-steps", get(first_steps::get))
         .route("/me/token", axum::routing::delete(accounts::sign_out))
         .route("/auth/pubky/renewal", post(login_renewal))
-        .route(
-            "/me/listening",
-            get(listening_share::get).put(listening_share::put),
-        )
         .route("/me/listens", get(listens::list).delete(listens::delete_all))
         .route("/me/listens/stats", get(listens::get_stats))
         .route(
@@ -1239,6 +1235,11 @@ async fn pull_stream(
         "live.wav" => pm_out_upnp::dlna::StreamKind::Wav {
             mime: "audio/wav".into(),
         },
+        // OpenHome renderers when the track fits: the same WAV as a file of fixed size, with its
+        // Content-Length, so their own Pause holds (see `wav_header_sized_stream`).
+        "sized.wav" => pm_out_upnp::dlna::StreamKind::Wav {
+            mime: "audio/wav".into(),
+        },
         "stream.l16" => pm_out_upnp::dlna::StreamKind::L16,
         // Slimproto players: the PCM without a header (squeezelite would play the header).
         "stream.pcm" => pm_out_upnp::dlna::StreamKind::Wav {
@@ -1323,10 +1324,14 @@ async fn pull_stream(
     let mime = kind.mime(fmt.rate_hz, fmt.channels);
     // Each listener gets its own header: one that leaves and comes back (OpenHome renderers do,
     // after reading the start) decodes the stream from the top again.
-    let header = match file.as_str() {
-        "stream.wav" => Some(pm_zones::outputs::wav_header(fmt)),
-        "live.wav" => Some(pm_zones::outputs::wav_header_continuous(fmt)),
-        _ => None,
+    let (wav, length) = match file.as_str() {
+        "stream.wav" => (Some(pm_zones::outputs::wav_header(fmt)), None),
+        "live.wav" => (Some(pm_zones::outputs::wav_header_continuous(fmt)), None),
+        "sized.wav" => {
+            let (h, len) = pm_zones::outputs::wav_header_sized_stream(fmt);
+            (Some(h), Some(len))
+        }
+        _ => (None, None),
     };
     let to_l16 = kind == pm_out_upnp::dlna::StreamKind::L16;
     // The live stream moves into the body; when the listener goes, it is given back
@@ -1334,10 +1339,25 @@ async fn pull_stream(
         live.next_chunk().await.map(|c| (c, live))
     });
     let mut l16 = L16::default();
-    let body = futures_util::stream::iter(header)
+    // A sized stream never goes past its length (the zone starts a fresh one before; this only
+    // keeps the answer true to its Content-Length)
+    let body = futures_util::stream::iter(wav)
         .chain(chunks.map(move |c| if to_l16 { l16.convert(&c) } else { c }))
+        .scan(length.unwrap_or(u64::MAX), |left, mut c| {
+            if *left == 0 {
+                return futures_util::future::ready(None);
+            }
+            c.truncate(c.len().min(usize::try_from(*left).unwrap_or(usize::MAX)));
+            *left -= c.len() as u64;
+            futures_util::future::ready(Some(c))
+        })
         .map(Ok::<_, std::convert::Infallible>);
-    Ok(with_headers(mime, axum::body::Body::from_stream(body)))
+    let mut r = with_headers(mime, axum::body::Body::from_stream(body));
+    if let Some(len) = length {
+        r.headers_mut()
+            .insert(header::CONTENT_LENGTH, axum::http::HeaderValue::from(len));
+    }
+    Ok(r)
 }
 
 /// Little-endian 16-bit PCM to DLNA LPCM (big-endian), across chunk boundaries.
@@ -12216,7 +12236,7 @@ exec sleep 300
         };
         let app = router(s.clone());
         let signin = "/v1/sources/tidal/signin";
-        // A test build has no built-in device client: the way is listed, not available
+        // No build carries a device client: the device way is open, and its page asks for one
         let (st, si) = call(&app, "GET", signin, None).await;
         assert_eq!(st, StatusCode::OK, "{si}");
         let ids: Vec<&str> = si["ways"]
@@ -14176,6 +14196,111 @@ exec sleep 300
         assert_eq!(z["repeat"], "off");
     }
 
+    /// "In collections" (TASK-in-collections-client): the public collections Pinakes says hold
+    /// the page's link, as a count and the first few, each pointing at its shared-collection
+    /// page; absent while Pinakes doesn't list them. Nothing about bookmarks.
+    #[tokio::test]
+    async fn item_pages_name_the_public_collections_holding_them() {
+        let fixture = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../pm-pubky/tests/fixtures/pinakes/music/detail-tidal-track-bohemian.json"
+        ))
+        .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let ships = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        const A: &str = "gujx6qd8ksydh1makdphd3bxu351d9b8waqka8hfg6q7hnqkxexo";
+        const B: &str = "o3ftkuxjd9k6zgnc4hhbhbg5jusubr4zqyb1dtzi8hhm3hf5wbmy";
+        let mock = Router::new()
+            .route(
+                "/v1/info",
+                get({
+                    let ships = ships.clone();
+                    move || {
+                        let ships = ships.clone();
+                        async move {
+                            let limits = if ships.load(std::sync::atomic::Ordering::SeqCst) {
+                                serde_json::json!({"search": 50, "collections": 20})
+                            } else {
+                                serde_json::json!({"search": 50})
+                            };
+                            Json(serde_json::json!({"version": "test", "limits": limits}))
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/v1/resources/by-uri",
+                get(move || {
+                    let fixture = fixture.clone();
+                    async move { ([(header::CONTENT_TYPE, "application/json")], fixture) }
+                }),
+            )
+            .route(
+                "/v1/resources/{id}/collections",
+                get(|Path(id): Path<String>, axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>| async move {
+                    assert!(!id.is_empty());
+                    assert_eq!(q.get("limit").map(String::as_str), Some("3"), "{q:?}");
+                    Json(serde_json::json!({"items": [
+                        {"uri": format!("pubky://{A}/pub/social/v1/posts/0035WKVKQDHSM"), "author": A, "indexed_at": 1700000000000i64},
+                        {"uri": format!("pubky://{B}/pub/social/v1/posts/00351MT54YS9G"), "author": B, "indexed_at": 1690000000000i64},
+                        {"uri": "not a post", "author": ""},
+                    ], "total": 5}))
+                }),
+            );
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let pubky = pm_pubky::config::PmPubkyConfig {
+            pinakes_base: format!("http://127.0.0.1:{port}"),
+            nexus_base: format!("http://127.0.0.1:{port}/nexus"),
+            user_agent_contact: "test@example.org".into(),
+            ..Default::default()
+        };
+        let s = state_with(dir.path(), None, pubky).await;
+        s.set_contact("test@example.org").unwrap();
+        let app = router(s.clone());
+        let id = discover::page_id("https://tidal.com/track/534050211");
+        // Pinakes without the route: no row at all (the page never says "0 collections")
+        let (st, v) = call(&app, "GET", &format!("/v1/item/song/{id}/extras"), None).await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        assert!(v.get("collections").is_none(), "{v}");
+        // The feature probe is cached: a fresh node sees the route
+        ships.store(true, std::sync::atomic::Ordering::SeqCst);
+        let dir2 = tempfile::tempdir().unwrap();
+        let pubky2 = pm_pubky::config::PmPubkyConfig {
+            pinakes_base: format!("http://127.0.0.1:{port}/"),
+            nexus_base: format!("http://127.0.0.1:{port}/nexus"),
+            user_agent_contact: "test@example.org".into(),
+            ..Default::default()
+        };
+        let s2 = state_with(dir2.path(), None, pubky2).await;
+        s2.set_contact("test@example.org").unwrap();
+        let app2 = router(s2.clone());
+        let (st, v) = call(&app2, "GET", &format!("/v1/item/song/{id}/extras"), None).await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        let c = &v["collections"];
+        assert_eq!(c["count"], 4, "five in all, one line that isn't a post: {v}");
+        let items = c["items"].as_array().unwrap();
+        assert_eq!(items.len(), 2, "a line that is not a post is left out: {v}");
+        assert_eq!(items[0]["author"], A);
+        assert_eq!(items[0]["id"], "0035WKVKQDHSM");
+        assert_eq!(items[0]["mine"], false, "no identity here");
+        assert!(
+            items[0].get("name").is_none(),
+            "no homeserver to read the name from: {v}"
+        );
+        assert!(
+            !v.to_string().contains("bookmark"),
+            "nothing about bookmarks: {v}"
+        );
+        let (st, pg) = call(&app2, "GET", &format!("/v1/item/song/{id}"), None).await;
+        assert_eq!(st, StatusCode::OK, "{pg}");
+        assert!(
+            !pg.to_string().contains("bookmark"),
+            "the page itself carries no bookmark count either: {pg}"
+        );
+    }
+
     #[tokio::test]
     async fn item_pages_list_similar_music_from_the_library() {
         let dir = tempfile::tempdir().unwrap();
@@ -14520,7 +14645,11 @@ exec sleep 300
                 post(move |body: String| {
                     lookups.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     async move {
-                        if body.contains("client=GoodKey") {
+                        if body.contains("client=GoodKey") && body.contains("fingerprint=AQAAAA") {
+                            // As the real service: the key is taken, the dummy fingerprint isn't
+                            Json(serde_json::json!({"status": "error",
+                                "error": {"code": 3, "message": "invalid fingerprint"}}))
+                        } else if body.contains("client=GoodKey") {
                             Json(serde_json::json!({"status": "ok", "results": []}))
                         } else {
                             Json(serde_json::json!({"status": "error",
@@ -14542,6 +14671,52 @@ exec sleep 300
         };
         let app = router(s.clone());
         let key = |k: &str| Some(serde_json::json!({ "acoustid_key": k }));
+        // Check (the Identify card's button): nothing saved, each case in its own words
+        let (st, r) = call(
+            &app,
+            "POST",
+            "/v1/library/identify/key/check",
+            Some(serde_json::json!({})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        assert!(
+            r["ok"] == false && r["detail"].as_str().unwrap().starts_with("Key missing"),
+            "{r}"
+        );
+        let (_, r) = call(&app, "POST", "/v1/library/identify/key/check", key("BadKey1")).await;
+        assert!(
+            r["ok"] == false
+                && r["detail"]
+                    .as_str()
+                    .unwrap()
+                    .contains("refused this key (invalid API key)"),
+            "{r}"
+        );
+        let (_, r) = call(&app, "POST", "/v1/library/identify/key/check", key("GoodKey")).await;
+        assert!(
+            r["ok"] == true && r["detail"].as_str().unwrap().starts_with("OK"),
+            "{r}"
+        );
+        let (_, st0) = call(&app, "GET", "/v1/library/identify", None).await;
+        assert_eq!(
+            (st0["acoustid"].as_bool(), st0["acoustid_state"].as_str()),
+            (Some(false), Some("missing")),
+            "a check saves nothing: {st0}"
+        );
+        // Settings keeps no copy: the Service apps list points at the Identify card
+        let (_, apps) = call(&app, "GET", "/v1/node/apps", None).await;
+        let ac = apps
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["id"] == "acoustid")
+            .unwrap();
+        assert!(
+            ac.get("set").is_none() && ac["fields"].as_array().is_none_or(|f| f.is_empty()),
+            "{ac}"
+        );
+        assert_eq!(ac["page"], "library:node", "{ac}");
         let (st, b) = call(&app, "PUT", "/v1/library/identify/settings", key("BadKey1")).await;
         assert_eq!(st, StatusCode::BAD_REQUEST, "{b}");
         assert!(
@@ -14560,8 +14735,8 @@ exec sleep 300
         );
         assert_eq!(
             lookups.load(std::sync::atomic::Ordering::SeqCst),
-            2,
-            "one check per key"
+            4,
+            "one lookup per Check and per key saved"
         );
 
         // A key that stopped working (or a configured one AcoustID refuses), three songs
@@ -14662,36 +14837,6 @@ exec sleep 300
             .tracks_to_identify(false)
             .unwrap()
             .is_empty());
-    }
-
-    /// Review of #192: an end of the Live post that fails (the homeserver doesn't answer, a
-    /// sign-in being restored) keeps the session, so it is tried again, and a retry is waiting:
-    /// a stopped zone has no next change to try it.
-    #[tokio::test]
-    async fn a_failed_end_of_the_live_post_is_tried_again() {
-        let dir = tempfile::tempdir().unwrap();
-        let s = state(dir.path(), None).await;
-        let now = pm_pubky::ids::now_micros();
-        let post = serde_json::json!({"id": "0034A0Z4013G0", "edit": "0034A0Z4013G0", "zone": "gone",
-            "song": "https://musicbrainz.org/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69",
-            "session_at": now, "started_at": now, "expires_at": now + 600_000_000});
-        {
-            let lib = s.library.lock().unwrap();
-            lib.set_setting("listening.share", r#"{"share":true}"#).unwrap();
-            lib.set_setting("listening.post", &post.to_string()).unwrap();
-        }
-        crate::listening_share::zone_event(&s, "gone", &pm_zones::ZoneEvent::Stopped);
-        for _ in 0..200 {
-            if s.listening_retry.lock().unwrap().is_some() {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        assert_eq!(s.listening_retry.lock().unwrap().as_deref(), Some("gone"));
-        let kept = s.library.lock().unwrap().get_setting("listening.post").unwrap();
-        assert!(kept.is_some(), "the session stays until its end is written");
-        let (_, share) = call(&router(s.clone()), "GET", "/v1/me/listening", None).await;
-        assert_eq!(share["share"], true, "not refused: sharing stays on");
     }
 
     /// Identify library as a ladder (owner, 2026-10-30: too slow on the NUC): a folder that is an
@@ -15096,5 +15241,24 @@ exec sleep 300
             Some(pm_model::Mbid::parse(mbid).unwrap()),
             "the stored identity reached the file"
         );
+    }
+
+    /// "Share what I'm listening to" is removed (owner, 2026-10-31: Post about this covers it):
+    /// its API is gone, and a setting saved before is ignored.
+    #[tokio::test]
+    async fn sharing_what_you_listen_to_is_gone() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting("listening.share", r#"{"share":true}"#)
+            .unwrap();
+        let app = router(s.clone());
+        let (st, _) = call(&app, "GET", "/v1/me/listening", None).await;
+        assert_eq!(st, StatusCode::NOT_FOUND);
+        let on = serde_json::json!({"share": true});
+        let (st, _) = call(&app, "PUT", "/v1/me/listening", Some(on)).await;
+        assert_eq!(st, StatusCode::NOT_FOUND);
     }
 }
