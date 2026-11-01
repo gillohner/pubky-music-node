@@ -105,8 +105,12 @@ pub(crate) async fn get(
     Extension(c): Extension<Caller>,
 ) -> ApiResult<FirstSteps> {
     let st = s.clone();
-    let out = tokio::task::spawn_blocking(move || first_steps(&st, c.role))
-        .await
-        .map_err(|e| ApiError::new(axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))??;
+    // Off the request's task: the person asking goes along (their sign-ins count as music)
+    let who = crate::accounts::asking();
+    let out = tokio::task::spawn_blocking(move || {
+        crate::accounts::ASKING.sync_scope(who, || first_steps(&st, c.role))
+    })
+    .await
+    .map_err(|e| ApiError::new(axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))??;
     Ok(Json(out))
 }

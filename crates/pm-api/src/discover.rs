@@ -1134,6 +1134,11 @@ pub(crate) struct External {
     pub pending: bool,
 }
 
+/// Where a listener's (or nobody's) item-page contents are kept: `item.contents.<tag>.<uri>`.
+pub(crate) fn contents_prefix_of(tag: &str) -> String {
+    format!("item.contents.{tag}.")
+}
+
 pub(crate) async fn load_external(s: &Arc<NodeState>, uri: &str) -> External {
     let uri = uri.trim().to_string();
     // Each person's apart: what plays in full (their own sign-ins) differs
@@ -1141,7 +1146,7 @@ pub(crate) async fn load_external(s: &Arc<NodeState>, uri: &str) -> External {
     let cache_key = if who.is_owner() {
         format!("item.contents.{uri}")
     } else {
-        format!("item.contents.{}.{uri}", who.tag())
+        format!("{}{uri}", contents_prefix_of(who.tag()))
     };
     let cached: Option<ItemContents> = {
         let lib = s.library.lock().expect("library poisoned");

@@ -16745,4 +16745,311 @@ exec sleep 300
             .unwrap_or_default();
         assert!(flight.contains(&remote), "{flight}");
     }
+
+    /// A TIDAL device sign-in whose approval arrives after its person signed out, or after a
+    /// listener was removed, is not kept: no sign-in comes back for them (per-person follow-up,
+    /// Kimi M1).
+    #[tokio::test]
+    async fn a_sign_in_answered_after_sign_out_or_removal_is_not_kept() {
+        let asked = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let go = Arc::new(tokio::sync::Notify::new());
+        let mock = Router::new()
+            .route(
+                "/v1/oauth2/device_authorization",
+                post(|| async {
+                    Json(serde_json::json!({"deviceCode": "DC", "userCode": "ABCDE", "verificationUriComplete": "link.tidal.com/ABCDE", "expiresIn": 300, "interval": 1}))
+                }),
+            )
+            .route(
+                "/v1/oauth2/token",
+                post({
+                    let (asked, go) = (asked.clone(), go.clone());
+                    move || {
+                        let (asked, go) = (asked.clone(), go.clone());
+                        async move {
+                            // Approved only once the test has signed out or removed the person
+                            asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            go.notified().await;
+                            Json(serde_json::json!({"access_token": "AT", "refresh_token": "RT", "expires_in": 3600}))
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/v1/sessions",
+                get(|| async { Json(serde_json::json!({"userId": 42, "countryCode": "CH", "sessionId": "sid"})) }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let (s, anna, _) = two_people_node(dir.path(), &base).await;
+        s.tidal.write().unwrap().v1_base = format!("{base}/v1");
+        let app = router(s.clone());
+        let owner = Some("s3cret");
+        let (st, r, _) = send_as(
+            &app,
+            "PUT",
+            "/v1/sources/tidal/unofficial",
+            owner,
+            &[],
+            Some(serde_json::json!({"client_id": "dev-id", "client_secret": "dev-secret"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        // Until TIDAL has been asked `n` times in all (it then waits for `go`)
+        let asked_times = |n: u32| {
+            let asked = asked.clone();
+            async move {
+                for _ in 0..200 {
+                    if asked.load(std::sync::atomic::Ordering::SeqCst) >= n {
+                        return;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                }
+                panic!("TIDAL was never asked");
+            }
+        };
+        let login = "/v1/sources/tidal/unofficial/login";
+
+        // The owner signs out while TIDAL is asked
+        let (st, r, _) = send_as(&app, "POST", login, owner, &[], None).await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        asked_times(1).await;
+        let (st, _, _) = send_as(&app, "DELETE", login, owner, &[], None).await;
+        assert_eq!(st, StatusCode::OK);
+        go.notify_one();
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let (_, r, _) = send_as(&app, "GET", "/v1/sources/tidal/unofficial", owner, &[], None).await;
+        assert_eq!(r["signed_in"], false, "{r}");
+
+        // A listener removed while TIDAL is asked
+        let anna_tok = accounts::mint(&s, anna).unwrap();
+        let (st, r, _) = send_as(&app, "POST", login, Some(&anna_tok), &[], None).await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        asked_times(2).await;
+        let (st, r, _) = send_as(&app, "DELETE", &format!("/v1/people/{anna}"), owner, &[], None).await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        go.notify_one();
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let rows = s
+            .library
+            .lock()
+            .unwrap()
+            .settings_with_prefix(&format!("person.{anna}."))
+            .unwrap();
+        assert!(rows.is_empty(), "{rows:?}");
+        // Any other write for them lands nowhere either (a token refresh, an OAuth answer)
+        let lib = s.library.lock().unwrap();
+        let them = accounts::Who::Listener(anna.to_string());
+        assert!(them.put(&lib, "tidal.user", Some("{}")).is_err());
+        assert!(them.get(&lib, "tidal.user").is_none());
+        assert!(
+            them.put(&lib, "tidal.user", None).is_ok(),
+            "removing stays allowed"
+        );
+    }
+
+    /// Restoring a sealed backup restores each listener's sign-in from it, and keeps one made
+    /// here that the backup doesn't have, as for the owner's (per-person follow-up, Kimi M2).
+    #[tokio::test]
+    async fn a_sealed_restore_keeps_listeners_sign_ins_it_does_not_have() {
+        let dir = tempfile::tempdir().unwrap();
+        let (s, anna, ben) = two_people_node(dir.path(), "http://127.0.0.1:9").await;
+        let (locked, _) = backup::make(&s, Some("correct horse")).unwrap();
+        {
+            let lib = s.library.lock().unwrap();
+            lib.set_setting(&format!("person.{anna}.tidal.user"), "anna-later")
+                .unwrap();
+            lib.set_setting(&format!("person.{ben}.tidal.user"), "ben-here")
+                .unwrap();
+        }
+        backup::restore(&s, locked, Some("correct horse".into()), false)
+            .await
+            .unwrap();
+        let lib = s.library.lock().unwrap();
+        let row = |k: &str| lib.get_setting(&format!("person.{k}.tidal.user")).unwrap();
+        assert!(row(anna).unwrap().contains("anna-token"), "from the backup");
+        assert_eq!(
+            row(ben).as_deref(),
+            Some("ben-here"),
+            "made here, not in the backup"
+        );
+    }
+
+    /// Removing a listener also drops what was fetched with their sign-ins: TIDAL tracks kept for
+    /// their browser, their search answers and item pages; the owner's stay (per-person
+    /// follow-up, Kimi M3).
+    #[tokio::test]
+    async fn removing_a_listener_drops_what_was_fetched_for_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let (s, anna, _) = two_people_node(dir.path(), "http://127.0.0.1:9").await;
+        let app = router(s.clone());
+        let at = std::time::Instant::now();
+        tidal::stream_cache().lock().unwrap().push((
+            format!("{anna}/9990001"),
+            at,
+            Arc::new(vec![1]),
+            "audio/mp4".into(),
+        ));
+        {
+            let mut a = s.search_answers.lock().unwrap();
+            a.insert(
+                ("lucky".into(), format!("tidal|{anna}")),
+                (at, Default::default()),
+            );
+            a.insert(("lucky".into(), "tidal".into()), (at, Default::default()));
+            let lib = s.library.lock().unwrap();
+            lib.set_setting(&format!("item.contents.{anna}.tidal:album:1"), "[1,{}]")
+                .unwrap();
+            lib.set_setting("item.contents.tidal:album:1", "[1,{}]").unwrap();
+        }
+        let (st, r, _) = send_as(
+            &app,
+            "DELETE",
+            &format!("/v1/people/{anna}"),
+            Some("s3cret"),
+            &[],
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        assert!(!tidal::stream_cache()
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(k, _, _, _)| *k == format!("{anna}/9990001")));
+        let keys: Vec<String> = s
+            .search_answers
+            .lock()
+            .unwrap()
+            .keys()
+            .map(|k| k.1.clone())
+            .collect();
+        assert_eq!(keys, ["tidal"], "{keys:?}");
+        let lib = s.library.lock().unwrap();
+        assert!(lib
+            .settings_with_prefix(&format!("item.contents.{anna}."))
+            .unwrap()
+            .is_empty());
+        assert!(lib.get_setting("item.contents.tidal:album:1").unwrap().is_some());
+    }
+
+    /// First steps runs off the request's task and still counts the owner's own TIDAL sign-in
+    /// as music to play (per-person follow-up, Claude low 1).
+    #[tokio::test]
+    async fn first_steps_count_the_owners_streaming_sign_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let (s, _, _) = two_people_node(dir.path(), "http://127.0.0.1:9").await;
+        let app = router(s.clone());
+        let (st, v, _) = send_as(&app, "GET", "/v1/me/first-steps", Some("s3cret"), &[], None).await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        let ids: Vec<&str> = v["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x["id"].as_str().unwrap())
+            .collect();
+        assert!(!ids.contains(&"music"), "{v}");
+    }
+
+    /// Health is the node's, as the owner's sign-ins see it: a listener asking first doesn't
+    /// leave their view for the owner (per-person follow-up, Claude low 2).
+    #[tokio::test]
+    async fn health_is_the_owners_view_whoever_asks_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let (s, _, ben) = two_people_node(dir.path(), "http://127.0.0.1:9").await;
+        let app = router(s.clone());
+        let ben_tok = accounts::mint(&s, ben).unwrap();
+        let (st, first, _) = send_as(&app, "GET", "/v1/health", Some(&ben_tok), &[], None).await;
+        assert_eq!(st, StatusCode::OK, "{first}");
+        let (_, v, _) = send_as(&app, "GET", "/v1/health", Some("s3cret"), &[], None).await;
+        assert!(
+            v.as_array().unwrap().iter().any(|p| p["id"] == "tidal"),
+            "the owner's TIDAL is checked: {v}"
+        );
+    }
+
+    /// Home sections are cached per person: what plays in full on a card depends on their own
+    /// sign-ins (per-person follow-up, Claude low 4).
+    #[tokio::test]
+    async fn home_sections_are_cached_per_person() {
+        let q = home::HomeQuery::default();
+        let key =
+            |who: accounts::Who| accounts::ASKING.sync_scope(who, || home::section_key("trending-songs", &q));
+        let anna = "tbepfp8fisyiqpskbmxsmpub47gxb7xdsh5x9ut9qrb97gcq9phy";
+        assert_ne!(
+            key(accounts::Who::Owner),
+            key(accounts::Who::Listener(anna.into()))
+        );
+        assert_ne!(
+            key(accounts::Who::Nobody),
+            key(accounts::Who::Listener(anna.into()))
+        );
+    }
+
+    /// A listener's item page fetches the service's list in a task of its own: still with their
+    /// own TIDAL sign-in, never the owner's (#226 review, the missing test).
+    #[tokio::test]
+    async fn a_listeners_item_page_uses_their_own_sign_in() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let seen2 = seen.clone();
+        let mock = Router::new()
+            .route(
+                "/v1/oauth2/token",
+                post(|| async {
+                    Json(serde_json::json!({"access_token": "app-token", "refresh_token": "r", "expires_in": 3600}))
+                }),
+            )
+            .fallback(move |headers: HeaderMap| {
+                let seen = seen2.clone();
+                async move {
+                    if let Some(b) = headers.get("authorization") {
+                        seen.lock().unwrap().push(b.to_str().unwrap().to_string());
+                    }
+                    Json(serde_json::json!({"data": [], "included": []}))
+                }
+            });
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let (s, anna, _) = two_people_node(dir.path(), &base).await;
+        let app = router(s.clone());
+        let anna_tok = accounts::mint(&s, anna).unwrap();
+        let (st, v, _) = send_as(
+            &app,
+            "GET",
+            "/v1/discover/contents?uri=https://tidal.com/album/4242",
+            Some(&anna_tok),
+            &[],
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        let asked: Vec<String> = seen.lock().unwrap().clone();
+        // The page and the list fetched for it alike: never the owner's, nor the app's
+        assert!(!asked.is_empty());
+        assert!(asked.iter().all(|b| b == "Bearer anna-token"), "{asked:?}");
+    }
+
+    /// The TIDAL stream for browsers refuses someone with no account of their own: nothing
+    /// fetched for anyone else is served to them (#226 review L3, the missing test).
+    #[tokio::test]
+    async fn the_tidal_stream_refuses_someone_without_an_account() {
+        let dir = tempfile::tempdir().unwrap();
+        let (s, _, _) = two_people_node(dir.path(), "http://127.0.0.1:9").await;
+        let guest = accounts::Caller {
+            role: accounts::Role::Guest,
+            key: None,
+        };
+        let r = tidal::stream(
+            State(s),
+            axum::Extension(guest),
+            axum::extract::Path("4242".to_string()),
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(r.err().map(|e| e.status), Some(StatusCode::FORBIDDEN));
+    }
 }

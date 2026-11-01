@@ -2277,9 +2277,18 @@ pub(crate) async fn isrc_versions(s: &NodeState, isrc: &str) -> Result<Vec<Versi
 /// (track id, fetched at, bytes, media type).
 type CachedStream = (String, std::time::Instant, Arc<Vec<u8>>, String);
 
-fn stream_cache() -> &'static Mutex<Vec<CachedStream>> {
+pub(crate) fn stream_cache() -> &'static Mutex<Vec<CachedStream>> {
     static C: std::sync::OnceLock<Mutex<Vec<CachedStream>>> = std::sync::OnceLock::new();
     C.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// Drops the tracks fetched for one person (`Who::tag`): they were removed.
+pub(crate) fn forget_streams_of(tag: &str) {
+    let prefix = format!("{tag}/");
+    stream_cache()
+        .lock()
+        .expect("stream cache")
+        .retain(|(k, _, _, _)| !k.starts_with(&prefix));
 }
 const STREAM_CACHE_ENTRIES: usize = 6;
 const STREAM_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(20 * 60);

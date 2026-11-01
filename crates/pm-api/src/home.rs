@@ -157,6 +157,13 @@ pub(crate) fn location(s: &NodeState) -> Option<HomeLocation> {
         .and_then(|j| serde_json::from_str(&j).ok())
 }
 
+/// Where a section is cached: per person asking, since what plays in full on its cards depends on
+/// their own sign-ins.
+pub(crate) fn section_key(name: &str, q: &HomeQuery) -> String {
+    let who = crate::accounts::asking();
+    format!("{name}|{:?}|{:?}|{:?}|{}", q.window, q.limit, q.labels, who.tag())
+}
+
 /// `GET /v1/home/{section}`.
 pub(crate) async fn section(
     State(s): State<Arc<NodeState>>,
@@ -166,7 +173,7 @@ pub(crate) async fn section(
     if !SECTIONS.contains(&name.as_str()) && name != "tag" {
         return Err(ApiError::not_found(format!("no Home section {name}")));
     }
-    let key = format!("{name}|{:?}|{:?}|{:?}", q.window, q.limit, q.labels);
+    let key = section_key(&name, &q);
     if let Some((at, c)) = cache().lock().expect("home cache").get(&key) {
         if at.elapsed() < TTL {
             return Ok(Json(c.clone()));

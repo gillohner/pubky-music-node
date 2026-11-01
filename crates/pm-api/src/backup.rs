@@ -618,19 +618,17 @@ async fn restore_locked(
                 }
             }
         }
-        // Listeners' own: from the sealed backup, else the ones made here before the restore
-        let sealed_people: Vec<(&String, &String)> = secrets
-            .as_ref()
-            .map(|x| x.settings.iter().filter(|(k, _)| is_person_signin(k)).collect())
-            .unwrap_or_default();
-        if sealed_people.is_empty() {
-            for (k, v) in &people_here {
-                lib.set_setting(k, v)?;
-            }
-        } else {
-            for (k, v) in sealed_people {
-                lib.set_setting(k, v)?;
-            }
+        // Listeners' own, each as the owner's: from the sealed backup, else the one made here
+        // before the restore (a listener signed in only here keeps it)
+        for (k, v) in &people_here {
+            lib.set_setting(k, v)?;
+        }
+        for (k, v) in secrets
+            .iter()
+            .flat_map(|x| x.settings.iter())
+            .filter(|(k, _)| is_person_signin(k))
+        {
+            lib.set_setting(k, v)?;
         }
         lib.drop_missing_art()?;
         report.restored = counts_of(&lib)?;
