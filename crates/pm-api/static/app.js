@@ -456,6 +456,42 @@
 
   // A small dialog with a few choices; resolves to the picked value, or null (Esc, Cancel).
   // With `field` ({label, value}) it shows a text field and resolves to {value, text}.
+  // A Pubky key from what someone pasted or scanned: the bare key, `pubky<key>`, `pubky://<key>/…`
+  // or `pk:<key>`; null when it isn't one.
+  const keyFrom = (raw) => { const k = bareKey(String(raw || '').trim()).split(/[/?#]/)[0].toLowerCase(); return /^[ybndrfg8ejkmcpqxot1uwisza345h769]{52}$/.test(k) ? k : null; };
+  // Scanning a key's QR code with the camera, where the browser reads QR codes itself (no library)
+  const canScan = () => 'BarcodeDetector' in window && !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+  const scanKey = () => new Promise((resolve) => {
+    const d = document.createElement('dialog'); d.className = 'dialog scan-dialog'; d.setAttribute('aria-labelledby', 'scantitle');
+    d.innerHTML = '<h2 id="scantitle">Scan their key</h2><p class="muted small">Point the camera at the QR code of their Pubky key, as Pubky Ring shows it.</p><video class="scan-video" playsinline muted></video><p class="muted small" data-scanmsg role="status"></p><div class="dialog-actions"><button class="btn" data-scanclose>Cancel</button></div>';
+    document.body.appendChild(d);
+    const video = $('video', d); const msg = $('[data-scanmsg]', d);
+    let stream = null; let timer = null; let over = false;
+    const tr = { open: () => d.open, close: (fromBack) => done(null, fromBack) };
+    const done = (v, fromBack) => {
+      if (over) return; over = true; clearTimeout(timer);
+      if (stream) stream.getTracks().forEach((t) => t.stop());
+      const k = transients.indexOf(tr); if (k >= 0) transients.splice(k, 1);
+      if (d.open) { if (d.close) d.close(); else d.removeAttribute('open'); } d.remove(); if (fromBack !== true) popTransient(); resolve(v);
+    };
+    transients.push(tr); pushTransient();
+    $('[data-scanclose]', d).onclick = () => done(null);
+    d.addEventListener('cancel', (e) => { e.preventDefault(); done(null); });
+    if (d.showModal) d.showModal(); else d.setAttribute('open', '');
+    (async () => {
+      try { stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } }); } catch (e) { msg.textContent = `The camera isn’t available (${e.message || e.name}). Paste their key instead.`; return; }
+      if (over) { stream.getTracks().forEach((t) => t.stop()); return; }
+      video.srcObject = stream; try { await video.play(); } catch { /* shows the first frame anyway */ }
+      // A browser can have the API without reading QR codes: the camera goes off and it says so
+      let det; try { det = new window.BarcodeDetector({ formats: ['qr_code'] }); } catch (e) { stream.getTracks().forEach((t) => t.stop()); video.srcObject = null; msg.textContent = `This browser can’t read QR codes (${e.message || e.name}). Paste their key instead.`; return; }
+      const look = async () => {
+        if (over) return;
+        try { for (const c of await det.detect(video)) { const k = keyFrom(c.rawValue); if (k) return done(k); msg.textContent = 'That QR code isn’t a Pubky key.'; } } catch { /* the next frame */ }
+        timer = setTimeout(look, 250);
+      };
+      look();
+    })();
+  });
   const choiceDialog = ({ title, text, choices, field }) => new Promise((resolve) => {
     const d = document.createElement('dialog'); d.className = 'dialog';
     d.innerHTML = `<h2>${esc(title)}</h2>${text ? `<p class="muted">${esc(text)}</p>` : ''}${field ? `<label class="dialog-field"><span class="muted small">${esc(field.label)}</span><input class="input" data-field value="${esc(field.value || '')}" aria-label="${esc(field.label)}"></label>` : ''}<div class="choices">${choices.map((c, i) => `<button class="btn choice ${c.primary ? 'primary' : ''}" data-ci="${i}"><span class="choice-label">${esc(c.label)}</span>${c.note ? `<span class="choice-note">${esc(c.note)}</span>` : ''}</button>`).join('')}</div><div class="dialog-actions"><button class="btn ghost" data-ci="-1">Cancel</button></div>`;
@@ -1634,7 +1670,7 @@
   // Listening together on this node (presence.rs): who you listen along with, with Leave, and who
   // sees what you play. The node keeps it; the page asks every 20 s and when zones come or go.
   const personName = (l) => l.name || (l.key === 'owner' ? 'the owner' : shortKey(l.key));
-  const VISIBLE = [['hidden', 'Nobody', 'what you play stays yours'], ['followed', 'People you follow', 'on Pubky'], ['everyone', 'Everyone on this node', '']];
+  const VISIBLE = [['hidden', 'Only you', 'nobody else sees what you play'], ['followed', 'People you follow', 'on Pubky'], ['everyone', 'Everyone on this node', '']];
   const renderAlong = () => {
     const a = state.along; $('#along').hidden = !a;
     if (a) $('#alongtext').textContent = `Along with ${personName(a)}`;
@@ -1729,7 +1765,7 @@
   $('#alongleave').onclick = leaveAlong;
   setInterval(refreshAlong, 20000);
   const setVisible = async (v) => {
-    try { state.presenceVisible = (await api('PUT', '/me/presence', { visible: v })).visible; toast(v === 'hidden' ? 'Nobody sees what you play' : `${VISIBLE.find((x) => x[0] === v)[1]} can see what you play`); } catch (e) { toast(e.message, 'error'); }
+    try { state.presenceVisible = (await api('PUT', '/me/presence', { visible: v })).visible; toast(v === 'hidden' ? 'Only you see what you play' : `${VISIBLE.find((x) => x[0] === v)[1]} can see what you play`); } catch (e) { toast(e.message, 'error'); }
   };
   const renderZonePop = (err) => {
     const movable = hasQueue(currentZone());
@@ -1805,6 +1841,7 @@
     const changed = document.documentElement.dataset.shell !== now;
     document.documentElement.dataset.shell = now;
     if (changed && state.view) markTabs();
+    if (changed) { const pb = $('#peoplebox'); if (pb && pb.reshell) pb.reshell(); }
     if (densePref()) document.documentElement.dataset.dense = '1'; else delete document.documentElement.dataset.dense;
     const up = $('#upstreams');
     if (up) { if (now === 'desktop') { if (up.parentElement !== $('#sidebar')) $('#sidebar').appendChild(up); } else if (up.parentElement !== $('.topbar')) $('.topbar').insertBefore(up, $('#me')); }
@@ -3126,8 +3163,8 @@
     const count = new Map(others.map(([l, c]) => [l, c]));
     const mine = new Set([...songTags, ...linkTags].map((t) => t.label));
     const chip = (t, scope) => `<span class="chip tag ${scope === 'link' ? 'tag-link' : ''}" title="${scope === 'link' ? `Only on this ${esc(linkName)} link` : `On the ${kind}, whatever source plays it`}">${scope === 'link' ? svcBadge(String(linkName).toLowerCase()) : ''}<button class="chiplink" data-tag-open="${esc(t.label)}" title="Open in Discover">#${esc(t.label)}${count.get(t.label) ? ` <span class="muted">${count.get(t.label)}</span>` : ''}</button>${t.pending ? '<span class="muted small tag-wait" title="Published once this file is matched to a song">waits for a match</span>' : ''}${linkName ? `<button class="chipx" data-tag-move="${scope}:${esc(t.label)}" title="${scope === 'link' ? `Put it on the ${kind} instead` : `Keep it on this ${esc(linkName)} link only`}" aria-label="Move #${esc(t.label)}">${icon(scope === 'link' ? 'compass' : 'disc')}</button>` : ''}<button class="chipx" data-tag-del="${scope}:${esc(t.label)}" title="${t.synced ? 'Public on your homeserver · remove' : 'Not pushed yet · remove'}">×</button></span>`;
-    const theirs = others.filter(([l]) => !mine.has(l)).map(([l, c]) => `<button class="chip" data-tag-open="${esc(l)}" title="Others' tag · open in Discover">#${esc(l)} <span class="muted">${c}</span></button>`).join('');
-    return `<div class="tagrow">${songTags.map((t) => chip(t, 'song')).join('')}${linkTags.map((t) => chip(t, 'link')).join('')}${theirs}<input class="taginput" id="tagadd" placeholder="Add a tag…" maxlength="20">${linkName ? `<select class="input sm" id="tagscope" aria-label="Where the tag goes"><option value="song">on the ${kind}</option><option value="link">on this ${esc(linkName)} link only</option></select>` : ''}</div>${linkName ? `<p class="muted small">A tag on the ${kind} shows wherever it plays from; a tag on this ${esc(linkName)} link stays on that link.</p>` : ''}`;
+    const theirs = others.filter(([l]) => !mine.has(l)).map(([l, c]) => `<button class="chip tag-chip" data-tag-open="${esc(l)}" title="Others' tag · open in Discover">#${esc(l)} <span class="muted">${c}</span></button>`).join('');
+    return `<div class="tagrow">${songTags.map((t) => chip(t, 'song')).join('')}${linkTags.map((t) => chip(t, 'link')).join('')}${theirs}<input class="taginput" id="tagadd" placeholder="Add a tag…" maxlength="20">${linkName ? `<select class="input sm" id="tagscope" aria-label="Where the tag goes"><option value="song">on the ${kind}</option><option value="link">on this ${esc(linkName)} link only</option></select>` : ''}</div><p class="muted small tag-hint">Public on your homeserver.${linkName ? ` A tag on the ${kind} shows wherever it plays from; a tag on this ${esc(linkName)} link stays on that link.` : ''}</p>`;
   };
   const bindScopedTags = (songRef, linkRef) => {
     const add = $('#tagadd'); if (!add) return;
@@ -4189,7 +4226,7 @@
           if (state.view !== 'tag') return;
           sc.items = sc.items || []; sc.tags = sc.tags || [];
           const co = sc.tags.filter(([l]) => !labels.includes(l)).slice(0, 24);
-          $('#tagcotags').innerHTML = co.length ? `<div class="chips" style="margin-bottom:14px"><span class="muted small">Also tagged:</span>${co.map(([l, c]) => `<button class="chip" data-tag-add="${esc(l)}" title="Narrow to both tags">+ #${esc(l)} <span class="muted">${c}</span></button>`).join('')}${labels.length > 1 ? labels.map((l) => `<button class="chip on" data-tag-rm="${esc(l)}" title="Remove this tag">#${esc(l)} ×</button>`).join('') : ''}</div>` : '';
+          $('#tagcotags').innerHTML = co.length ? `<div class="chips" style="margin-bottom:14px"><span class="muted small">Also tagged:</span>${co.map(([l, c]) => `<button class="chip tag-chip" data-tag-add="${esc(l)}" title="Narrow to both tags">+ #${esc(l)} <span class="muted">${c}</span></button>`).join('')}${labels.length > 1 ? labels.map((l) => `<button class="chip tag-chip on" data-tag-rm="${esc(l)}" title="Remove this tag">#${esc(l)} ×</button>`).join('') : ''}</div>` : '';
           $$('[data-tag-add]', main).forEach((b) => b.onclick = () => setView('tag', [...labels, b.dataset.tagAdd].join(',')));
           $$('[data-tag-rm]', main).forEach((b) => b.onclick = () => setView('tag', labels.filter((l) => l !== b.dataset.tagRm).join(','), 'replace'));
           const el = $('#tagbody'); el.innerHTML = homeBody(sc, 'tag', true); el.classList.add('fadein'); bindHome(el, sc);
@@ -4294,7 +4331,7 @@
           const [genres, mine, ns] = await Promise.all([api('GET', '/library/genres'), api('GET', '/tags').then((r) => r.tags || []).catch(() => []), api('GET', '/node/settings').catch(() => ({}))]);
           if (state.view !== 'genres') return;
           const byLabel = new Map(); for (const t of mine) byLabel.set(t.label, (byLabel.get(t.label) || 0) + 1);
-          const tagsSec = `<section class="section"><div class="section-head"><h3>Your Pubky tags</h3><span class="muted small">public, on your homeserver</span></div>${byLabel.size ? `<div class="chips">${[...byLabel.entries()].sort((a, b) => b[1] - a[1]).map(([l, n]) => `<button class="chip" data-mytag="${esc(l)}">#${esc(l)} <span class="muted">${n}</span></button>`).join('')}</div>` : '<p class="muted small">No tags yet. Add them on any song, album or artist page.</p>'}<label class="small genre-pub"><input type="checkbox" id="genretags" ${ns.genre_tags ? 'checked' : ''}> Publish my files' genres as tags too (public on Pubky, on songs that are matched)</label></section>`;
+          const tagsSec = `<section class="section"><div class="section-head"><h3>Your Pubky tags</h3><span class="muted small">public, on your homeserver</span></div>${byLabel.size ? `<div class="chips">${[...byLabel.entries()].sort((a, b) => b[1] - a[1]).map(([l, n]) => `<button class="chip tag-chip" data-mytag="${esc(l)}">#${esc(l)} <span class="muted">${n}</span></button>`).join('')}</div>` : '<p class="muted small">No tags yet. Add them on any song, album or artist page.</p>'}<label class="small genre-pub"><input type="checkbox" id="genretags" ${ns.genre_tags ? 'checked' : ''}> Publish my files' genres as tags too (public on Pubky, on songs that are matched)</label></section>`;
           main.innerHTML = pageHead('Genres', genres.length) + tagsSec + `<section class="section"><div class="section-head"><h3>From your files</h3><span class="muted small">the genres in your files' metadata</span></div>` + (genres.length ? `<div class="cards">${genres.map((g) => `<button class="card genre" data-genre="${g.id}" style="text-align:left;cursor:pointer;background:linear-gradient(135deg, hsl(${hue(g.name)} 32% 22%), var(--surface))"><h3 style="margin-bottom:4px">${esc(g.name)}</h3><div class="muted small">${g.albums} album${g.albums === 1 ? '' : 's'} · ${g.tracks} track${g.tracks === 1 ? '' : 's'}</div></button>`).join('')}</div>` : emptyState('genre', 'No genres yet', 'Genres come from the files\' tags; tag your music and rescan.'));
           main.insertAdjacentHTML('beforeend', '</section>');
           $$('[data-genre]', main).forEach((b) => b.onclick = () => setView('genre', Number(b.dataset.genre)));
@@ -5097,7 +5134,7 @@
             + '<div id="iconcerts-slot"></div>'
             + (kind === 'song' && pg.versions.length ? `<section class="section" id="iversions"><div class="section-head"><h3>Versions</h3><span class="muted small">other recordings: live, remastered, edits</span></div><div class="list compact">${pg.versions.map((v, k) => `<div class="list-row">${svcBadge(v.source === 'library' ? 'library' : v.source)}<div class="grow"><div class="name">${v.page ? `<a class="lnk" data-vpage="${k}">${esc(v.label.split(' · ')[0])}</a>` : esc(v.label.split(' · ')[0])}</div><div class="sub">${esc(v.label.split(' · ').slice(1).join(' · '))}</div></div><button class="icon-btn" data-vplay="${k}" title="Play this version" aria-label="Play this version">${icon('play')}</button></div>`).join('')}</div></section>` : '')
             + '<div id="isimilar-slot"></div>'
-            + `<section class="section" id="itags"><div class="section-head"><h3>Tags</h3>${pg.on_pubky && pg.on_pubky.taggers ? `<button class="faces muted small" data-taggers="${pg.on_pubky.taggers}">${pg.on_pubky.taggers} ${pg.on_pubky.taggers === 1 ? 'person' : 'people'} tagged this on Pubky</button>` : ''}</div>${myTags ? scopedTagRow(myTags, linkTags, linkRef ? pg.source : null, kind, (pg.on_pubky && pg.on_pubky.tags) || []) : `${pg.on_pubky && pg.on_pubky.tags.length ? `<div class="chips">${pg.on_pubky.tags.map(([l, c]) => `<button class="chip" data-tag-open="${esc(l)}">#${esc(l)} <span class="muted">${c}</span></button>`).join('')}</div>` : ''}${empty(`Tagging works once this ${kind} is matched to MusicBrainz, the open music database, so other apps know what it is.`)}`}${myReview !== undefined ? reviewRow(myReview) : ''}</section>`
+            + `<section class="section" id="itags"><div class="section-head"><h3>Tags</h3>${pg.on_pubky && pg.on_pubky.taggers ? `<button class="faces muted small" data-taggers="${pg.on_pubky.taggers}">${pg.on_pubky.taggers} ${pg.on_pubky.taggers === 1 ? 'person' : 'people'} tagged this on Pubky</button>` : ''}</div>${myTags ? scopedTagRow(myTags, linkTags, linkRef ? pg.source : null, kind, (pg.on_pubky && pg.on_pubky.tags) || []) : `${pg.on_pubky && pg.on_pubky.tags.length ? `<div class="chips">${pg.on_pubky.tags.map(([l, c]) => `<button class="chip tag-chip" data-tag-open="${esc(l)}">#${esc(l)} <span class="muted">${c}</span></button>`).join('')}</div>` : ''}${empty(`Tagging works once this ${kind} is matched to MusicBrainz, the open music database, so other apps know what it is.`)}`}${myReview !== undefined ? reviewRow(myReview) : ''}</section>`
             + '<div id="icollections-slot"></div>'
             + (commentUri ? `<section class="section" id="icomments" data-curi="${esc(commentUri)}"><div class="section-head"><h3>Comments</h3></div><div class="comments-body"><div class="skeleton" style="height:48px"></div></div></section>` : '')
             + (aboutTop ? '' : aboutHtml(pg));
@@ -5784,9 +5821,15 @@
           const sy = $('#sync'); if (sy) sy.onclick = async () => { try { const r = await api('POST', '/pubky/sync'); syncToast(r); render(); } catch (e) { toast(e.message, 'error'); } };
           // Settings › People: invites to this node's homeserver and its music, and who has what
           const ACCESS = { homeserver_music: 'Homeserver + music', homeserver: 'Homeserver only', music: 'Music only' };
+          // Each kind in one line, and what else to know once it is chosen
+          const INVITE_KINDS = {
+            homeserver_music: ['An account on this node’s homeserver, and they play this node’s music.', 'You get a link and a QR code for Pubky Ring. A storage quota is optional. Their playlists and favourites live on their account.'],
+            homeserver: ['An account on this node’s homeserver, without this node’s music.', 'You get a link and a QR code for Pubky Ring. A storage quota is optional.'],
+            music: ['Their Pubky account is elsewhere: they play this node’s music.', 'Added by their key; they sign in with Pubky Ring. Their playlists and favourites stay on their account.'],
+          };
           const quotaText = (q) => (q == null ? 'the default quota' : q === 'unlimited' || q === 'Unlimited' ? 'no limit' : `${q} MB`);
           const inviteQr = (inv, hsKey) => (inv.url ? `<div class="notice qrbox" style="margin-top:10px">${inv.qr_svg ? `<div class="qr">${inv.qr_svg}</div>` : ''}<div><p>Send this to ${inv.name ? esc(inv.name) : 'them'}: they scan it with Pubky Ring (or open the link on their phone), and Ring creates their account on this node’s homeserver.</p><p class="muted small">Older Ring versions can’t open it; they can sign up by hand with the code <code>${esc(inv.token || '')}</code>${hsKey ? ` and this homeserver’s key <code>${esc(hsKey)}</code>` : ''}.</p><a class="btn sm" href="${esc(ringUrl(inv.url))}">Open in Pubky Ring</a> <button class="btn sm ghost" data-copylink="${esc(inv.url)}">Copy link</button></div></div>` : '');
-          const loadPeople = async () => {
+          const loadPeople = async (keep = false) => {
             const box = $('#peoplebox'); if (!box) return;
             let r; try { r = await api('GET', '/people'); } catch (e) { box.innerHTML = `<p class="muted small">${esc(e.message)}</p>`; return; }
             const zl = await api('GET', '/people/zones').catch(() => ({ zones: [] }));
@@ -5806,24 +5849,53 @@
               return row(p.name ? esc(p.name) : esc(shortKey(p.key)), `${p.name ? keyHtml(p.key) + ' · ' : ''}${bits.join(' · ')}`, ctl);
             };
             const invite = (inv) => row(inv.name ? esc(inv.name) : 'Unnamed invite', `${ACCESS[inv.access] || inv.access} · made ${new Date(inv.created_at * 1000).toLocaleDateString()}${inv.url ? `<details class="small"><summary>Show the invite again</summary>${inviteQr(inv, hs.public_key)}</details>` : ''}`, `<button class="btn sm ghost" data-pinv-del="${esc(inv.id)}" title="An invite that was sent stays usable on the homeserver; this only takes it off the list">Forget</button>`);
-            box.innerHTML = group('This node’s homeserver', hs.configured
+            // On phones each section folds (UX sweep 2026-11-01 S2); what was open stays open when
+            // the page reloads after an action
+            const was = new Map($$('[data-fold]', box).map((d) => [d.dataset.fold, d.open]));
+            const draft = keep ? { kind: ($('input[name="pinvkind"]:checked', box) || {}).value, ...Object.fromEntries(['pinvname', 'pinvquota', 'pinvkey'].map((id) => [id, ($(`#${id}`, box) || {}).value || ''])) } : null;
+            const sec = (id, title, body, open) => (shellMode() === 'phone'
+              ? `<details class="set-group set-fold" data-fold="${id}" ${(was.has(id) ? was.get(id) : open) ? 'open' : ''}><summary><h3 class="set-h">${title}</h3></summary><div class="set-rows">${body}</div></details>`
+              : group(title, body));
+            box.innerHTML = sec('homeserver', 'This node’s homeserver', hs.configured
                 ? row(onHs ? `Pubky homeserver ${esc(hs.version || '')}` : 'Not reachable', onHs ? `${countOf(hs.users || 0, 'accounts')}${hs.disabled_users ? ` (${hs.disabled_users} turned off)` : ''} · ${fmtBytes((hs.disk_used_mb || 0) * 1e6)} used · whoever runs it (you) can read every account’s files, <code>/priv</code> included, so tell the people you invite.` : esc(hs.error || 'The node can’t reach its homeserver’s admin API.'), '')
-                : row('No homeserver on this node', 'Installed without its own homeserver (the bundled install has one). You can still let someone with a Pubky account elsewhere play this node’s music.', ''))
-              + group('Invite someone', block('', 'Homeserver only: a Pubky account here, with a storage quota. Homeserver + music: the same, and they can sign in to this node’s music with Ring. Music only: someone whose Pubky account is elsewhere, by their key. Their own playlists and favourites live on their account.', `<div class="toolbar"><select class="input" id="pinvaccess" aria-label="What they get">${kinds.map((k) => `<option value="${k}">${ACCESS[k]}</option>`).join('')}</select><input class="input" id="pinvname" placeholder="Name (optional)" aria-label="Their name"><input class="input" id="pinvquota" type="number" min="1" placeholder="Quota, MB (empty: no limit)" aria-label="Storage quota in MB" ${onHs ? '' : 'hidden'}><input class="input" id="pinvkey" placeholder="Their Pubky key" aria-label="Their Pubky key" ${onHs ? 'hidden' : ''}><button class="btn primary" id="pinvgo">${icon('plus')} Create invite</button></div><div id="pinvout" aria-live="polite"></div>`))
-              + (r.invites.length ? group('Not used yet', r.invites.map(invite).join('')) : '')
-              + group('People', r.people.length ? r.people.map(person).join('') : row('Nobody yet', 'People you invite show here once they have signed up.', ''))
-              + group('Party', (parties.map((pt) => row(esc(pt.name), `${pt.zone_name ? `On ${esc(pt.zone_name)} · ` : ''}until ${new Date(pt.expires_at * 1000).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' })} · ${countOf(pt.guests.length, 'guests')} · ${countOf(pt.added, 'songs')} added · ${pt.adds_per_hour} per guest per hour, ${pt.waiting_per_guest} waiting at once<details class="small"><summary>Show the guest link</summary><div class="notice qrbox" style="margin-top:10px">${pt.qr_svg ? `<div class="qr">${pt.qr_svg}</div>` : ''}<div><p>Guests scan this or open the link: they give a name and add songs from the library to this zone. No account needed.</p><p><code>${esc(pt.url)}</code></p><button class="btn sm ghost" data-copylink="${esc(pt.url)}">Copy link</button></div></div></details>`, `<button class="btn sm ghost" data-party-end="${esc(pt.id)}">End party</button>`)).join(''))
-                + (zones.length ? block(parties.length ? 'Start another party' : 'Start a party', 'Anyone with the link adds songs from the library to one zone, without an account. Their songs play after the current one, in the order they came; the limits are checked by the node.', `<div class="toolbar"><select class="input" id="ptzone" aria-label="Party zone">${zones.map((z) => `<option value="${esc(z.id)}">${esc(z.name)}</option>`).join('')}</select><input class="input" id="ptname" placeholder="Name (optional)" aria-label="Party name"><select class="input" id="pthours" aria-label="How long the link works">${[[3, '3 hours'], [6, '6 hours'], [12, '12 hours'], [24, 'A day'], [72, '3 days']].map(([h, l]) => `<option value="${h}" ${h === 6 ? 'selected' : ''}>${l}</option>`).join('')}</select></div><div class="toolbar" style="margin-top:8px"><label class="small" for="ptadds">Songs per guest per hour</label><input class="input" id="ptadds" type="number" min="1" max="100" value="5" style="width:6em"><label class="small" for="ptwait">Waiting at once</label><input class="input" id="ptwait" type="number" min="1" max="50" value="3" style="width:6em"><button class="btn primary" id="ptgo">Start party</button></div>`) : row('Start a party', 'Needs a zone to play on.', '')))
-              + group('Zones listeners may play on', block('', 'People with music access can play on these. None checked: every zone.', (zones.length ? `<div class="chips" id="pzones">${zones.map((z) => `<label class="chip"><input type="checkbox" value="${esc(z.id)}" style="margin:0 6px 0 0" ${open.has(z.id) ? 'checked' : ''}> ${esc(z.name)}</label>`).join('')}</div><div class="actions" style="margin-top:10px"><button class="btn" id="pzsave">Save zones</button></div>` : '<p class="muted small">No zones yet.</p>')));
-            const acc = $('#pinvaccess', box);
-            const fit = () => { const music = acc.value === 'music'; $('#pinvquota', box).hidden = music; $('#pinvkey', box).hidden = !music; };
-            acc.onchange = fit; fit();
+                : row('No homeserver on this node', 'Installed without its own homeserver (the bundled install has one). You can still let someone with a Pubky account elsewhere play this node’s music.', ''), false)
+              + sec('invite', 'Invite someone', block('', '', `<div class="ways" role="radiogroup" aria-label="What they get">${kinds.map((k) => `<label class="way ${k === kinds[0] ? 'on' : ''}"><input type="radio" name="pinvkind" value="${k}" ${k === kinds[0] ? 'checked' : ''} aria-describedby="pinv-${k}"><span class="way-text"><span class="way-name">${ACCESS[k]}</span><span class="way-note" id="pinv-${k}">${INVITE_KINDS[k][0]}</span><span class="way-more small" ${k === kinds[0] ? '' : 'hidden'}>${INVITE_KINDS[k][1]}</span></span></label>`).join('')}</div><div class="toolbar invite-fields"><input class="input" id="pinvname" placeholder="Name (optional)" aria-label="Their name"><input class="input" id="pinvquota" type="number" min="1" placeholder="Quota, MB (empty: no limit)" aria-label="Storage quota in MB" ${onHs ? '' : 'hidden'}></div><div class="keyfield" id="pinvkeyrow" ${onHs ? 'hidden' : ''}><input class="input" id="pinvkey" placeholder="Their Pubky key" aria-label="Their Pubky key" aria-describedby="pinvkeyerr" autocomplete="off" autocapitalize="off" spellcheck="false"><button class="btn ghost" type="button" id="pinvpaste" hidden>${icon('paste')} Paste</button><button class="btn ghost" type="button" id="pinvscan" hidden>${icon('scan')} Scan QR</button></div><p class="field-err small" id="pinvkeyerr" role="alert" hidden></p><div class="actions invite-go"><button class="btn primary" id="pinvgo">${icon('plus')} Create invite</button></div><div id="pinvout" aria-live="polite"></div>`), !r.people.length)
+              + (r.invites.length ? sec('invites', 'Not used yet', r.invites.map(invite).join(''), true) : '')
+              + sec('people', 'People', r.people.length ? r.people.map(person).join('') : row('Nobody yet', 'People you invite show here once they have signed up.', ''), r.people.length > 0)
+              + sec('party', 'Party', (parties.map((pt) => row(esc(pt.name), `${pt.zone_name ? `On ${esc(pt.zone_name)} · ` : ''}until ${new Date(pt.expires_at * 1000).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' })} · ${countOf(pt.guests.length, 'guests')} · ${countOf(pt.added, 'songs')} added · ${pt.adds_per_hour} per guest per hour, ${pt.waiting_per_guest} waiting at once<details class="small"><summary>Show the guest link</summary><div class="notice qrbox" style="margin-top:10px">${pt.qr_svg ? `<div class="qr">${pt.qr_svg}</div>` : ''}<div><p>Guests scan this or open the link: they give a name and add songs from the library to this zone. No account needed.</p><p><code>${esc(pt.url)}</code></p><button class="btn sm ghost" data-copylink="${esc(pt.url)}">Copy link</button></div></div></details>`, `<button class="btn sm ghost" data-party-end="${esc(pt.id)}">End party</button>`)).join(''))
+                + (zones.length ? block(parties.length ? 'Start another party' : 'Start a party', 'Anyone with the link adds songs from the library to one zone, without an account. Their songs play after the current one, in the order they came; the limits are checked by the node.', `<div class="toolbar"><select class="input" id="ptzone" aria-label="Party zone">${zones.map((z) => `<option value="${esc(z.id)}">${esc(z.name)}</option>`).join('')}</select><input class="input" id="ptname" placeholder="Name (optional)" aria-label="Party name"><select class="input" id="pthours" aria-label="How long the link works">${[[3, '3 hours'], [6, '6 hours'], [12, '12 hours'], [24, 'A day'], [72, '3 days']].map(([h, l]) => `<option value="${h}" ${h === 6 ? 'selected' : ''}>${l}</option>`).join('')}</select></div><div class="toolbar" style="margin-top:8px"><label class="small" for="ptadds">Songs per guest per hour</label><input class="input" id="ptadds" type="number" min="1" max="100" value="5" style="width:6em"><label class="small" for="ptwait">Waiting at once</label><input class="input" id="ptwait" type="number" min="1" max="50" value="3" style="width:6em"><button class="btn primary" id="ptgo">Start party</button></div>`) : row('Start a party', 'Needs a zone to play on.', '')), false)
+              + sec('zones', 'Zones listeners may play on', block('', 'People with music access can play on these. None checked: every zone.', (zones.length ? `<div class="chips" id="pzones">${zones.map((z) => `<label class="chip"><input type="checkbox" value="${esc(z.id)}" style="margin:0 6px 0 0" ${open.has(z.id) ? 'checked' : ''}> ${esc(z.name)}</label>`).join('')}</div><div class="actions" style="margin-top:10px"><button class="btn" id="pzsave">Save zones</button></div>` : '<p class="muted small">No zones yet.</p>')), false);
+            // The kind of invite: radio cards, the chosen one's details shown (S1)
+            const kindOf = () => ($('input[name="pinvkind"]:checked', box) || {}).value || kinds[0];
+            const keyIn = $('#pinvkey', box); const keyErr = $('#pinvkeyerr', box);
+            if (draft) {
+              const k = $$('input[name="pinvkind"]', box).find((i) => i.value === draft.kind); if (k) k.checked = true;
+              ['pinvname', 'pinvquota', 'pinvkey'].forEach((id) => { $(`#${id}`, box).value = draft[id]; });
+            }
+            // Turning a tablet into a phone (or back) folds the sections (or unfolds them)
+            box.reshell = () => loadPeople(true);
+            const fit = () => {
+              const k = kindOf(); const music = k === 'music';
+              $$('.way', box).forEach((w) => { const on = w.querySelector('input').value === k; w.classList.toggle('on', on); w.querySelector('.way-more').hidden = !on; });
+              $('#pinvquota', box).hidden = music; $('#pinvkeyrow', box).hidden = !music; if (!music) keyErr.hidden = true;
+            };
+            $$('input[name="pinvkind"]', box).forEach((i) => i.onchange = fit); fit();
+            // Their key: typed, pasted or scanned; any of the spellings Pubky apps show
+            const setKey = (raw, quiet) => { const k = keyFrom(raw); if (k) keyIn.value = k; else if (raw != null && !quiet) keyIn.value = String(raw).trim(); checkKey(); return k; };
+            const checkKey = () => { const v = keyIn.value.trim(); const bad = !!v && !keyFrom(v); keyErr.hidden = !bad; keyErr.textContent = bad ? 'That isn’t a Pubky key: it is 52 letters and digits, as Pubky Ring shows it.' : ''; keyIn.setAttribute('aria-invalid', String(bad)); };
+            keyIn.onchange = () => setKey(keyIn.value);
+            keyIn.oninput = () => { if (!keyErr.hidden) checkKey(); };
+            const paste = $('#pinvpaste', box); paste.hidden = !(navigator.clipboard && navigator.clipboard.readText);
+            paste.onclick = async () => { try { const t = await navigator.clipboard.readText(); if (!setKey(t, true)) toast('The clipboard has no Pubky key', 'error'); } catch { toast('The browser didn’t allow reading the clipboard: paste into the field instead', 'error'); } };
+            const scan = $('#pinvscan', box); scan.hidden = !canScan();
+            scan.onclick = async () => { const k = await scanKey(); if (k) setKey(k); };
             $('#pinvgo', box).onclick = async () => {
-              const body = { access: acc.value, name: $('#pinvname', box).value.trim() || undefined };
-              if (acc.value === 'music') { body.key = $('#pinvkey', box).value.trim(); if (!body.key) { toast('Paste their Pubky key', 'error'); return; } } else { const q = Number($('#pinvquota', box).value); if (q > 0) body.storage_quota_mb = Math.round(q); }
+              const kind = kindOf();
+              const body = { access: kind, name: $('#pinvname', box).value.trim() || undefined };
+              if (kind === 'music') { const k = keyFrom(keyIn.value); if (!k) { if (keyIn.value.trim()) checkKey(); else toast('Paste or scan their Pubky key', 'error'); keyIn.focus(); return; } body.key = k; } else { const q = Number($('#pinvquota', box).value); if (q > 0) body.storage_quota_mb = Math.round(q); }
               try {
                 const v = await api('POST', '/people/invites', body);
-                if (acc.value === 'music') { toast('Added: they can sign in with Pubky Ring now'); loadPeople(); return; }
+                if (kind === 'music') { toast('Added: they can sign in with Pubky Ring now'); loadPeople(); return; }
                 await loadPeople();
                 const out = $('#pinvout'); if (out) { out.innerHTML = inviteQr(v, hs.public_key); out.scrollIntoView({ behavior: 'smooth', block: 'center' }); }
               } catch (e) { toast(e.message, 'error'); }
@@ -5835,7 +5907,7 @@
             $$('[data-pinv-del]', box).forEach((b) => b.onclick = async () => { try { await api('DELETE', `/people/invites/${encodeURIComponent(b.dataset.pinvDel)}`); toast('Invite taken off the list'); loadPeople(); } catch (e) { toast(e.message, 'error'); } });
             const ptg = $('#ptgo', box); if (ptg) ptg.onclick = async () => {
               const body = { zone: $('#ptzone', box).value, name: $('#ptname', box).value.trim() || undefined, hours: Number($('#pthours', box).value), adds_per_hour: Number($('#ptadds', box).value) || 5, waiting_per_guest: Number($('#ptwait', box).value) || 3 };
-              try { await api('POST', '/party', body); toast('Party started: share the guest link'); await loadPeople(); const last = $$('#peoplebox details').filter((x) => x.querySelector('[data-copylink*="/party/"]')).pop(); if (last) { last.open = true; last.scrollIntoView({ behavior: 'smooth', block: 'center' }); } } catch (e) { toast(e.message, 'error'); }
+              try { await api('POST', '/party', body); toast('Party started: share the guest link'); await loadPeople(); const last = $$('#peoplebox details:not(.set-fold)').filter((x) => x.querySelector('[data-copylink*="/party/"]')).pop(); if (last) { last.open = true; last.scrollIntoView({ behavior: 'smooth', block: 'center' }); } } catch (e) { toast(e.message, 'error'); }
             };
             $$('[data-party-end]', box).forEach((b) => b.onclick = async () => { try { await api('DELETE', `/party/${encodeURIComponent(b.dataset.partyEnd)}`); toast('Party ended: the guest link no longer works'); loadPeople(); } catch (e) { toast(e.message, 'error'); } });
             const pzs = $('#pzsave', box); if (pzs) pzs.onclick = async () => { const zones = $$('#pzones input:checked', box).map((i) => i.value); try { await api('PUT', '/people/zones', { zones }); toast(zones.length ? `Listeners may play on ${countOf(zones.length, 'zones')}` : 'Listeners may play on every zone'); } catch (e) { toast(e.message, 'error'); } };
