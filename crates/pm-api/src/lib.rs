@@ -422,6 +422,7 @@ pub fn router(state: Arc<NodeState>) -> Router {
             get(identify::get_status).post(identify::start),
         )
         .route("/library/identify/settings", put(identify::put_settings))
+        .route("/library/identify/key/check", post(identify::check_key))
         .route("/library/identify/write", post(identify::write_now))
         .route("/library/tag-fixes", get(tag_fixes::list).post(tag_fixes::apply))
         .route("/library/suggestions", get(identify::suggestions))
@@ -14445,7 +14446,11 @@ exec sleep 300
                 post(move |body: String| {
                     lookups.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     async move {
-                        if body.contains("client=GoodKey") {
+                        if body.contains("client=GoodKey") && body.contains("fingerprint=AQAAAA") {
+                            // As the real service: the key is taken, the dummy fingerprint isn't
+                            Json(serde_json::json!({"status": "error",
+                                "error": {"code": 3, "message": "invalid fingerprint"}}))
+                        } else if body.contains("client=GoodKey") {
                             Json(serde_json::json!({"status": "ok", "results": []}))
                         } else {
                             Json(serde_json::json!({"status": "error",
@@ -14467,6 +14472,52 @@ exec sleep 300
         };
         let app = router(s.clone());
         let key = |k: &str| Some(serde_json::json!({ "acoustid_key": k }));
+        // Check (the Identify card's button): nothing saved, each case in its own words
+        let (st, r) = call(
+            &app,
+            "POST",
+            "/v1/library/identify/key/check",
+            Some(serde_json::json!({})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{r}");
+        assert!(
+            r["ok"] == false && r["detail"].as_str().unwrap().starts_with("Key missing"),
+            "{r}"
+        );
+        let (_, r) = call(&app, "POST", "/v1/library/identify/key/check", key("BadKey1")).await;
+        assert!(
+            r["ok"] == false
+                && r["detail"]
+                    .as_str()
+                    .unwrap()
+                    .contains("refused this key (invalid API key)"),
+            "{r}"
+        );
+        let (_, r) = call(&app, "POST", "/v1/library/identify/key/check", key("GoodKey")).await;
+        assert!(
+            r["ok"] == true && r["detail"].as_str().unwrap().starts_with("OK"),
+            "{r}"
+        );
+        let (_, st0) = call(&app, "GET", "/v1/library/identify", None).await;
+        assert_eq!(
+            (st0["acoustid"].as_bool(), st0["acoustid_state"].as_str()),
+            (Some(false), Some("missing")),
+            "a check saves nothing: {st0}"
+        );
+        // Settings keeps no copy: the Service apps list points at the Identify card
+        let (_, apps) = call(&app, "GET", "/v1/node/apps", None).await;
+        let ac = apps
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["id"] == "acoustid")
+            .unwrap();
+        assert!(
+            ac.get("set").is_none() && ac["fields"].as_array().is_none_or(|f| f.is_empty()),
+            "{ac}"
+        );
+        assert_eq!(ac["page"], "library:node", "{ac}");
         let (st, b) = call(&app, "PUT", "/v1/library/identify/settings", key("BadKey1")).await;
         assert_eq!(st, StatusCode::BAD_REQUEST, "{b}");
         assert!(
@@ -14485,8 +14536,8 @@ exec sleep 300
         );
         assert_eq!(
             lookups.load(std::sync::atomic::Ordering::SeqCst),
-            2,
-            "one check per key"
+            4,
+            "one lookup per Check and per key saved"
         );
 
         // A key that stopped working (or a configured one AcoustID refuses), three songs

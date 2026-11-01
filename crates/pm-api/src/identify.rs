@@ -73,11 +73,34 @@ pub struct IdentifyStatus {
     pub counts: IdentityCounts,
     /// Whether an AcoustID key is configured (fingerprint lookups).
     pub acoustid: bool,
-    /// Whether that key was entered in Settings (it can be changed or removed there).
+    /// Whether that key was entered on the page (it can be changed or removed there).
     pub acoustid_own: bool,
+    /// The key's state for the Identify card: `missing` (none), `refused` (the last run's
+    /// AcoustID answer, in `acoustid_detail`) or `ok`.
+    pub acoustid_state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acoustid_detail: Option<String>,
     /// "Write IDs into my files" (off by default).
     pub write_ids: bool,
 }
+
+/// `POST /v1/library/identify/key/check`.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct KeyCheck {
+    /// The key to ask AcoustID about; none checks the key in use.
+    #[serde(default)]
+    pub acoustid_key: Option<String>,
+}
+
+/// What a check found: `ok`, and the words for the page either way.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KeyCheckResult {
+    pub ok: bool,
+    pub detail: String,
+}
+
+/// Where to get a key, as the page and the answers say it.
+pub const KEY_FROM: &str = "get a free one at acoustid.org/new-application";
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct IdentifyStart {
@@ -224,6 +247,53 @@ pub(crate) async fn put_settings(
     Ok(Json(status(&s)?))
 }
 
+/// `POST /v1/library/identify/key/check {acoustid_key?}`: asks AcoustID whether it takes the
+/// key (one lookup), saving nothing; the key in use when none is given. Always 200 `{ok, detail}`:
+/// a refused key, a missing one and an AcoustID out of reach each in their own words.
+pub(crate) async fn check_key(
+    State(s): State<Arc<NodeState>>,
+    Json(body): Json<KeyCheck>,
+) -> ApiResult<KeyCheckResult> {
+    let answer = |ok: bool, detail: String| Ok(Json(KeyCheckResult { ok, detail }));
+    let (key, base) = {
+        let a = s.acoustid.read().expect("acoustid lock");
+        (
+            body.acoustid_key
+                .as_deref()
+                .map(str::trim)
+                .filter(|k| !k.is_empty())
+                .unwrap_or(&a.api_key)
+                .to_string(),
+            a.base_url.clone(),
+        )
+    };
+    if key.is_empty() {
+        return answer(false, format!("Key missing: {KEY_FROM}."));
+    }
+    if key.len() > 64 || key.chars().any(|c| !c.is_ascii_alphanumeric()) {
+        return answer(
+            false,
+            "That doesn't look like an AcoustID key (letters and digits, from acoustid.org/new-application)"
+                .into(),
+        );
+    }
+    let client = acoustid_client(&s, &key, &base)?;
+    // AcoustID looks at the key before the fingerprint: only its "invalid API key" (code 4) refuses
+    // the key; any other answer of its own (the dummy fingerprint draws "invalid fingerprint",
+    // code 3) means it took the key. Only no answer at all is "couldn't reach"
+    match client.lookup("AQAAAA", 30).await {
+        Err(pm_library::LibraryError::AcoustIdKey(why)) => answer(
+            false,
+            format!("AcoustID refused this key ({why}). Check it, or {KEY_FROM}."),
+        ),
+        Ok(_) => answer(true, "OK: AcoustID accepts this key.".into()),
+        Err(pm_library::LibraryError::AcoustId(m)) if m.contains("(code ") => {
+            answer(true, "OK: AcoustID accepts this key.".into())
+        }
+        Err(e) => answer(false, format!("Couldn't reach AcoustID: {e}. Try again later.")),
+    }
+}
+
 /// `POST /v1/library/identify/write`: write the IDs found so far into the files now.
 pub(crate) async fn write_now(State(s): State<Arc<NodeState>>) -> ApiResult<WriteReport> {
     let st = s.clone();
@@ -249,11 +319,21 @@ fn status(s: &NodeState) -> Result<IdentifyStatus, ApiError> {
     };
     // Its own statement: the run counts while it holds the library, so never hold both
     let progress = s.identify.lock().expect("identify lock").clone();
+    let acoustid = !s.acoustid.read().expect("acoustid lock").api_key.is_empty();
+    let (acoustid_state, acoustid_detail) = if !acoustid {
+        ("missing", None)
+    } else if let Some(why) = &progress.acoustid_refused {
+        ("refused", Some(why.clone()))
+    } else {
+        ("ok", None)
+    };
     Ok(IdentifyStatus {
         progress,
         counts,
-        acoustid: !s.acoustid.read().expect("acoustid lock").api_key.is_empty(),
+        acoustid,
         acoustid_own,
+        acoustid_state: acoustid_state.into(),
+        acoustid_detail,
         write_ids: write_ids_on(s),
     })
 }

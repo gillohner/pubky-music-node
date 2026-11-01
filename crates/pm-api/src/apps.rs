@@ -56,6 +56,10 @@ pub struct NodeApp {
     /// What the service limits, in plain words.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub limits: Option<&'static str>,
+    /// Where the value is entered instead of here, as a page of this app (`library:node`: Your
+    /// library › Node library), when it lives with what it is for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<&'static str>,
 }
@@ -102,6 +106,7 @@ fn app(id: &'static str, name: &'static str, configured: bool, from: Option<Stri
         get_one: None,
         limits: None,
         note: None,
+        page: None,
     }
 }
 
@@ -406,12 +411,14 @@ pub fn list(s: &NodeState, base: &str) -> Vec<NodeApp> {
                 vec![format!("{base}/jamendo/callback")],
             )
         },
+        // The key lives with identifying and tagging (owner, 2026-10-31): entered on Your library ›
+        // Node library › Identify, with its state and a Check; this list only points there
         NodeApp {
-            set: Some("PUT /v1/library/identify/settings"),
-            fields: vec![secret("acoustid_key", "Application key", false)],
             status: Some("GET /v1/library/identify"),
             get_one: Some("https://acoustid.org/new-application"),
             builtin: crate::project_apps::acoustid_key().is_some(),
+            note: Some("Entered on Your library › Node library › Identify, with its state and a Check."),
+            page: Some("library:node"),
             ..app(
                 "acoustid",
                 "AcoustID",
