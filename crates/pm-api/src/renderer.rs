@@ -44,6 +44,7 @@ fn item(uri: String, meta: Meta, peer: Option<std::net::IpAddr>) -> QueueItem {
         duration_ms: meta.duration_ms,
         image: meta.art,
         limit: Some(pm_zones::FetchLimit { peer, lan: true }),
+        by: None,
     }
 }
 

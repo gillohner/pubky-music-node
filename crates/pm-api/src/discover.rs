@@ -235,7 +235,7 @@ pub(crate) fn service_access(s: &NodeState) -> ServiceAccess {
         tidal: on(
             "tidal",
             // Full tracks come from the official sign-in or from the unofficial mode's own one
-            if crate::tidal::connected(s) || crate::tidal_unofficial::streams(s) {
+            if crate::tidal::connected(s) || crate::tidal_unofficial::streams(s, &crate::accounts::asking()) {
                 Access::Full
             } else {
                 Access::No
@@ -243,7 +243,7 @@ pub(crate) fn service_access(s: &NodeState) -> ServiceAccess {
         ),
         spotify: on(
             "spotify",
-            if crate::spotify::load_user(s).is_some() {
+            if crate::spotify::load_user(s, &crate::accounts::asking()).is_some() {
                 Access::External
             } else {
                 Access::No
@@ -1450,6 +1450,7 @@ async fn expand_link(
             duration_ms: duration_secs.map(|d| d * 1000),
             image: it.image.clone(),
             limit: None,
+            by: None,
         }]);
     }
     if l.kind == "artist" {
@@ -1470,6 +1471,7 @@ async fn expand_link(
                     duration_ms: h.duration_ms,
                     image: h.image,
                     limit: None,
+                    by: None,
                 })
             })
             .collect());
@@ -1487,6 +1489,7 @@ async fn expand_link(
             duration_ms: t.duration_ms,
             image: album.image.clone().or_else(|| it.image.clone()),
             limit: None,
+            by: None,
         })
         .collect())
 }

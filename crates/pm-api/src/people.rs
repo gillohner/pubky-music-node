@@ -503,6 +503,30 @@ pub(crate) async fn change(
     Ok(Json(out))
 }
 
+/// `DELETE /v1/people/{key}`: remove a person. Everything the node keeps for them goes: their own
+/// streaming sign-ins, tokens (signed out everywhere), preferences and devices. Someone with an
+/// account on this node's homeserver stays listed, without music access, so that account stays
+/// in sight; anyone else leaves People.
+pub(crate) async fn remove(State(s): State<Arc<NodeState>>, Path(key): Path<String>) -> ApiResult<Roster> {
+    let key = valid_key(&key)?;
+    let mut r = reconcile(&s).await?;
+    let Some(i) = r.people.iter().position(|p| p.key == key) else {
+        return Err(ApiError::not_found("no such person"));
+    };
+    if r.people[i].access.on_homeserver() {
+        let p = &mut r.people[i];
+        p.music_enabled = false;
+        if p.access == Access::HomeserverMusic {
+            p.access = Access::Homeserver;
+        }
+    } else {
+        r.people.remove(i);
+    }
+    store(&s, &r)?;
+    crate::accounts::forget_person(&s, &key)?;
+    Ok(Json(r))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

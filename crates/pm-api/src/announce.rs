@@ -206,6 +206,7 @@ pub(crate) async fn announce(
         if caller.role != crate::accounts::Role::Owner {
             it.limit = Some(pm_zones::FetchLimit::PUBLIC);
         }
+        it.by = crate::accounts::Who::of(&caller).by();
         items.push(it);
     }
     let count = items.len();

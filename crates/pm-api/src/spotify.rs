@@ -9,6 +9,7 @@
 //! `<public_url>/spotify/callback` (the public URL plus `/spotify/callback`) as a redirect URI and, in development
 //! mode, the owner's Spotify account under its user management.
 
+use crate::accounts::Who;
 use crate::state::NodeState;
 use crate::streaming::StreamingService;
 use crate::tidal::{random_urlsafe, ImportReport};
@@ -221,8 +222,10 @@ pub(crate) fn redirect_uri(s: &NodeState, headers: &axum::http::HeaderMap) -> St
 }
 
 /// Pending sign-ins: state → (PKCE verifier, redirect URI used).
-fn pending() -> &'static Mutex<HashMap<String, (String, String)>> {
-    static P: std::sync::OnceLock<Mutex<HashMap<String, (String, String)>>> = std::sync::OnceLock::new();
+/// Sign-ins in progress: the PKCE state's nonce → (verifier, redirect, who started it).
+#[allow(clippy::type_complexity)]
+fn pending() -> &'static Mutex<HashMap<String, (String, String, Who)>> {
+    static P: std::sync::OnceLock<Mutex<HashMap<String, (String, String, Who)>>> = std::sync::OnceLock::new();
     P.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -296,30 +299,28 @@ async fn app_token(s: &NodeState) -> Result<String, ApiError> {
     Ok(token)
 }
 
-pub(crate) fn load_user(s: &NodeState) -> Option<UserSession> {
+/// This person's Spotify sign-in.
+pub(crate) fn load_user(s: &NodeState, who: &Who) -> Option<UserSession> {
     let lib = s.library.lock().expect("library poisoned");
-    lib.get_setting(USER_KEY)
-        .ok()
-        .flatten()
+    who.get(&lib, USER_KEY)
         .and_then(|j| serde_json::from_str(&j).ok())
 }
 
-fn store_user(s: &NodeState, u: Option<&UserSession>) -> Result<(), ApiError> {
-    let lib = s.library.lock().expect("library poisoned");
-    match u {
-        Some(u) => lib.set_setting(USER_KEY, &serde_json::to_string(u).expect("serializes"))?,
-        None => {
-            lib.delete_setting(USER_KEY)?;
-        }
-    }
-    Ok(())
+fn store_user(s: &NodeState, who: &Who, u: Option<&UserSession>) -> Result<(), ApiError> {
+    let raw = u.map(|u| serde_json::to_string(u).expect("serializes"));
+    who.put(
+        &s.library.lock().expect("library poisoned"),
+        USER_KEY,
+        raw.as_deref(),
+    )
 }
 
-/// The user's access token, refreshed when within a minute of expiry.
-pub(crate) async fn user_token(s: &NodeState) -> Result<Option<String>, ApiError> {
-    let Some(mut u) = load_user(s) else {
+/// This person's access token, refreshed when within a minute of expiry.
+pub(crate) async fn user_token(s: &NodeState, who: &Who) -> Result<Option<String>, ApiError> {
+    let Some(mut u) = load_user(s, who) else {
         return Ok(None);
     };
+    let key = who.setting(USER_KEY).expect("a person with a sign-in");
     if u.expires_at - now_unix() > 60 {
         return Ok(Some(u.access_token));
     }
@@ -340,25 +341,26 @@ pub(crate) async fn user_token(s: &NodeState) -> Result<Option<String>, ApiError
     let lib = s.library.lock().expect("library poisoned");
     let still = |cur: &str| serde_json::from_str::<UserSession>(cur).is_ok_and(|c| c.access_token == was);
     let raw = serde_json::to_string(&u).expect("serializes");
-    if !crate::vault_cache::store_refreshed(&lib, USER_KEY, still, &raw) {
+    if !crate::vault_cache::store_refreshed(&lib, &key, still, &raw) {
         return Ok(lib
-            .get_setting(USER_KEY)?
+            .get_setting(&key)?
             .and_then(|v| serde_json::from_str::<UserSession>(&v).ok())
             .map(|c| c.access_token));
     }
     Ok(Some(u.access_token))
 }
 
-/// A user token when signed in, else the app token (catalogue only).
+/// The asking person's token when they are signed in, else the app's (catalogue only; never
+/// someone else's).
 async fn bearer(s: &NodeState) -> Result<String, ApiError> {
-    match user_token(s).await? {
+    match user_token(s, &crate::accounts::asking()).await? {
         Some(t) => Ok(t),
         None => app_token(s).await,
     }
 }
 
 fn need_user(s: &NodeState) -> Result<UserSession, ApiError> {
-    load_user(s).ok_or_else(|| {
+    load_user(s, &crate::accounts::asking()).ok_or_else(|| {
         ApiError::new(
             StatusCode::PRECONDITION_FAILED,
             "not signed in to Spotify: Sources → Connect Spotify",
@@ -570,7 +572,7 @@ impl StreamingService for Spotify {
     fn unified(&self, s: &NodeState) -> bool {
         // Without the app's secret, the catalogue answers a signed-in user only
         let c = creds(s);
-        c.configured() && (c.has_secret() || load_user(s).is_some())
+        c.configured() && (c.has_secret() || load_user(s, &crate::accounts::asking()).is_some())
     }
 
     fn features(&self) -> &'static [&'static str] {
@@ -580,7 +582,7 @@ impl StreamingService for Spotify {
     fn info(&self, s: &NodeState) -> SourceInfo {
         let app = creds(s);
         let c = app.configured();
-        let u = load_user(s);
+        let u = load_user(s, &crate::accounts::asking());
         SourceInfo {
             id: SOURCE_ID.into(),
             name: "Spotify".into(),
@@ -740,8 +742,13 @@ impl StreamingService for Spotify {
 
 pub(crate) async fn login(
     State(s): State<Arc<NodeState>>,
+    axum::Extension(caller): axum::Extension<crate::accounts::Caller>,
     headers: axum::http::HeaderMap,
 ) -> ApiResult<crate::tidal::LoginUrl> {
+    let who = Who::of(&caller);
+    if who == Who::Nobody {
+        return Err(ApiError::new(StatusCode::FORBIDDEN, "sign in to the node first"));
+    }
     let c = creds(&s);
     if !c.configured() {
         return Err(ApiError::new(
@@ -765,7 +772,7 @@ pub(crate) async fn login(
     pending()
         .lock()
         .expect("pending")
-        .insert(nonce, (verifier, redirect.clone()));
+        .insert(nonce, (verifier, redirect.clone(), who));
     let mut url = url::Url::parse(&format!("{}/authorize", accounts_base(&s))).map_err(upstream)?;
     url.query_pairs_mut()
         .append_pair("response_type", "code")
@@ -810,12 +817,13 @@ pub(crate) fn callback_from_url(url: &str) -> Result<CallbackQuery, ApiError> {
 /// `POST /v1/sources/spotify/callback {url}`: the pasted-address fallback, as TIDAL's.
 pub(crate) async fn pasted_callback(
     State(s): State<Arc<NodeState>>,
+    axum::Extension(caller): axum::Extension<crate::accounts::Caller>,
     headers: axum::http::HeaderMap,
     Json(body): Json<PastedCallback>,
 ) -> ApiResult<SpotifyStatus> {
     let q = callback_from_url(&body.url)?;
     finish_login(&s, q).await?;
-    Ok(Json(status_view(&s, &headers)))
+    Ok(Json(status_view(&s, &Who::of(&caller), &headers)))
 }
 
 /// `GET /spotify/callback`: finishes the sign-in and sends the browser back to the UI.
@@ -841,7 +849,8 @@ async fn finish_login(s: &NodeState, q: CallbackQuery) -> Result<(), ApiError> {
     let (Some(code), Some(state)) = (q.code, q.state) else {
         return Err(ApiError::bad_request("missing code or state"));
     };
-    let (verifier, redirect) = pending()
+    // Kept for whoever started this sign-in (the callback itself comes without a node token)
+    let (verifier, redirect, who) = pending()
         .lock()
         .expect("pending")
         .remove(crate::project_apps::state_nonce(&state))
@@ -873,24 +882,41 @@ async fn finish_login(s: &NodeState, q: CallbackQuery) -> Result<(), ApiError> {
     };
     {
         // Stored and marked new under one guard: no vault pass sees one without the other (the
-        // account details below are a later change of the same sign-in)
+        // account details below are a later change of the same sign-in; the vault is the owner's)
         let lib = s.library.lock().expect("library poisoned");
-        lib.set_setting(USER_KEY, &serde_json::to_string(&session).expect("serializes"))?;
-        crate::vault_cache::new_sign_in(&lib, "spotify");
+        who.put(
+            &lib,
+            USER_KEY,
+            Some(&serde_json::to_string(&session).expect("serializes")),
+        )?;
+        if who.is_owner() {
+            crate::vault_cache::new_sign_in(&lib, "spotify");
+        }
     }
-    if let Ok(me) = get_json(s, "/me", &[]).await {
+    // Who this account is, asked with its own new token (nobody else's)
+    let me = s
+        .http_client()
+        .get(format!("{}/me", api_base(s)))
+        .bearer_auth(&session.access_token)
+        .send()
+        .await;
+    let me = match me {
+        Ok(r) if r.status().is_success() => r.json::<Value>().await.ok(),
+        _ => None,
+    };
+    if let Some(me) = me {
         session.user_id = me["id"].as_str().map(str::to_string);
         session.display_name = me["display_name"].as_str().map(str::to_string);
         session.country = me["country"].as_str().map(str::to_string);
         session.product = me["product"].as_str().map(str::to_string);
-        store_user(s, Some(&session))?;
+        store_user(s, &who, Some(&session))?;
     }
     tracing::info!(user = ?session.user_id, "Spotify sign-in stored");
     Ok(())
 }
 
-pub(crate) fn status_view(s: &NodeState, headers: &axum::http::HeaderMap) -> SpotifyStatus {
-    let u = load_user(s);
+pub(crate) fn status_view(s: &NodeState, who: &Who, headers: &axum::http::HeaderMap) -> SpotifyStatus {
+    let u = load_user(s, who);
     SpotifyStatus {
         configured: creds(s).configured(),
         signed_in: u.is_some(),
@@ -931,7 +957,8 @@ pub(crate) async fn set_app(
         ));
     }
     if settings_app(&s).as_deref() != Some(id) {
-        store_user(&s, None)?;
+        // Everyone's sign-in belonged to the old app
+        crate::accounts::forget_everyones(&s.library.lock().expect("library poisoned"), USER_KEY)?;
         *app_token_cache().lock().expect("app token") = None;
     }
     {
@@ -943,22 +970,25 @@ pub(crate) async fn set_app(
         }
     }
     crate::search::forget_answers(&s);
-    Ok(Json(status_view(&s, &headers)))
+    Ok(Json(status_view(&s, &Who::Owner, &headers)))
 }
 
 pub(crate) async fn status(
     State(s): State<Arc<NodeState>>,
+    axum::Extension(caller): axum::Extension<crate::accounts::Caller>,
     headers: axum::http::HeaderMap,
 ) -> ApiResult<SpotifyStatus> {
-    Ok(Json(status_view(&s, &headers)))
+    Ok(Json(status_view(&s, &Who::of(&caller), &headers)))
 }
 
 pub(crate) async fn logout(
     State(s): State<Arc<NodeState>>,
+    axum::Extension(caller): axum::Extension<crate::accounts::Caller>,
     headers: axum::http::HeaderMap,
 ) -> ApiResult<SpotifyStatus> {
-    store_user(&s, None)?;
-    Ok(Json(status_view(&s, &headers)))
+    let who = Who::of(&caller);
+    store_user(&s, &who, None)?;
+    Ok(Json(status_view(&s, &who, &headers)))
 }
 
 // ---- library ----
@@ -1230,7 +1260,7 @@ pub(crate) async fn play(
     Json(req): Json<PlayOnSpotify>,
 ) -> ApiResult<serde_json::Value> {
     need_user(&s)?;
-    let token = user_token(&s).await?.ok_or_else(|| {
+    let token = user_token(&s, &crate::accounts::asking()).await?.ok_or_else(|| {
         ApiError::new(
             StatusCode::PRECONDITION_FAILED,
             "Spotify session expired; sign in again",
@@ -1305,20 +1335,28 @@ pub(crate) struct SpotifySignIn;
 
 #[async_trait::async_trait]
 impl crate::signin::SignInSource for SpotifySignIn {
-    fn describe(&self, s: &NodeState, headers: Option<&axum::http::HeaderMap>) -> crate::signin::SignIn {
+    fn describe(
+        &self,
+        s: &NodeState,
+        who: &Who,
+        headers: Option<&axum::http::HeaderMap>,
+    ) -> crate::signin::SignIn {
         use crate::signin::{InUse, SignIn, Way, NOT_SIGNED_IN};
-        let u = load_user(s);
+        let u = load_user(s, who);
         let (ls, chosen) = {
             let lib = s.library.lock().expect("library poisoned");
             (
                 crate::librespot::load(&lib),
-                crate::signin::chosen(&lib, SOURCE_ID),
+                crate::signin::chosen(&lib, who, SOURCE_ID),
             )
         };
         let configured = creds(s).configured();
-        let supported = cfg!(unix) && crate::librespot::binary().is_some();
+        // librespot is one process with one account, the owner's
+        let supported = cfg!(unix) && crate::librespot::binary().is_some() && who.is_owner();
         let ls_reason = (!supported).then(|| {
-            if cfg!(unix) {
+            if !who.is_owner() {
+                "librespot on this node is the owner's.".to_string()
+            } else if cfg!(unix) {
                 "Install librespot first (the Spotify tab says how).".to_string()
             } else {
                 "The node runs librespot on Linux and macOS only.".to_string()
@@ -1334,8 +1372,10 @@ impl crate::signin::SignInSource for SpotifySignIn {
                 ),
                 action: if configured { "browser" } else { "setup" }.into(),
                 recommended: true,
-                available: true,
-                reason: None,
+                // The app is the node's: a listener signs in once the owner has set one up
+                available: configured || who.is_owner(),
+                reason: (!configured && !who.is_owner())
+                    .then(|| "The node's owner hasn't set up a Spotify app yet.".to_string()),
             },
             Way {
                 id: WAY_LIBRESPOT.into(),
@@ -1356,7 +1396,10 @@ impl crate::signin::SignInSource for SpotifySignIn {
                 reason: ls_reason,
             },
         ];
-        let creds_user = crate::librespot::credentials_user(s);
+        let creds_user = who
+            .is_owner()
+            .then(|| crate::librespot::credentials_user(s))
+            .flatten();
         let app_in_use = || {
             u.as_ref().map(|u| InUse {
                 way: WAY_APP.into(),
@@ -1423,29 +1466,33 @@ impl crate::signin::SignInSource for SpotifySignIn {
             in_use,
             line,
             imports: Vec::new(),
-            places: if headers.is_some() {
+            places: if headers.is_some() && who.is_owner() {
                 crate::imports::librespot_places_text()
             } else {
                 Vec::new()
             },
             details: match headers {
                 Some(h) => {
-                    serde_json::json!({ "status": status_view(s, h), "librespot": { "enabled": ls.enabled, "supported": supported, "credentials_from": ls.credentials_from } })
+                    serde_json::json!({ "status": status_view(s, who, h), "librespot": { "enabled": ls.enabled, "supported": supported, "credentials_from": ls.credentials_from } })
                 }
                 None => serde_json::Value::Null,
             },
         }
     }
 
-    fn way_chosen(&self, s: &Arc<NodeState>, way: &str) {
-        if way == WAY_LIBRESPOT {
+    fn way_chosen(&self, s: &Arc<NodeState>, who: &Who, way: &str) {
+        if way == WAY_LIBRESPOT && who.is_owner() {
             crate::librespot::set_enabled_bg(s, true);
         }
     }
 
-    fn sign_out_of(&self, s: &NodeState, way: &str) -> Result<(), ApiError> {
+    fn sign_out_of(&self, s: &NodeState, who: &Who, way: &str) -> Result<(), ApiError> {
         match way {
-            WAY_APP => store_user(s, None),
+            WAY_APP => store_user(s, who, None),
+            _ if !who.is_owner() => Err(ApiError::new(
+                StatusCode::FORBIDDEN,
+                "librespot on this node is the owner's",
+            )),
             _ => {
                 let lib = s.library.lock().expect("library poisoned");
                 let mut st = crate::librespot::load(&lib);
@@ -1469,8 +1516,16 @@ impl crate::signin::SignInSource for SpotifySignIn {
     async fn import(
         &self,
         s: &Arc<NodeState>,
+        who: &Who,
         body: crate::signin::ImportBody,
     ) -> Result<&'static str, ApiError> {
+        // A pasted credentials.json signs in the node's librespot, the owner's
+        if !who.is_owner() {
+            return Err(ApiError::new(
+                StatusCode::FORBIDDEN,
+                "librespot on this node is the owner's",
+            ));
+        }
         let Some(text) = body.text.as_deref().map(str::trim).filter(|t| !t.is_empty()) else {
             return Err(ApiError::bad_request(
                 "Pick the credentials.json or paste it; the node does not look for it",

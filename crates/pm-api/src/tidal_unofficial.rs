@@ -15,6 +15,7 @@
 //! - **Health:** a failure of the mode itself (revoked client, changed answer) switches it off,
 //!   playback falls back to the official preview, and the TIDAL page says why, with Retry.
 
+use crate::accounts::Who;
 use crate::state::NodeState;
 use crate::{ApiError, ApiResult};
 use axum::extract::State;
@@ -123,34 +124,40 @@ pub struct Client {
     pub from: String,
 }
 
-pub fn load(lib: &pm_library::Library) -> ModeState {
-    lib.get_setting(STATE_KEY)
-        .ok()
-        .flatten()
+/// This person's full-tracks mode: their own sign-in, switch, quality and health.
+pub fn load(lib: &pm_library::Library, who: &Who) -> ModeState {
+    who.get(lib, STATE_KEY)
         .and_then(|v| serde_json::from_str(&v).ok())
         .unwrap_or_default()
 }
 
-fn save(lib: &pm_library::Library, st: &ModeState) {
-    let _ = lib.set_setting(STATE_KEY, &serde_json::to_string(st).expect("state serializes"));
+fn save(lib: &pm_library::Library, who: &Who, st: &ModeState) {
+    let _ = who.put(
+        lib,
+        STATE_KEY,
+        Some(&serde_json::to_string(st).expect("state serializes")),
+    );
 }
 
-pub(crate) fn update(s: &NodeState, f: impl FnOnce(&mut ModeState)) -> ModeState {
+pub(crate) fn update(s: &NodeState, who: &Who, f: impl FnOnce(&mut ModeState)) -> ModeState {
     let lib = s.library.lock().expect("library poisoned");
-    let mut st = load(&lib);
+    let mut st = load(&lib, who);
     f(&mut st);
-    save(&lib, &st);
+    save(&lib, who, &st);
     st
 }
 
-/// [`update`] for an interactive sign-in: the state and the vault's "new sign-in" mark are
-/// written under one library guard, so no vault pass sees one without the other.
-pub(crate) fn update_signed_in(s: &NodeState, service: &str, f: impl FnOnce(&mut ModeState)) {
+/// [`update`] for an interactive sign-in: the state and the vault's "new sign-in" mark (the
+/// owner's only: the vault is theirs) are written under one library guard, so no vault pass sees
+/// one without the other.
+pub(crate) fn update_signed_in(s: &NodeState, who: &Who, service: &str, f: impl FnOnce(&mut ModeState)) {
     let lib = s.library.lock().expect("library poisoned");
-    let mut st = load(&lib);
+    let mut st = load(&lib, who);
     f(&mut st);
-    save(&lib, &st);
-    crate::vault_cache::new_sign_in(&lib, service);
+    save(&lib, who, &st);
+    if who.is_owner() {
+        crate::vault_cache::new_sign_in(&lib, service);
+    }
 }
 
 fn config_client() -> &'static std::sync::OnceLock<Client> {
@@ -200,8 +207,8 @@ pub fn client_of(lib: &pm_library::Library) -> Option<Client> {
 }
 
 /// Whether the mode is on and signed in, so TIDAL tracks can play in full.
-pub fn streams(s: &NodeState) -> bool {
-    let st = load(&s.library.lock().expect("library poisoned"));
+pub fn streams(s: &NodeState, who: &Who) -> bool {
+    let st = load(&s.library.lock().expect("library poisoned"), who);
     st.enabled && st.session.is_some()
 }
 
@@ -275,9 +282,9 @@ pub struct PendingView {
     pub expires_at: i64,
 }
 
-pub(crate) fn view(s: &NodeState) -> UnofficialStatus {
+pub(crate) fn view(s: &NodeState, who: &Who) -> UnofficialStatus {
     let lib = s.library.lock().expect("library poisoned");
-    let st = load(&lib);
+    let st = load(&lib, who);
     let client_from = client_of(&lib).map(|c| c.from);
     UnofficialStatus {
         service: "tidal".into(),
@@ -306,8 +313,12 @@ pub(crate) fn view(s: &NodeState) -> UnofficialStatus {
 }
 
 /// `GET /v1/sources/tidal/unofficial`.
-pub(crate) async fn get_status(State(s): State<Arc<NodeState>>) -> ApiResult<UnofficialStatus> {
-    Ok(Json(view(&s)))
+pub(crate) async fn get_status(
+    State(s): State<Arc<NodeState>>,
+    axum::Extension(caller): axum::Extension<crate::accounts::Caller>,
+) -> ApiResult<UnofficialStatus> {
+    let who = Who::of(&caller);
+    Ok(Json(view(&s, &who)))
 }
 
 #[derive(Debug, Deserialize)]
@@ -322,8 +333,17 @@ pub struct UnofficialUpdate {
 /// `PUT /v1/sources/tidal/unofficial {enabled?, quality?, client_id?, client_secret?}`.
 pub(crate) async fn put(
     State(s): State<Arc<NodeState>>,
+    axum::Extension(caller): axum::Extension<crate::accounts::Caller>,
     Json(u): Json<UnofficialUpdate>,
 ) -> ApiResult<UnofficialStatus> {
+    let who = Who::of(&caller);
+    // The device client is the node's, set by its owner; the switch and quality are each person's
+    if u.client_id.is_some() && !who.is_owner() {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "only the node's owner sets the TIDAL device client",
+        ));
+    }
     if let Some(q) = &u.quality {
         if q != "max" && q != "high" {
             return Err(ApiError::bad_request("quality is max or high"));
@@ -342,7 +362,7 @@ pub(crate) async fn put(
             lib.set_setting(CLIENT_KEY, &serde_json::to_string(&c).expect("client serializes"))?;
         }
     }
-    update(&s, |st| {
+    update(&s, &who, |st| {
         if let Some(e) = u.enabled {
             st.enabled = e;
             if e {
@@ -354,7 +374,7 @@ pub(crate) async fn put(
             st.quality = q;
         }
     });
-    Ok(Json(view(&s)))
+    Ok(Json(view(&s, &who)))
 }
 
 #[derive(Deserialize)]
@@ -478,7 +498,14 @@ fn judge_client_check(status: u16, v: &Value) -> crate::qobuz::CheckResult {
 
 /// `POST /v1/sources/tidal/unofficial/login`: the device code to enter at link.tidal.com; the
 /// node waits for the approval in the background.
-pub(crate) async fn login(State(s): State<Arc<NodeState>>) -> ApiResult<UnofficialStatus> {
+pub(crate) async fn login(
+    State(s): State<Arc<NodeState>>,
+    axum::Extension(caller): axum::Extension<crate::accounts::Caller>,
+) -> ApiResult<UnofficialStatus> {
+    let who = Who::of(&caller);
+    if who == Who::Nobody {
+        return Err(ApiError::new(StatusCode::FORBIDDEN, "sign in to the node first"));
+    }
     let c = client(&s).map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, e))?;
     let resp = s
         .http_client()
@@ -527,17 +554,19 @@ pub(crate) async fn login(State(s): State<Arc<NodeState>>) -> ApiResult<Unoffici
             "TIDAL sent no device code",
         ));
     }
-    update(&s, |st| st.login = Some(pending.clone()));
+    update(&s, &who, |st| st.login = Some(pending.clone()));
     let st2 = s.clone();
-    tokio::spawn(async move { wait_for_approval(&st2, c, pending).await });
-    Ok(Json(view(&s)))
+    let who2 = who.clone();
+    tokio::spawn(async move { wait_for_approval(&st2, &who2, c, pending).await });
+    Ok(Json(view(&s, &who)))
 }
 
-async fn wait_for_approval(s: &Arc<NodeState>, c: Client, p: Pending) {
+/// Waits for the code to be approved; the sign-in is kept for `who`, who asked for the code.
+async fn wait_for_approval(s: &Arc<NodeState>, who: &Who, c: Client, p: Pending) {
     while now() < p.expires_at {
         tokio::time::sleep(std::time::Duration::from_secs(p.interval)).await;
         // A newer sign-in replaced this one
-        let current = load(&s.library.lock().expect("library poisoned")).login;
+        let current = load(&s.library.lock().expect("library poisoned"), who).login;
         if current.as_ref().map(|x| &x.device_code) != Some(&p.device_code) {
             return;
         }
@@ -562,7 +591,7 @@ async fn wait_for_approval(s: &Arc<NodeState>, c: Client, p: Pending) {
         if ok {
             if let Some(sess) = session_from(&v, None) {
                 let sess = fill_session(s, sess).await;
-                update_signed_in(s, "tidal-full", |st| {
+                update_signed_in(s, who, "tidal-full", |st| {
                     st.session = Some(sess);
                     st.login = None;
                     st.enabled = true;
@@ -580,7 +609,7 @@ async fn wait_for_approval(s: &Arc<NodeState>, c: Client, p: Pending) {
             break;
         }
     }
-    update(s, |st| {
+    update(s, who, |st| {
         if st.login.as_ref().map(|x| &x.device_code) == Some(&p.device_code) {
             st.login = None;
         }
@@ -588,12 +617,16 @@ async fn wait_for_approval(s: &Arc<NodeState>, c: Client, p: Pending) {
 }
 
 /// `DELETE /v1/sources/tidal/unofficial/login`: forget the session (the mode stays as set).
-pub(crate) async fn logout(State(s): State<Arc<NodeState>>) -> ApiResult<UnofficialStatus> {
-    update(&s, |st| {
+pub(crate) async fn logout(
+    State(s): State<Arc<NodeState>>,
+    axum::Extension(caller): axum::Extension<crate::accounts::Caller>,
+) -> ApiResult<UnofficialStatus> {
+    let who = Who::of(&caller);
+    update(&s, &who, |st| {
         st.session = None;
         st.login = None;
     });
-    Ok(Json(view(&s)))
+    Ok(Json(view(&s, &who)))
 }
 
 // ---- playback (the audio thread and the browser proxy) -----------------------------------------
@@ -616,10 +649,11 @@ fn token_blocking(
     library: &std::sync::Mutex<pm_library::Library>,
     auth: &str,
     client: &reqwest::blocking::Client,
+    who: &Who,
 ) -> Result<Option<(Session, String)>, FullError> {
     let st = {
         let lib = library.lock().map_err(|_| FullError::Track("library".into()))?;
-        load(&lib)
+        load(&lib, who)
     };
     if !st.enabled {
         return Ok(None);
@@ -675,7 +709,7 @@ fn token_blocking(
     let fresh =
         session_from(&v, Some(&sess)).ok_or_else(|| FullError::Mode("renewal without a token".into()))?;
     if let Ok(lib) = library.lock() {
-        let mut st = load(&lib);
+        let mut st = load(&lib, who);
         // Only over the session this renewal started from (the vault may have changed it
         // meanwhile); otherwise the session there now is the one to use
         if st
@@ -684,7 +718,7 @@ fn token_blocking(
             .is_some_and(|c| c.access_token == sess.access_token)
         {
             st.session = Some(fresh.clone());
-            save(&lib, &st);
+            save(&lib, who, &st);
         } else {
             tracing::info!("a renewed TIDAL full-tracks session was dropped: the sign-in changed meanwhile");
             return Ok(st.session.map(|c| (c, quality)));
@@ -699,11 +733,12 @@ pub fn open_blocking(
     library: &std::sync::Mutex<pm_library::Library>,
     ep: &crate::tidal::TidalEndpoints,
     id: &str,
+    who: &Who,
 ) -> Result<Option<FullStream>, FullError> {
     let client = crate::sources::http_client();
     let auth = ep.auth_base.trim_end_matches('/');
     let v1 = ep.v1_base.trim_end_matches('/');
-    let Some((sess, quality)) = token_blocking(library, auth, client)? else {
+    let Some((sess, quality)) = token_blocking(library, auth, client, who)? else {
         return Ok(None);
     };
     let mut q: Vec<(&str, String)> = vec![
@@ -790,9 +825,13 @@ pub fn open_blocking(
 
 /// Record how the mode did: a failure of the mode itself switches it off (the page says why;
 /// Retry switches it on again).
-pub fn record(library: &std::sync::Mutex<pm_library::Library>, r: &Result<Option<FullStream>, FullError>) {
+pub fn record(
+    library: &std::sync::Mutex<pm_library::Library>,
+    who: &Who,
+    r: &Result<Option<FullStream>, FullError>,
+) {
     let Ok(lib) = library.lock() else { return };
-    let mut st = load(&lib);
+    let mut st = load(&lib, who);
     match r {
         Ok(Some(_)) => {
             st.health = Some(Health {
@@ -812,5 +851,5 @@ pub fn record(library: &std::sync::Mutex<pm_library::Library>, r: &Result<Option
         }
         _ => return,
     }
-    save(&lib, &st);
+    save(&lib, who, &st);
 }

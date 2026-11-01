@@ -773,14 +773,24 @@ pub(crate) struct LastfmSignIn;
 
 #[async_trait::async_trait]
 impl crate::signin::SignInSource for LastfmSignIn {
-    fn describe(&self, s: &NodeState, headers: Option<&axum::http::HeaderMap>) -> crate::signin::SignIn {
+    /// The node's one sign-in, the owner's (the scrobbles and the API key are the node's).
+    fn per_person(&self) -> bool {
+        false
+    }
+
+    fn describe(
+        &self,
+        s: &NodeState,
+        _who: &crate::accounts::Who,
+        headers: Option<&axum::http::HeaderMap>,
+    ) -> crate::signin::SignIn {
         use crate::signin::{InUse, SignIn, Way, NOT_SIGNED_IN};
         let (app, sess, chosen) = {
             let lib = s.library.lock().expect("library poisoned");
             (
                 app_of(&lib),
                 session_of(&lib),
-                crate::signin::chosen(&lib, SOURCE_ID),
+                crate::signin::chosen(&lib, &crate::accounts::Who::Owner, SOURCE_ID),
             )
         };
         let scanned = if headers.is_some() {
@@ -882,7 +892,7 @@ impl crate::signin::SignInSource for LastfmSignIn {
         }
     }
 
-    fn sign_out_of(&self, s: &NodeState, _way: &str) -> Result<(), ApiError> {
+    fn sign_out_of(&self, s: &NodeState, _who: &crate::accounts::Who, _way: &str) -> Result<(), ApiError> {
         let lib = s.library.lock().expect("library poisoned");
         save_session(&lib, None);
         set_pending(&lib, &[]);
@@ -892,6 +902,7 @@ impl crate::signin::SignInSource for LastfmSignIn {
     async fn import(
         &self,
         s: &Arc<NodeState>,
+        _who: &crate::accounts::Who,
         body: crate::signin::ImportBody,
     ) -> Result<&'static str, ApiError> {
         let (imp, from, way) = match (body.text.as_deref().map(str::trim), body.id.as_deref()) {

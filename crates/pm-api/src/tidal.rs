@@ -5,6 +5,7 @@
 //! never proxied for other people (handoff §2). Tokens live in the settings
 //! table of the node's own database.
 
+use crate::accounts::Who;
 use crate::state::NodeState;
 use crate::streaming::StreamingService;
 use crate::types::*;
@@ -156,7 +157,7 @@ fn endpoints(s: &NodeState) -> TidalEndpoints {
 
 /// Whether the node can stream TIDAL now: credentials and a user session.
 pub(crate) fn connected(s: &NodeState) -> bool {
-    creds(s).configured() && load_user(s).is_some()
+    creds(s).configured() && load_user(s, &crate::accounts::asking()).is_some()
 }
 
 /// The public client id the node's TIDAL sign-in is made with (`vault_cache`).
@@ -229,8 +230,10 @@ pub(crate) fn redirect_uri(s: &NodeState, headers: &axum::http::HeaderMap) -> St
 // ---- tokens ----
 
 /// Pending sign-ins: OAuth `state` → (PKCE verifier, redirect URI used).
-fn pending() -> &'static Mutex<HashMap<String, (String, String)>> {
-    static P: std::sync::OnceLock<Mutex<HashMap<String, (String, String)>>> = std::sync::OnceLock::new();
+/// Sign-ins in progress: the PKCE state's nonce → (verifier, redirect, who started it).
+#[allow(clippy::type_complexity)]
+fn pending() -> &'static Mutex<HashMap<String, (String, String, Who)>> {
+    static P: std::sync::OnceLock<Mutex<HashMap<String, (String, String, Who)>>> = std::sync::OnceLock::new();
     P.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -334,11 +337,10 @@ async fn app_token(s: &NodeState) -> Result<String, ApiError> {
     Ok(token)
 }
 
-fn load_user_from(lib: &pm_library::Library) -> Option<UserSession> {
-    let mut u: UserSession = lib
-        .get_setting(USER_KEY)
-        .ok()
-        .flatten()
+/// This person's official sign-in.
+fn load_user_from(lib: &pm_library::Library, who: &Who) -> Option<UserSession> {
+    let mut u: UserSession = who
+        .get(lib, USER_KEY)
         .and_then(|j| serde_json::from_str(&j).ok())?;
     // Sessions stored before these fields existed: fill them from the token's claims.
     if u.country.is_none() || u.access_tier.is_none() {
@@ -353,19 +355,17 @@ fn load_user_from(lib: &pm_library::Library) -> Option<UserSession> {
     Some(u)
 }
 
-pub(crate) fn load_user(s: &NodeState) -> Option<UserSession> {
-    load_user_from(&s.library.lock().expect("library poisoned"))
+pub(crate) fn load_user(s: &NodeState, who: &Who) -> Option<UserSession> {
+    load_user_from(&s.library.lock().expect("library poisoned"), who)
 }
 
-fn store_user(s: &NodeState, u: Option<&UserSession>) -> Result<(), ApiError> {
-    let lib = s.library.lock().expect("library poisoned");
-    match u {
-        Some(u) => lib.set_setting(USER_KEY, &serde_json::to_string(u).expect("session serializes"))?,
-        None => {
-            lib.delete_setting(USER_KEY)?;
-        }
-    }
-    Ok(())
+fn store_user(s: &NodeState, who: &Who, u: Option<&UserSession>) -> Result<(), ApiError> {
+    let raw = u.map(|u| serde_json::to_string(u).expect("session serializes"));
+    who.put(
+        &s.library.lock().expect("library poisoned"),
+        USER_KEY,
+        raw.as_deref(),
+    )
 }
 
 /// The claims of the access token (a JWT): `uid`, `cc` (country), `at` (access tier).
@@ -422,18 +422,19 @@ fn session_from(v: &Value, previous: Option<&UserSession>) -> Result<UserSession
     })
 }
 
-/// The signed-in user's access token, refreshed when it is about to expire.
-pub(crate) async fn user_token(s: &NodeState) -> Result<Option<String>, ApiError> {
-    let Some(u) = load_user(s) else {
+/// This person's access token, refreshed when it is about to expire.
+pub(crate) async fn user_token(s: &NodeState, who: &Who) -> Result<Option<String>, ApiError> {
+    let Some(u) = load_user(s, who) else {
         return Ok(None);
     };
     if u.expires_at - now_unix() > 60 {
         return Ok(Some(u.access_token));
     }
     let Some(refresh) = u.refresh_token.clone() else {
-        store_user(s, None)?;
+        store_user(s, who, None)?;
         return Ok(None);
     };
+    let key = who.setting(USER_KEY).expect("a person with a sign-in");
     let c = creds(s);
     let form = [
         ("grant_type", "refresh_token"),
@@ -463,26 +464,26 @@ pub(crate) async fn user_token(s: &NodeState) -> Result<Option<String>, ApiError
     let still =
         |cur: &str| serde_json::from_str::<UserSession>(cur).is_ok_and(|c| c.access_token == u.access_token);
     let raw = serde_json::to_string(&fresh).expect("session serializes");
-    if !crate::vault_cache::store_refreshed(&lib, USER_KEY, still, &raw) {
+    if !crate::vault_cache::store_refreshed(&lib, &key, still, &raw) {
         // Use what is there now, if anything
         return Ok(lib
-            .get_setting(USER_KEY)?
+            .get_setting(&key)?
             .and_then(|v| serde_json::from_str::<UserSession>(&v).ok())
             .map(|c| c.access_token));
     }
     Ok(Some(fresh.access_token))
 }
 
-/// User token when signed in, else the app token.
+/// The asking person's token when they are signed in, else the app's (never someone else's).
 async fn bearer(s: &NodeState) -> Result<String, ApiError> {
-    match user_token(s).await? {
+    match user_token(s, &crate::accounts::asking()).await? {
         Some(t) => Ok(t),
         None => app_token(s).await,
     }
 }
 
 fn country(s: &NodeState) -> String {
-    load_user(s)
+    load_user(s, &crate::accounts::asking())
         .and_then(|u| u.country)
         .unwrap_or_else(|| "US".to_string())
 }
@@ -692,7 +693,7 @@ impl StreamingService for Tidal {
     fn unified(&self, s: &NodeState) -> bool {
         // Without the app's secret, TIDAL's catalogue answers a signed-in user only
         let c = creds(s);
-        c.configured() && (c.has_secret() || load_user(s).is_some())
+        c.configured() && (c.has_secret() || load_user(s, &crate::accounts::asking()).is_some())
     }
 
     fn features(&self) -> &'static [&'static str] {
@@ -702,7 +703,8 @@ impl StreamingService for Tidal {
     fn info(&self, s: &NodeState) -> SourceInfo {
         // Either sign-in counts: the device way (or a sign-in imported from another app) plays
         // full tracks on its own, even on a build without the project's app
-        let status = if load_user(s).is_some() || crate::tidal_unofficial::streams(s) {
+        let who = crate::accounts::asking();
+        let status = if load_user(s, &who).is_some() || crate::tidal_unofficial::streams(s, &who) {
             "ready".to_string()
         } else if !creds(s).configured() {
             "not configured: this build has no built-in TIDAL app; add one in Settings › This node › Service apps".to_string()
@@ -1037,8 +1039,13 @@ pub(crate) fn random_urlsafe(bytes: usize) -> String {
 /// `GET /v1/sources/tidal/login`: the URL to open in a browser.
 pub(crate) async fn login(
     State(s): State<Arc<NodeState>>,
+    axum::Extension(caller): axum::Extension<crate::accounts::Caller>,
     headers: axum::http::HeaderMap,
 ) -> ApiResult<LoginUrl> {
+    let who = Who::of(&caller);
+    if who == Who::Nobody {
+        return Err(ApiError::new(StatusCode::FORBIDDEN, "sign in to the node first"));
+    }
     let c = creds(&s);
     if !c.configured() {
         return Err(ApiError::new(
@@ -1063,7 +1070,7 @@ pub(crate) async fn login(
     pending()
         .lock()
         .expect("pending")
-        .insert(nonce, (verifier, redirect.clone()));
+        .insert(nonce, (verifier, redirect.clone(), who));
     let mut url = url::Url::parse(&format!("{}/authorize", login_base(&s))).map_err(upstream)?;
     url.query_pairs_mut()
         .append_pair("response_type", "code")
@@ -1113,12 +1120,13 @@ pub(crate) fn callback_from_url(url: &str) -> Result<CallbackQuery, ApiError> {
 /// its parameters as if the browser had arrived there.
 pub(crate) async fn pasted_callback(
     State(s): State<Arc<NodeState>>,
+    axum::Extension(caller): axum::Extension<crate::accounts::Caller>,
     headers: axum::http::HeaderMap,
     Json(body): Json<PastedCallback>,
 ) -> ApiResult<TidalStatus> {
     let q = callback_from_url(&body.url)?;
     finish_login(&s, q).await?;
-    Ok(Json(status_view(&s, &headers)))
+    Ok(Json(status_view(&s, &Who::of(&caller), &headers)))
 }
 
 /// `GET /tidal/callback?code&state`: finish the sign-in, then back to the web UI.
@@ -1166,7 +1174,8 @@ async fn finish_login(s: &NodeState, q: CallbackQuery) -> Result<(), ApiError> {
     let (Some(code), Some(state)) = (q.code, q.state) else {
         return Err(ApiError::bad_request("missing code or state"));
     };
-    let (verifier, redirect) = pending()
+    // Kept for whoever started this sign-in (the callback itself comes without a node token)
+    let (verifier, redirect, who) = pending()
         .lock()
         .expect("pending")
         .remove(crate::project_apps::state_nonce(&state))
@@ -1218,20 +1227,24 @@ async fn finish_login(s: &NodeState, q: CallbackQuery) -> Result<(), ApiError> {
         }
     }
     {
-        // Stored and marked new under one guard: no vault pass sees one without the other
+        // Stored and marked new under one guard: no vault pass sees one without the other (the
+        // vault is the owner's)
         let lib = s.library.lock().expect("library poisoned");
-        lib.set_setting(
+        who.put(
+            &lib,
             USER_KEY,
-            &serde_json::to_string(&session).expect("session serializes"),
+            Some(&serde_json::to_string(&session).expect("session serializes")),
         )?;
-        crate::vault_cache::new_sign_in(&lib, "tidal");
+        if who.is_owner() {
+            crate::vault_cache::new_sign_in(&lib, "tidal");
+        }
     }
     tracing::info!(user = ?session.user_id, "TIDAL sign-in stored");
     Ok(())
 }
 
-pub(crate) fn status_view(s: &NodeState, headers: &axum::http::HeaderMap) -> TidalStatus {
-    let u = load_user(s);
+pub(crate) fn status_view(s: &NodeState, who: &Who, headers: &axum::http::HeaderMap) -> TidalStatus {
+    let u = load_user(s, who);
     // Read the settings first, one lock at a time (two locks in one expression deadlock)
     let (playback_limit, public_client) = {
         let lib = s.library.lock().expect("library poisoned");
@@ -1261,24 +1274,27 @@ pub(crate) fn status_view(s: &NodeState, headers: &axum::http::HeaderMap) -> Tid
 /// `GET /v1/sources/tidal/status`.
 pub(crate) async fn status(
     State(s): State<Arc<NodeState>>,
+    axum::Extension(caller): axum::Extension<crate::accounts::Caller>,
     headers: axum::http::HeaderMap,
 ) -> ApiResult<TidalStatus> {
-    Ok(Json(status_view(&s, &headers)))
+    Ok(Json(status_view(&s, &Who::of(&caller), &headers)))
 }
 
-/// `DELETE /v1/sources/tidal/session`: forget the user's tokens.
+/// `DELETE /v1/sources/tidal/session`: forget the caller's tokens.
 pub(crate) async fn logout(
     State(s): State<Arc<NodeState>>,
+    axum::Extension(caller): axum::Extension<crate::accounts::Caller>,
     headers: axum::http::HeaderMap,
 ) -> ApiResult<TidalStatus> {
-    store_user(&s, None)?;
-    Ok(Json(status_view(&s, &headers)))
+    let who = Who::of(&caller);
+    store_user(&s, &who, None)?;
+    Ok(Json(status_view(&s, &who, &headers)))
 }
 
-/// The node's TIDAL app changed (Settings › Service apps): the sign-in and the app's own token
-/// belonged to the old one.
+/// The node's TIDAL app changed (Settings › Service apps): everyone's sign-in with it and the
+/// app's own token belonged to the old one.
 pub(crate) fn app_changed(s: &NodeState) -> Result<(), ApiError> {
-    store_user(s, None)?;
+    crate::accounts::forget_everyones(&s.library.lock().expect("library poisoned"), USER_KEY)?;
     *app_token_cache().lock().expect("app token") = None;
     Ok(())
 }
@@ -1303,24 +1319,29 @@ fn app_label(c: &TidalCredentials) -> &'static str {
 /// The ways to sign in to TIDAL, which one is in use, and the overview line. The two sessions
 /// (the official app's and the device client's) can both exist: the device one plays full
 /// tracks, the official one serves the collection and playlist imports.
-pub(crate) fn sign_in(s: &NodeState, headers: Option<&axum::http::HeaderMap>) -> crate::signin::SignIn {
+pub(crate) fn sign_in(
+    s: &NodeState,
+    who: &Who,
+    headers: Option<&axum::http::HeaderMap>,
+) -> crate::signin::SignIn {
     use crate::signin::{InUse, SignIn, Way, NOT_SIGNED_IN};
     let c = creds(s);
     // One lock, every read at once (two locks in one expression deadlock)
     let (user, mode, device_client, chosen, playback_limit) = {
         let lib = s.library.lock().expect("library poisoned");
         (
-            load_user_from(&lib),
-            crate::tidal_unofficial::load(&lib),
+            load_user_from(&lib, who),
+            crate::tidal_unofficial::load(&lib, who),
             crate::tidal_unofficial::client_of(&lib),
-            crate::signin::chosen(&lib, SOURCE_ID),
+            crate::signin::chosen(&lib, who, SOURCE_ID),
             lib.get_setting(PLAYBACK_LIMIT_KEY).ok().flatten(),
         )
     };
     let app = app_label(&c);
     let device_label = "Your own device client";
-    // Other apps' files are looked at for the tab, not for the overview line
-    let found = if headers.is_some() {
+    // Other apps' files are looked at for the tab, not for the overview line, and only for the
+    // owner: they are on the owner's machine
+    let found = if headers.is_some() && who.is_owner() {
         crate::imports::scan_tidal()
     } else {
         Vec::new()
@@ -1373,7 +1394,9 @@ pub(crate) fn sign_in(s: &NodeState, headers: Option<&axum::http::HeaderMap>) ->
             recommended: false,
             available: !usable.is_empty(),
             reason: usable.is_empty().then(|| {
-                if found.is_empty() {
+                if !who.is_owner() {
+                    "The sign-ins on the node's machine are the owner's; paste your own instead.".to_string()
+                } else if found.is_empty() {
                     "Nothing found in the known places; pick the file or paste it instead.".to_string()
                 } else {
                     "What was found is not usable; pick a newer file or paste one instead.".to_string()
@@ -1392,8 +1415,10 @@ pub(crate) fn sign_in(s: &NodeState, headers: Option<&axum::http::HeaderMap>) ->
             },
             action: "code".into(),
             recommended: false,
-            available: true,
-            reason: None,
+            // The device client is the node's: a listener signs in once the owner has added one
+            available: device_client.is_some() || who.is_owner(),
+            reason: (device_client.is_none() && !who.is_owner())
+                .then(|| "The node's owner hasn't added a TIDAL device client yet.".to_string()),
         },
         Way {
             id: WAY_PASTE.into(),
@@ -1465,8 +1490,8 @@ pub(crate) fn sign_in(s: &NodeState, headers: Option<&axum::http::HeaderMap>) ->
     };
     let details = match headers {
         Some(h) => serde_json::json!({
-            "status": status_view(s, h),
-            "unofficial": crate::tidal_unofficial::view(s),
+            "status": status_view(s, who, h),
+            "unofficial": crate::tidal_unofficial::view(s, who),
         }),
         None => serde_json::Value::Null,
     };
@@ -1489,8 +1514,8 @@ pub(crate) fn sign_in(s: &NodeState, headers: Option<&axum::http::HeaderMap>) ->
 /// A sign-in from another app's file or a paste becomes the device-way session: full tracks,
 /// kept like the node's own (`tidal.unofficial`, sealed in backups), renewed by the node where
 /// the refresh token came from the client this build carries.
-pub(crate) fn import_sign_in(s: &NodeState, session: crate::tidal_unofficial::Session) {
-    crate::tidal_unofficial::update_signed_in(s, "tidal-full", |st| {
+pub(crate) fn import_sign_in(s: &NodeState, who: &Who, session: crate::tidal_unofficial::Session) {
+    crate::tidal_unofficial::update_signed_in(s, who, "tidal-full", |st| {
         st.session = Some(session);
         st.login = None;
         st.enabled = true;
@@ -1501,16 +1526,16 @@ pub(crate) fn import_sign_in(s: &NodeState, session: crate::tidal_unofficial::Se
 /// A way was picked. The device way is what the Full tracks switch used to turn on; the app way
 /// turns it off again (its session is kept until Sign out). Setting up your own client changes
 /// nothing yet.
-pub(crate) fn way_chosen(s: &NodeState, way: &str) {
+pub(crate) fn way_chosen(s: &NodeState, who: &Who, way: &str) {
     match way {
         WAY_DEVICE | WAY_IMPORT | WAY_PASTE => {
-            crate::tidal_unofficial::update(s, |st| {
+            crate::tidal_unofficial::update(s, who, |st| {
                 st.enabled = true;
                 st.health = None;
             });
         }
         WAY_APP => {
-            crate::tidal_unofficial::update(s, |st| st.enabled = false);
+            crate::tidal_unofficial::update(s, who, |st| st.enabled = false);
         }
         _ => {}
     }
@@ -1521,21 +1546,27 @@ pub(crate) struct TidalSignIn;
 
 #[async_trait::async_trait]
 impl crate::signin::SignInSource for TidalSignIn {
-    fn describe(&self, s: &NodeState, headers: Option<&axum::http::HeaderMap>) -> crate::signin::SignIn {
-        sign_in(s, headers)
+    fn describe(
+        &self,
+        s: &NodeState,
+        who: &Who,
+        headers: Option<&axum::http::HeaderMap>,
+    ) -> crate::signin::SignIn {
+        sign_in(s, who, headers)
     }
 
-    fn way_chosen(&self, s: &Arc<NodeState>, way: &str) {
-        way_chosen(s, way);
+    fn way_chosen(&self, s: &Arc<NodeState>, who: &Who, way: &str) {
+        way_chosen(s, who, way);
     }
 
-    fn sign_out_of(&self, s: &NodeState, way: &str) -> Result<(), ApiError> {
-        sign_out_of(s, way)
+    fn sign_out_of(&self, s: &NodeState, who: &Who, way: &str) -> Result<(), ApiError> {
+        sign_out_of(s, who, way)
     }
 
     async fn import(
         &self,
         s: &Arc<NodeState>,
+        who: &Who,
         body: crate::signin::ImportBody,
     ) -> Result<&'static str, ApiError> {
         let (imp, way) = match (body.text.as_deref().map(str::trim), body.id.as_deref()) {
@@ -1564,22 +1595,22 @@ impl crate::signin::SignInSource for TidalSignIn {
                 ))
             }
         };
-        import_sign_in(s, imp.session);
+        import_sign_in(s, who, imp.session);
         Ok(way)
     }
 }
 
 /// Sign out of one way: the device way also goes off, so TIDAL falls back to the official app.
-pub(crate) fn sign_out_of(s: &NodeState, way: &str) -> Result<(), ApiError> {
+pub(crate) fn sign_out_of(s: &NodeState, who: &Who, way: &str) -> Result<(), ApiError> {
     if way != WAY_APP {
-        crate::tidal_unofficial::update(s, |st| {
+        crate::tidal_unofficial::update(s, who, |st| {
             st.session = None;
             st.login = None;
             st.enabled = false;
         });
         Ok(())
     } else {
-        store_user(s, None)
+        store_user(s, who, None)
     }
 }
 
@@ -1620,7 +1651,7 @@ pub struct ImportReport {
 }
 
 fn signed_in_user(s: &NodeState) -> Result<UserSession, ApiError> {
-    load_user(s).ok_or_else(|| {
+    load_user(s, &crate::accounts::asking()).ok_or_else(|| {
         ApiError::new(
             StatusCode::PRECONDITION_FAILED,
             "sign in to TIDAL on the Sources page first",
@@ -2216,31 +2247,36 @@ const STREAM_MAX_BYTES: usize = 300 * 1024 * 1024;
 /// (sign-in, previews, DRM refused).
 pub(crate) async fn stream(
     State(s): State<Arc<NodeState>>,
+    axum::Extension(caller): axum::Extension<crate::accounts::Caller>,
     axum::extract::Path(id): axum::extract::Path<String>,
     headers: axum::http::HeaderMap,
 ) -> Result<Response, ApiError> {
     if id.is_empty() || !id.bytes().all(|b| b.is_ascii_alphanumeric()) {
         return Err(ApiError::bad_request("bad TIDAL track id"));
     }
+    // With the caller's own account; what one person fetched is never served to another
+    let who = Who::of(&caller);
+    let key = format!("{}/{id}", who.by().unwrap_or_else(|| "owner".into()));
     let cached = {
         let mut c = stream_cache().lock().expect("stream cache");
         c.retain(|(_, at, _, _)| at.elapsed() < STREAM_CACHE_TTL);
         c.iter()
-            .find(|(k, _, _, _)| *k == id)
+            .find(|(k, _, _, _)| *k == key)
             .map(|(_, _, b, mime)| (b.clone(), mime.clone()))
     };
     // Full tracks (unofficial) first when switched on; any trouble falls back to the official
     // stream (a preview), as on the node
     let full = if cached.is_none()
-        && crate::tidal_unofficial::load(&s.library.lock().expect("library poisoned")).enabled
+        && crate::tidal_unofficial::load(&s.library.lock().expect("library poisoned"), &who).enabled
     {
         let s2 = s.clone();
         let id2 = id.clone();
+        let who2 = who.clone();
         tokio::task::spawn_blocking(move || -> Option<(Vec<u8>, String)> {
             use std::io::Read;
             let ep = endpoints(&s2);
-            let r = crate::tidal_unofficial::open_blocking(&s2.library, &ep, &id2);
-            crate::tidal_unofficial::record(&s2.library, &r);
+            let r = crate::tidal_unofficial::open_blocking(&s2.library, &ep, &id2, &who2);
+            crate::tidal_unofficial::record(&s2.library, &who2, &r);
             let mut f = match r {
                 Ok(Some(f)) => f,
                 Ok(None) => return None,
@@ -2268,21 +2304,23 @@ pub(crate) async fn stream(
         (None, Some((b, mime))) => {
             let bytes = Arc::new(b);
             let mut c = stream_cache().lock().expect("stream cache");
-            c.retain(|(k, _, _, _)| *k != id);
+            c.retain(|(k, _, _, _)| *k != key);
             if c.len() >= STREAM_CACHE_ENTRIES {
                 c.remove(0);
             }
-            c.push((id.clone(), std::time::Instant::now(), bytes.clone(), mime.clone()));
+            c.push((
+                key.clone(),
+                std::time::Instant::now(),
+                bytes.clone(),
+                mime.clone(),
+            ));
             tracing::info!(track = %id, bytes = bytes.len(), "TIDAL full track fetched for a browser (unofficial)");
             (bytes, mime)
         }
         (None, None) => {
-            let token = user_token(&s).await?.ok_or_else(|| {
-                ApiError::new(
-                    StatusCode::PRECONDITION_FAILED,
-                    "sign in to TIDAL on the Sources page first",
-                )
-            })?;
+            let token = user_token(&s, &who)
+                .await?
+                .ok_or_else(|| ApiError::new(StatusCode::PRECONDITION_FAILED, not_connected(&who)))?;
             let api = api_base(&s);
             let v: Value = s
                 .http_client()
@@ -2336,11 +2374,16 @@ pub(crate) async fn stream(
             .map_err(upstream)?;
             let bytes = Arc::new(bytes);
             let mut c = stream_cache().lock().expect("stream cache");
-            c.retain(|(k, _, _, _)| *k != id);
+            c.retain(|(k, _, _, _)| *k != key);
             if c.len() >= STREAM_CACHE_ENTRIES {
                 c.remove(0);
             }
-            c.push((id.clone(), std::time::Instant::now(), bytes.clone(), mime.clone()));
+            c.push((
+                key.clone(),
+                std::time::Instant::now(),
+                bytes.clone(),
+                mime.clone(),
+            ));
             tracing::info!(track = %id, bytes = bytes.len(), presentation = %m.presentation, "TIDAL stream fetched for a browser");
             (bytes, mime)
         }
@@ -2390,16 +2433,26 @@ pub(crate) fn parse_manifest(v: &Value) -> Result<ManifestInfo, String> {
     })
 }
 
-/// A valid user access token for the audio thread: the stored one, or a
-/// blocking refresh when it is about to expire.
+/// Why a track can't play for this person: they have no TIDAL sign-in of their own.
+pub(crate) fn not_connected(who: &Who) -> String {
+    match who {
+        Who::Owner => "TIDAL: sign in on the Sources page first".into(),
+        Who::Listener(_) => "Connect TIDAL (Settings › You › Services) to play this".into(),
+        Who::Nobody => "TIDAL plays with the account of whoever queued it, and this has none".into(),
+    }
+}
+
+/// A valid access token of `who`'s for the audio thread: the stored one, or a blocking refresh
+/// when it is about to expire.
 fn user_token_blocking(
     library: &std::sync::Mutex<pm_library::Library>,
     ep: &TidalEndpoints,
     client: &reqwest::blocking::Client,
+    who: &Who,
 ) -> Result<String, String> {
     let u = {
         let lib = library.lock().map_err(|_| "library poisoned")?;
-        load_user_from(&lib).ok_or("TIDAL: sign in on the Sources page first")?
+        load_user_from(&lib, who).ok_or_else(|| not_connected(who))?
     };
     if u.expires_at - now_unix() > 60 {
         return Ok(u.access_token);
@@ -2425,11 +2478,12 @@ fn user_token_blocking(
         .map_err(|e| e.to_string())?;
     let fresh = session_from(&v, Some(&u)).map_err(|e| e.message)?;
     let lib = library.lock().map_err(|_| "library poisoned")?;
-    lib.set_setting(
+    who.put(
+        &lib,
         USER_KEY,
-        &serde_json::to_string(&fresh).expect("session serializes"),
+        Some(&serde_json::to_string(&fresh).expect("session serializes")),
     )
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| e.message)?;
     Ok(fresh.access_token)
 }
 
@@ -2439,6 +2493,7 @@ pub(crate) fn open_track_blocking(
     library: &std::sync::Mutex<pm_library::Library>,
     endpoints: &SharedEndpoints,
     id: &str,
+    who: &Who,
 ) -> Result<Box<dyn pm_zones::FrameSource>, pm_zones::SourceError> {
     let uri = format!("{TRACK_URI_PREFIX}{id}");
     let err = |reason: String| pm_zones::SourceError::Open {
@@ -2454,8 +2509,8 @@ pub(crate) fn open_track_blocking(
         .clone();
     // Full tracks (unofficial) first when the owner switched it on; any trouble falls back to the
     // official path (a preview) and is noted
-    let full = crate::tidal_unofficial::open_blocking(library, &ep, id);
-    crate::tidal_unofficial::record(library, &full);
+    let full = crate::tidal_unofficial::open_blocking(library, &ep, id, who);
+    crate::tidal_unofficial::record(library, who, &full);
     match full {
         Ok(Some(f)) => {
             tracing::info!(track = id, "TIDAL full track (unofficial)");
@@ -2474,7 +2529,7 @@ pub(crate) fn open_track_blocking(
         return Err(err("TIDAL is not configured on this node".into()));
     }
     let client = crate::sources::http_client();
-    let token = user_token_blocking(library, &ep, client).map_err(err)?;
+    let token = user_token_blocking(library, &ep, client, who).map_err(err)?;
     let v: Value = client
         .get(format!(
             "{}/trackManifests/{id}",
