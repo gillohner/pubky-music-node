@@ -477,11 +477,28 @@ impl Engine {
         self.ensure_sink(fmt, false)
     }
 
-    /// The sink's fixed-size stream is full (its track ran longer than it said): play it out and
-    /// go on on a fresh one from here. False when that could not open (the zone stopped).
+    /// Before writing `block`: a sink whose fixed-size stream can't take it (its track ran longer
+    /// than it said, a resampler's tail, a crossfade's rest) is played out and a fresh one opened
+    /// in its place, so nothing written is cut off at the stream's end. False when that could not
+    /// open (the zone stopped).
+    fn make_room(&mut self, block: &AudioBlock) -> bool {
+        let full = self
+            .sink
+            .as_ref()
+            .is_some_and(|s| s.room_frames().is_some_and(|r| r < block.frames() as u64));
+        !full || self.renew_full_sink(block.format)
+    }
+
+    /// The sink's fixed-size stream is full: play it out and go on on a fresh one from here. The
+    /// current track goes on from what was written (the source is not rewound), not from what
+    /// a device still holds. False when that could not open (the zone stopped).
     fn renew_full_sink(&mut self, fmt: AudioFormat) -> bool {
         tracing::info!(zone = %self.id, "the output's stream is full; going on on a fresh one");
-        let at = self.position_ms();
+        let written = self.sink.as_ref().map(|s| s.frames_written()).unwrap_or(0);
+        let at = self
+            .current
+            .as_ref()
+            .map(|c| c.base_ms + frames_to_ms(c.proc.output_format(), written.saturating_sub(c.start_frame)));
         if let Some(mut s) = self.sink.take() {
             if let Err(e) = s.drain() {
                 tracing::warn!(zone = %self.id, "closing a full sink: {e}");
@@ -491,7 +508,7 @@ impl Engine {
             return false;
         }
         let written = self.sink.as_ref().map(|s| s.frames_written()).unwrap_or(0);
-        if let Some(c) = self.current.as_mut() {
+        if let (Some(c), Some(at)) = (self.current.as_mut(), at) {
             c.base_ms = at;
             c.start_frame = written;
         }
@@ -702,12 +719,7 @@ impl Engine {
                     out
                 };
                 if !out.is_empty() {
-                    if self
-                        .sink
-                        .as_ref()
-                        .is_some_and(|s| s.room_frames().is_some_and(|r| r < out.frames() as u64))
-                        && !self.renew_full_sink(out.format)
-                    {
+                    if !self.make_room(&out) {
                         return;
                     }
                     let Some(sink) = self.sink.as_mut() else {
@@ -772,6 +784,9 @@ impl Engine {
                 } else {
                     tail
                 };
+                if !self.make_room(&tail) {
+                    return;
+                }
                 if let Some(sink) = self.sink.as_mut() {
                     if let Err(e) = sink.write(&tail) {
                         tracing::warn!(zone = %self.id, "writing tail: {e}");
@@ -963,10 +978,13 @@ impl Engine {
         };
         let fmt = inc.proc.output_format();
         let ch = u64::from(fmt.channels.max(1));
-        let start_frame = self.sink.as_ref().map(|s| s.frames_written()).unwrap_or(0);
         let waiting = inc.buf.len() as u64 / ch;
-        if waiting > 0 {
-            let rest = AudioBlock::pcm_i32(fmt, inc.buf.into_iter().collect());
+        let rest = (waiting > 0).then(|| AudioBlock::pcm_i32(fmt, inc.buf.into_iter().collect()));
+        if rest.as_ref().is_some_and(|r| !self.make_room(r)) {
+            return;
+        }
+        let start_frame = self.sink.as_ref().map(|s| s.frames_written()).unwrap_or(0);
+        if let Some(rest) = rest {
             if let Some(sink) = self.sink.as_mut() {
                 if let Err(e) = sink.write(&rest) {
                     return self.fail(format!("write to {}: {e}", self.output.id()));

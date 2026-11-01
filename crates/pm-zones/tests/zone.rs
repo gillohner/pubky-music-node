@@ -236,6 +236,12 @@ impl AudioSink for RecSink {
     }
     fn write(&mut self, block: &AudioBlock) -> Result<(), SinkError> {
         pm_zones::sink::check_block(self.fmt, block)?;
+        // A stream of fixed size takes nothing past its end (the HTTP answer would cut it off)
+        if let Some(room) = *self.rec.room.lock().unwrap() {
+            if self.written + block.frames() as u64 > room {
+                return Err(SinkError::Device("past the end of its stream".into()));
+            }
+        }
         if let pm_model::Samples::PcmI32(s) = &block.samples {
             self.rec.samples.lock().unwrap().extend_from_slice(s);
         }
@@ -786,6 +792,36 @@ async fn crossfade_mixes_the_next_track_over_the_end() {
         ["start:a:false", "end:a", "start:b:false", "end:b", "stopped"]
     );
     assert_eq!(*r.rec.opens.lock().unwrap(), 1, "one sink throughout");
+}
+
+/// A crossfade whose end doesn't fit what is left of a sized stream: the mix and the incoming
+/// track's buffered rest go on on a fresh stream, nothing written past the end and nothing lost.
+#[tokio::test]
+async fn a_crossfade_into_a_full_sized_stream_loses_nothing() {
+    let reference = {
+        let r = rig(&[("a", RATE, 1050), ("b", RATE, 1000)]);
+        r.gate.allow(1000);
+        r.zone.set_crossfade_ms(30);
+        r.zone
+            .enqueue(vec![QueueItem::new("a"), QueueItem::new("b")], Insert::End);
+        r.zone.play();
+        r.zone.wait_stopped().await;
+        let got = r.rec.samples.lock().unwrap().clone();
+        got
+    };
+    for room in [650, 1050, 1350] {
+        let r = rig(&[("a", RATE, 1050), ("b", RATE, 1000)]);
+        *r.rec.room.lock().unwrap() = Some(room);
+        r.gate.allow(1000);
+        r.zone.set_crossfade_ms(30);
+        r.zone
+            .enqueue(vec![QueueItem::new("a"), QueueItem::new("b")], Insert::End);
+        r.zone.play();
+        let st = r.zone.wait_stopped().await;
+        assert_eq!(st.error, None, "room {room}");
+        assert!(*r.rec.opens.lock().unwrap() >= 2, "room {room}: a fresh stream");
+        assert_eq!(*r.rec.samples.lock().unwrap(), reference, "room {room}");
+    }
 }
 
 #[tokio::test]
