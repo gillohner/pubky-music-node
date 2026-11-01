@@ -1002,6 +1002,28 @@ code.path { font-size: 13px; overflow-wrap: anywhere; }
 .way-action { margin-top: 10px; min-width: 0; }
 .way-action .toolbar { flex-wrap: wrap; }
 .way-action .toolbar .input { flex: 1 1 220px; min-width: 0; width: auto; }
+.way-more { color: var(--fg-2); margin-top: 2px; }
+/* People › Invite someone: the key field with Paste and Scan QR; its error under it */
+.invite-fields { margin-top: 12px; }
+.invite-fields .input { flex: 1 1 200px; min-width: 0; width: auto; }
+.keyfield { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.keyfield .input { flex: 1 1 180px; min-width: 0; width: auto; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.field-err { color: var(--bad); margin: 6px 0 0; }
+.invite-go { margin-top: 14px; }
+.scan-dialog { width: min(460px, calc(100vw - 32px)); }
+.scan-video { display: block; width: 100%; max-width: 420px; aspect-ratio: 1; object-fit: cover; border-radius: var(--radius-sm); background: #000; margin: 8px 0; }
+/* Settings sections that fold on phones (People): the heading is the toggle */
+.set-fold { margin-bottom: 0; border-bottom: 1px solid var(--line); }
+.set-fold[open] { padding-bottom: 16px; margin-bottom: 8px; }
+.set-fold > summary { cursor: pointer; list-style: none; display: flex; align-items: center; justify-content: space-between; min-height: 48px; margin: 0; color: var(--fg-2); }
+.set-fold > summary::-webkit-details-marker { display: none; }
+.set-fold > summary::after { content: ''; width: 8px; height: 8px; margin-right: 6px; border-right: 2px solid var(--muted); border-bottom: 2px solid var(--muted); transform: rotate(45deg); transition: transform 0.15s; }
+.set-fold[open] > summary::after { transform: rotate(225deg); }
+.set-fold:not([open]) > .set-rows { display: none; }
+/* Tag chips: 40 px to touch on phones and tablets (UX sweep 2026-11-01 S4) */
+html[data-shell="phone"] .tag-chip, html[data-shell="tablet"] .tag-chip, html[data-shell="phone"] .chip.tag, html[data-shell="tablet"] .chip.tag { min-height: 40px; }
+html[data-shell="phone"] .chip.tag .chiplink, html[data-shell="tablet"] .chip.tag .chiplink { align-self: stretch; display: inline-flex; align-items: center; }
+.tag-hint { margin: 8px 0 0; }
 .switch { appearance: none; -webkit-appearance: none; position: relative; width: 34px; height: 20px; flex: none; margin: 0 4px; border-radius: 999px; background: var(--surface-3); box-shadow: inset 0 0 0 1px var(--line); cursor: pointer; transition: background 0.15s; }
 .switch::after { content: ''; position: absolute; top: 3px; left: 3px; width: 14px; height: 14px; border-radius: 50%; background: var(--fg-2); transition: transform 0.15s, background 0.15s; }
 .switch:checked { background: var(--accent); box-shadow: none; }
