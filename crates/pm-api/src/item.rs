@@ -750,7 +750,8 @@ async fn extras(s: &Arc<NodeState>, pg: &mut ItemPage) -> Option<InCollections> 
         d.pinakes().search(&q).await.ok()
     };
     // The owner's own collections come first (Pinakes sorts by the viewer) and are marked
-    let viewer = s.sync_handle().map(|h| h.z32().to_string());
+    // The session's key is `pubky<z32>`; authors and Pinakes's `viewer` are the bare key
+    let viewer = s.sync_handle().map(|h| crate::sync::raw_key(h.z32()).to_string());
     let collections = async {
         if !wants_collections {
             return None;
@@ -777,19 +778,16 @@ async fn extras(s: &Arc<NodeState>, pg: &mut ItemPage) -> Option<InCollections> 
     let mut collections = collections.ok().flatten()?;
     // The names, from the authors' homeservers, in a budget of their own: the list is already in
     // hand, so a slow stranger's homeserver costs its name, not the row
-    let names = tokio::time::timeout(
-        budget,
-        futures_util::future::join_all(
-            collections
-                .items
-                .iter()
-                .map(|c| crate::shared::collection_name(s, &c.author, &c.id)),
-        ),
+    // (each name in its own time, so one slow homeserver doesn't cost the others' names)
+    let names = futures_util::future::join_all(
+        collections
+            .items
+            .iter()
+            .map(|c| tokio::time::timeout(budget, crate::shared::collection_name(s, &c.author, &c.id))),
     )
-    .await
-    .unwrap_or_default();
+    .await;
     for (c, name) in collections.items.iter_mut().zip(names) {
-        c.name = name;
+        c.name = name.ok().flatten();
     }
     Some(collections)
 }
@@ -1588,7 +1586,10 @@ mod in_collections_tests {
             total: Some(5),
             next_cursor: None,
         };
-        let ic = in_collections(&page, Some(A));
+        // The node's own key comes as `pubky<z32>` from the session: the bare key is compared
+        let session_key = format!("pubky{A}");
+        assert_eq!(crate::sync::raw_key(&session_key), A);
+        let ic = in_collections(&page, Some(crate::sync::raw_key(&session_key)));
         assert_eq!(ic.count, 4, "five in all, one line the node can't open");
         assert_eq!(ic.items.len(), 2);
         assert!(ic.items[0].mine && ic.items[0].author == A && ic.items[0].id == "0035WKVKQDHSM");
