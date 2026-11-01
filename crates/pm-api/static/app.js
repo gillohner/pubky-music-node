@@ -759,10 +759,12 @@
         if (kind === 'artists') lists.artists = await api('GET', '/library/artists');
         else {
           // The node gives at most 1 000 albums an answer: page on with `after`, the list growing
+          // A list left part way (another choice, or a failed page) is dropped, so the next look
+          // loads it whole
           let after = null; lists.albums = [];
           for (;;) {
-            const page = await api('GET', `/library/albums?limit=1000${after != null ? `&after=${after}` : ''}`);
-            if (gen !== loadGen) return;
+            let page; try { page = await api('GET', `/library/albums?limit=1000${after != null ? `&after=${after}` : ''}`); } catch (e) { lists.albums = null; throw e; }
+            if (gen !== loadGen) { lists.albums = null; return; }
             lists.albums = lists.albums.concat(page); pickList(kind);
             if (page.length < 1000 || !page.length) break;
             after = page[page.length - 1].id;
@@ -805,7 +807,8 @@
       if (pick.mode === 'preset') return preset;
       if (pick.mode === 'all') return { all: true };
       if (pick.mode === 'album') return pick.album ? { album_id: pick.album.id } : null;
-      if (pick.mode === 'artist') { if (!pick.artist) return null; if (!pick.artist.track_ids) { const r = await api('GET', `/library/artists/${pick.artist.id}/tracks`); pick.artist.track_ids = (r.tracks || []).map((x) => x.id); } return pick.artist.track_ids.length ? { track_ids: pick.artist.track_ids } : null; }
+      // The artist chosen when asked: a slow answer belongs to it, whatever is chosen meanwhile
+      if (pick.mode === 'artist') { const a = pick.artist; if (!a) return null; if (!a.track_ids) { const r = await api('GET', `/library/artists/${a.id}/tracks`); a.track_ids = (r.tracks || []).map((x) => x.id); } return a.track_ids.length ? { track_ids: a.track_ids } : null; }
       const paths = [...t.sel].filter(([, v]) => v).map(([q]) => q);
       return paths.length ? { paths } : null;
     };
@@ -940,13 +943,13 @@
     if (!go) return;
     let job; try { job = await api('POST', '/pubky/files/mirror', go.text && go.text !== plan.dest ? { dest: go.text } : {}); } catch (e) { return toast(e.message, 'error'); }
     if (job.finished) return toast(`Nothing to bring: ${countOf(job.skipped, 'files')} already here.`);
-    watchJob(job.id);
+    jobs.bringing.add(job.id); watchJob(job.id);
   };
   // A running files job (copy or bring) is a compact chip in the player bar; tapping it shows the
   // details with Pause, Cancel and the errors. It follows the node's `jobs` events, and asks
   // `/pubky/files/jobs` every 2 s while a job runs and no event came (a node before the events).
   // After a reload or a restart the chip finds the job, or the last one's summary, by itself.
-  const jobs = { cur: null, queued: [], last: null, eventAt: 0, timer: null, showErrors: false, watch: null, hideAt: null };
+  const jobs = { cur: null, queued: [], last: null, eventAt: 0, timer: null, showErrors: false, watch: null, hideAt: null, lookFails: 0, bringing: new Set() };
   const fjob = { get p() { return jobs.cur || jobs.last; } };
   const jobDone = (p) => !!(p && (p.finished || ['finished', 'cancelled', 'failed'].includes(p.state)));
   // A job that ended before its last file: cancelled, or stopped by the node (`stopped_reason`:
@@ -1032,9 +1035,15 @@
     // one that finished before the first look): its own answer is the result
     if (!jobs.cur && jobs.watch && !(jobs.last && jobs.last.id === jobs.watch)) {
       const id = jobs.watch; jobs.watch = null;
-      try { const p = await api('GET', `/pubky/files/jobs/${id}`); if (p && p.id) { jobs.last = p; if (p.kind === 'bring' && jobStopped(p)) toast(`Stopped bringing files: ${jobStopWhy(p)}`, 'error'); else if (p.kind === 'bring' && p.done) toast(`Brought ${countOf(p.done, 'files')} here; they are being added to your library.`); } } catch { /* gone */ }
+      // A failed look keeps following it (a few times); only a node that no longer knows the job ends it
+      try { const p = await api('GET', `/pubky/files/jobs/${id}`); jobs.lookFails = 0; if (p && p.id) jobs.last = p; }
+      catch (e) { if (e.status !== 404 && (jobs.lookFails = (jobs.lookFails || 0) + 1) <= 5) { jobs.watch = id; clearTimeout(jobs.timer); jobs.timer = setTimeout(refreshJobs, 4000); drawJobs(); return; } jobs.lookFails = 0; }
     }
     if (jobs.cur == null && jobs.last && jobs.last.id === jobs.watch) jobs.watch = null;
+    // A bring this page saw running says how it ended, once, whichever way the answer came
+    if (jobs.cur && jobs.cur.kind === 'bring' && !jobDone(jobs.cur)) jobs.bringing.add(jobs.cur.id);
+    const ended = jobs.last && jobs.last.kind === 'bring' && jobDone(jobs.last) && jobs.bringing.delete(jobs.last.id) ? jobs.last : null;
+    if (ended && jobStopped(ended)) toast(`Stopped bringing files: ${jobStopWhy(ended)}`, 'error'); else if (ended && ended.done) toast(`Brought ${countOf(ended.done, 'files')} here; they are being added to your library.`);
     drawJobs(); pollJobs();
     // A node without a kept summary (old jobs have no `state`): the chip goes after 8 s, as before
     clearTimeout(jobs.hideAt);
@@ -6561,7 +6570,7 @@
         else { ensureZone(); renderZoneName(); refreshAlong(); }
       }
       else if (ev.type === 'library_changed') { if (link.libRev != null) link.libRev++; onLibraryChanged(); }
-      else if (ev.type === 'jobs') { jobs.eventAt = Date.now(); onJobs(ev.jobs || ev); }
+      else if (ev.type === 'jobs') { if (isOwner()) { jobs.eventAt = Date.now(); onJobs(ev.jobs || ev); } } // the owner's jobs, as the polling
       renderBar();
     };
   };

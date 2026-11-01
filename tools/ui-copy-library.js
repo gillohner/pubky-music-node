@@ -225,7 +225,9 @@ const homeFiles = Array.from({ length: 20000 }, (_, i) => ({ path: `/priv/pubky.
       await ctx.route(/\/v1\/pubky$/, (r) => r.fulfill({ json: { user: 'pubky' + KEY, unsynced: 0, needs_resign: false, sync: null } }));
       await ctx.route(/\/v1\/storage$/, (r) => r.fulfill({ json: { homeserver: { mode: 'external', user: KEY, quota_mb: 'unlimited' }, saving: { state: 'saved', pending: 0 } } }));
       await ctx.route(/\/v1\/me\/music(\?.*)?$/, (r) => r.fulfill({ json: { files: [], count: 0, bytes: 0 } }));
-      await ctx.route(/\/v1\/pubky\/files\/upload$/, (r) => r.fulfill({ json: { total: 1, bytes_total: 1e6, skipped: 0 } }));
+      const dry = []; await ctx.route(/\/v1\/pubky\/files\/upload$/, (r) => { dry.push(r.request().postDataJSON()); return r.fulfill({ json: { total: 1, bytes_total: 1e6, skipped: 0 } }); });
+      await ctx.route(/\/v1\/library\/artists$/, (r) => r.fulfill({ json: [{ id: 1, name: 'Slow Artist', albums: 1, tracks: 1 }, { id: 2, name: 'Quick Artist', albums: 1, tracks: 1 }] }));
+      await ctx.route(/\/v1\/library\/artists\/(\d+)\/tracks$/, async (r) => { const id = Number(r.request().url().match(/artists\/(\d+)\/tracks/)[1]); if (id === 1) await sleep(1500); return r.fulfill({ json: { tracks: [{ id: id * 11 }] } }); });
       let asks = 0;
       await ctx.route(/\/v1\/library\/tree(\?.*)?$/, async (r) => {
         const u = new URL(r.request().url()); const path = u.searchParams.get('path');
@@ -254,10 +256,21 @@ const homeFiles = Array.from({ length: 20000 }, (_, i) => ({ path: `/priv/pubky.
       check(alive === 1, 'an untick while that level loads leaves the tab responsive');
       check(await until(async () => (await p.getAttribute('.ctrow[data-cpath="/slow"]', 'aria-checked')) === 'mixed' && (await p.getAttribute('.ctrow[data-cpath="/slow/f1"]', 'aria-checked')) === 'false' && (await p.getAttribute('.ctrow[data-cpath="/slow/f250"]', 'aria-checked')) === 'true', 6000), 'and the untick is done once the page is in');
       // The album picker pages through a library with 2 500 albums (the node answers 1 000 at most)
-      const albumAsks = [];
-      await ctx.route(/\/v1\/library\/albums(\?.*)?$/, (r) => { const u = new URL(r.request().url()); albumAsks.push(u.search); const after = Number(u.searchParams.get('after') || 0); const lim = Math.min(1000, Number(u.searchParams.get('limit') || 100)); return r.fulfill({ json: Array.from({ length: Math.max(0, Math.min(lim, 2500 - after)) }, (_, i) => ({ id: after + i + 1, title: `Album ${after + i + 1}`, album_artist: 'Someone' })) }); });
+      // (the second page answers slowly the first time, so the choice can change while it loads)
+      const albumAsks = []; let slowPage = true;
+      await ctx.route(/\/v1\/library\/albums(\?.*)?$/, async (r) => { const u = new URL(r.request().url()); albumAsks.push(u.search); if (u.searchParams.get('after') === '1000' && slowPage) { slowPage = false; await sleep(1500); } const after = Number(u.searchParams.get('after') || 0); const lim = Math.min(1000, Number(u.searchParams.get('limit') || 100)); return r.fulfill({ json: Array.from({ length: Math.max(0, Math.min(lim, 2500 - after)) }, (_, i) => ({ id: after + i + 1, title: `Album ${after + i + 1}`, album_artist: 'Someone' })) }); });
+      await p.click('[data-cpick="album"]');
+      await until(async () => albumAsks.length >= 2, 5000);
+      // Artists while the albums still page in, then Albums again: the whole list, not the part
+      await p.click('[data-cpick="artist"]'); await sleep(1800); const asked = albumAsks.length;
       await p.click('[data-cpick="album"]'); await p.fill('#cpq', 'Album 2400');
-      check(await until(async () => /Album 2400/.test(await p.textContent('#cplist'))) && albumAsks.length === 3 && albumAsks.every((q) => /limit=1000/.test(q)), `the album picker pages to the 2 500th album (${albumAsks.length} requests)`);
+      check(await until(async () => /Album 2400/.test(await p.textContent('#cplist'))) && albumAsks.length - asked === 3 && albumAsks.every((q) => /limit=1000/.test(q)), `the album picker pages to the 2 500th album, also after leaving it part way (${albumAsks.length - asked} requests)`);
+      // An artist's songs answering slowly belong to that artist, not to the one chosen meanwhile
+      await p.click('[data-cpick="artist"]'); await p.fill('#cpq', ''); await p.waitForSelector('[data-cpid="1"]');
+      await p.click('[data-cpid="1"]'); await sleep(700); await p.click('[data-cpid="2"]'); await sleep(2000);
+      await p.click('[data-cpid="1"]'); await sleep(600); await p.click('[data-cpid="2"]'); await sleep(900);
+      const last = dry.filter((b) => b.track_ids).map((b) => b.track_ids.join(','));
+      check(last.length && last[last.length - 1] === '22' && last.includes('11'), `each artist copies its own songs (${last.join(' | ')})`);
       check(errors.length === 0, `no page errors${errors.length ? ': ' + errors.join(' | ') : ''}`);
       await ctx.close();
     }
@@ -273,7 +286,7 @@ const homeFiles = Array.from({ length: 20000 }, (_, i) => ({ path: `/priv/pubky.
       let old = null; const sent = [];
       await ctx.route(/\/v1\/pubky\/files\/upload$/, (r) => { const b = r.request().postDataJSON(); sent.push(b); if (b.dry_run) return r.fulfill({ json: { total: 4, bytes_total: 1.2e8, skipped: 0 } }); old = { id: 'o1', kind: 'copy', total: 4, done: 0, failed: 0, skipped: 0, bytes_total: 1.2e8, bytes_done: 0, finished: false, errors: [] }; return r.fulfill({ json: old }); });
       await ctx.route(/\/v1\/pubky\/files\/jobs$/, (r) => r.fulfill({ json: old && !old.finished ? old : null }));
-      await ctx.route(/\/v1\/pubky\/files\/jobs\/o1$/, (r) => r.fulfill({ json: old }));
+      let o1fails = 1; await ctx.route(/\/v1\/pubky\/files\/jobs\/o1$/, (r) => (old && old.finished && o1fails-- > 0 ? r.fulfill({ status: 500, json: { error: 'busy' } }) : r.fulfill({ json: old })));
       const p = await ctx.newPage(); const errors = []; p.on('pageerror', (e) => errors.push(e.message));
       await p.goto(BASE + '/library'); await p.waitForSelector('#mmlist .mrow', { timeout: 15000 });
       // The search works in the page when the node sent every file
@@ -294,11 +307,27 @@ const homeFiles = Array.from({ length: 20000 }, (_, i) => ({ path: `/priv/pubky.
       check(await until(async () => p.isVisible('#jobchip')), "today's node: the chip shows the job");
       // It finishes with failures; /jobs then forgets it: the result stays, from the job's own answer
       old = { ...old, done: 2, failed: 2, finished: true, errors: ['x.flac: cannot read', 'y.flac: refused'] };
-      check(await until(async () => /2 failed/.test(await p.textContent('#jobchip')), 6000), "today's node: the finished job's result stays on the chip");
+      check(await until(async () => /2 failed/.test(await p.textContent('#jobchip')), 12000), "today's node: the finished job's result stays on the chip, also after a failed look at it");
       await p.click('#jobchip');
       check(/cannot read/.test(await p.textContent('#jobpop')) || /2 errors/.test(await p.textContent('#jobpop')), "today's node: with its errors");
       check(!(await p.$('#jobpop [data-jact="pause"]')) && !(await p.$('#jobpop [data-jact="dismiss"]')), "today's node: no Pause or Dismiss it can't do");
       check(errors.length === 0, `today's node: no page errors${errors.length ? ': ' + errors.join(' | ') : ''}`);
+      await ctx.close();
+    }
+    // ---- A listener: jobs events are the owner's, so nothing shows ----
+    {
+      const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+      await ctx.addInitScript((t) => { localStorage.setItem('pm.token', t); localStorage.setItem('pm.zone', 'browser'); }, TOKEN);
+      await ctx.route(/\/v1\/me$/, async (r) => { const res = await r.fetch(); const j = await res.json(); return r.fulfill({ json: { ...j, role: 'listener', zones: null } }); });
+      let ls = null; await ctx.routeWebSocket(/\/v1\/events/, (ws) => { ws.connectToServer(); ls = ws; });
+      const p = await ctx.newPage(); const errors = []; p.on('pageerror', (e) => errors.push(e.message));
+      await p.goto(BASE + '/library'); await until(async () => !!ls, 10000); await sleep(1500);
+      ls.send(JSON.stringify({ type: 'jobs', current: { id: 'x1', kind: 'copy', state: 'running', total: 9, done: 1, failed: 0, skipped: 0, bytes_total: 9e6, bytes_done: 1e6, errors: [] }, queued: [], last: null }));
+      await sleep(1000);
+      // (CSS hides the chip for listeners anyway; the page must not even take the job in)
+      const lc = await p.$eval('#jobchip', (c) => ({ hidden: c.hidden, name: c.getAttribute('aria-label') || '' })).catch(() => ({ hidden: true, name: '' }));
+      check(lc.hidden && !/\d+ of \d+ files/.test(lc.name), `a listener's page doesn't take in a jobs event (${JSON.stringify(lc)})`);
+      check(errors.length === 0, `listener: no page errors${errors.length ? ': ' + errors.join(' | ') : ''}`);
       await ctx.close();
     }
   } finally { await browser.close(); }
