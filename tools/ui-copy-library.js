@@ -33,10 +33,10 @@ const homeFiles = Array.from({ length: 20000 }, (_, i) => ({ path: `/priv/pubky.
     for (const [w, h] of [[1280, 900], [390, 844]]) {
       const ctx = await browser.newContext({ viewport: { width: w, height: h }, reducedMotion: 'reduce' });
       await ctx.addInitScript((t) => { localStorage.setItem('pm.token', t); localStorage.setItem('pm.zone', 'browser'); }, TOKEN);
-      const log = []; const slow = { tree: 0, music: 0 }; let paged = true; const musicAsks = [];
+      const log = []; const slow = { tree: 0, music: 0, dry: 0 }; let paged = true; const musicAsks = []; let jobs500 = 0;
       const job = { current: null, queued: [], last: null };
-      let sock = null;
-      await ctx.routeWebSocket(/\/v1\/events/, (ws) => { ws.connectToServer(); sock = ws; });
+      let sock = null; let wsDown = false;
+      await ctx.routeWebSocket(/\/v1\/events/, (ws) => { if (wsDown) { ws.close(); return; } ws.connectToServer(); sock = ws; });
       await ctx.route(/\/v1\/pubky$/, (r) => r.fulfill({ json: { user: 'pubky' + KEY, unsynced: 0, needs_resign: false, sync: null } }));
       await ctx.route(/\/v1\/storage$/, (r) => r.fulfill({ json: { homeserver: { mode: 'external', user: KEY, quota_mb: 'unlimited' }, saving: { state: 'saved', pending: 0 } } }));
       await ctx.route(/\/v1\/library\/tree(\?.*)?$/, async (r) => {
@@ -46,15 +46,16 @@ const homeFiles = Array.from({ length: 20000 }, (_, i) => ({ path: `/priv/pubky.
         const page = all.slice(from, from + limit);
         return r.fulfill({ json: { path, children: page, next: from + limit < all.length ? page[page.length - 1].name : null } });
       });
-      await ctx.route(/\/v1\/pubky\/files\/upload$/, (r) => {
+      await ctx.route(/\/v1\/pubky\/files\/upload$/, async (r) => {
         const b = r.request().postDataJSON(); log.push(b);
+        if (b.dry_run && slow.dry) await sleep(slow.dry);
         const paths = b.paths || []; const files = b.all ? ARTISTS * 10 + 40 : filesOf(paths);
         const huge = paths.some((p) => p.startsWith('/mnt/share'));
         if (b.dry_run) return r.fulfill({ status: huge ? 507 : 200, json: huge ? { error: 'Not enough space on your homeserver: 12.0 GB needed, 3.0 GB free.', total: files, bytes_total: files * 300e6, needed_bytes: 12e9, free_bytes: 3e9 } : { total: files, bytes_total: files * 30e6, skipped: Math.floor(files / 4), needed_bytes: files * 22e6, free_bytes: 120e9 } });
         job.current = { id: 'j1', kind: 'copy', state: 'running', total: files, done: 0, failed: 0, skipped: 0, bytes_total: files * 30e6, bytes_done: 0, errors: [], errors_count: 0, current_folder: paths[0] || '/music', speed_bps: 2.4e6, eta_s: 600 };
         return r.fulfill({ status: 202, json: { id: 'j1', state: 'running' } });
       });
-      await ctx.route(/\/v1\/pubky\/files\/jobs$/, (r) => r.fulfill({ json: job }));
+      await ctx.route(/\/v1\/pubky\/files\/jobs$/, (r) => (jobs500-- > 0 ? r.fulfill({ status: 500, json: { error: 'busy' } }) : r.fulfill({ json: job })));
       await ctx.route(/\/v1\/pubky\/files\/jobs\/last$/, (r) => { log.push({ dismiss: true }); job.last = null; return r.fulfill({ json: {} }); });
       await ctx.route(/\/v1\/pubky\/files\/(upload|jobs)\/j1\/(pause|resume|retry|cancel)$/, (r) => {
         const act = /\/(pause|resume|retry|cancel)$/.exec(r.request().url())[1]; log.push({ act });
@@ -136,6 +137,22 @@ const homeFiles = Array.from({ length: 20000 }, (_, i) => ({ path: `/priv/pubky.
       check(await until(async () => /3.0 GB free/.test(await p.textContent('#copytotals'))) && await p.isDisabled('#copygo'), `${W} not enough room: Copy is off and says the numbers`);
       await p.click('.ctrow[data-cpath="/mnt/share"]');
       check(await until(async () => !(await p.isDisabled('#copygo'))), `${W} without it, Copy is on again`);
+      // A slow count for one selection, then another selection: the old answer can't turn Copy on
+      slow.dry = 1200;
+      await p.click(`.ctrow[data-cpath="/music/${artist(5)}"]`); await sleep(600);
+      // (the old answer lands about 1 s after the second click, the new one about 1.6 s after)
+      await p.click(`.ctrow[data-cpath="/music/${artist(5)}"]`); await sleep(1300);
+      check(await p.isDisabled('#copygo'), `${W} an answer for an older selection doesn't turn Copy on`);
+      slow.dry = 0;
+      check(await until(async () => !(await p.isDisabled('#copygo')), 5000), `${W} the current one does`);
+      // The connection drops: the totals say so with Try again, Copy stays off, nothing hangs on "Counting…"
+      wsDown = true; sock.close(); await sleep(1500);
+      await p.click('[data-cpick="all"]');
+      check(await until(async () => /Not connected/.test(await p.textContent('#copytotals')), 14000) && await p.isDisabled('#copygo') && await p.isVisible('#copyretot'), `${W} with the connection down the totals say so, Copy off`);
+      wsDown = false;
+      // ("Everything" doesn't fit this mocked homeserver, so Copy stays off: the count is what's back)
+      check(await until(async () => { const b = await p.$('#copyretot'); if (b) await b.click().catch(() => {}); return /20\D?040 files/.test(await p.textContent('#copytotals')); }, 40000), `${W} back again, Try again counts`);
+      await p.click('[data-cpick="folders"]'); await p.waitForSelector(`.ctrow[data-cpath="/music/${artist(1)}"]`, { timeout: 5000 });
       // Copy: exactly the ticked folders; the dialog closes at once
       log.length = 0; await p.click('#copygo');
       const sent = log.find((b) => !b.dry_run);
@@ -147,6 +164,8 @@ const homeFiles = Array.from({ length: 20000 }, (_, i) => ({ path: `/priv/pubky.
       check(await until(async () => p.isVisible('#jobchip')), `${W} the chip shows the job`);
       job.current.done = 7; job.current.bytes_done = 210e6;
       check(await until(async () => /7\/25/.test(await p.textContent('#jobchip'))), `${W} it follows by polling while no event comes`);
+      jobs500 = 1; job.current.done = 9; job.current.bytes_done = 270e6;
+      check(await until(async () => /9\/25/.test(await p.textContent('#jobchip')), 12000), `${W} a failed look doesn't stop the polling`);
       sock.send(JSON.stringify({ type: 'jobs', current: { ...job.current, done: 12, bytes_done: 360e6 }, queued: [], last: null }));
       check(await until(async () => /12\/25/.test(await p.textContent('#jobchip')), 2000), `${W} a jobs event moves it at once`);
       job.current.done = 12; job.current.bytes_done = 360e6;
@@ -174,10 +193,27 @@ const homeFiles = Array.from({ length: 20000 }, (_, i) => ({ path: `/priv/pubky.
       check(await until(async () => log.some((l) => l.act === 'retry')), `${W} Retry failed`);
       await p.click('#jobpop [data-jact="dismiss"]').catch(() => {});
       check(await until(async () => log.some((l) => l.dismiss)), `${W} Dismiss`);
+      // Stopped before its last file (#224's stopped_reason): never "Done", with the reason in the chip, card and summary
+      const stops = [
+        [{ stopped_reason: 'Not enough space on this machine: 2.0 GB stay free for the homeserver.' }, 'Stopped: full', /space on this machine/],
+        [{ failed: 3, stopped_reason: '3 failures in a row: the homeserver answered 503.' }, 'Stopped: failures', /3 failures in a row/],
+        [{ cancelled: true, state: 'cancelled' }, 'Cancelled', /Cancelled\./],
+      ];
+      for (const [extra, chipText, why] of stops) {
+        job.last = { id: 'j' + chipText.length, kind: 'copy', state: 'finished', finished: true, total: 25, done: 9, failed: 0, skipped: 0, bytes_total: 750e6, bytes_done: 270e6, errors: [], errors_count: 0, ...extra };
+        sock && sock.send(JSON.stringify({ type: 'jobs', ...job }));
+        check(await until(async () => (await p.textContent('#jobchip')).includes(chipText), 5000) && await p.$eval('#jobchip', (c) => c.classList.contains('stopped') && !c.classList.contains('done')) && why.test(await p.getAttribute('#jobchip', 'aria-label')), `${W} the chip says "${chipText}", not Done, and why in its name`);
+        await p.click('#jobchip');
+        const card = await p.textContent('#jobpop');
+        check(/Copy stopped/.test(card) && /Stopped after 9 of 25 files/.test(card) && why.test(card) && !/Copied to your homeserver/.test(card), `${W} the summary says it stopped and why (${card.replace(/\s+/g, ' ').slice(0, 140)})`);
+        await p.keyboard.press('Escape'); await sleep(200);
+      }
+      job.last = null;
       // Downloads shows the job too
       job.current = { id: 'j1', kind: 'copy', state: 'running', total: 25, done: 3, failed: 0, skipped: 0, bytes_total: 750e6, bytes_done: 90e6, errors: [], errors_count: 0 };
       await p.goto(BASE + '/downloads');
       check(await until(async () => /Copying to your homeserver/.test(await p.textContent('#dljob'))), `${W} Downloads shows the job`);
+      check(await p.locator('#dljob [data-jobclose]').count() === 0 && await p.locator('#dljob [data-jact="cancel"]').count() === 1, `${W} with Cancel, and no Hide that does nothing`);
       check(await p.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), `${W} no horizontal overflow`);
       check(errors.length === 0, `${W} no page errors${errors.length ? ': ' + errors.join(' | ') : ''}`);
       await ctx.close();
@@ -191,9 +227,13 @@ const homeFiles = Array.from({ length: 20000 }, (_, i) => ({ path: `/priv/pubky.
       await ctx.route(/\/v1\/me\/music(\?.*)?$/, (r) => r.fulfill({ json: { files: [], count: 0, bytes: 0 } }));
       await ctx.route(/\/v1\/pubky\/files\/upload$/, (r) => r.fulfill({ json: { total: 1, bytes_total: 1e6, skipped: 0 } }));
       let asks = 0;
-      await ctx.route(/\/v1\/library\/tree(\?.*)?$/, (r) => {
+      await ctx.route(/\/v1\/library\/tree(\?.*)?$/, async (r) => {
         const u = new URL(r.request().url()); const path = u.searchParams.get('path');
-        if (!path) return r.fulfill({ json: { children: [{ path: '/big', name: '/big', files: 300, bytes: 3e9, leaf: false }], next: null } });
+        if (!path) return r.fulfill({ json: { children: [{ path: '/big', name: '/big', files: 300, bytes: 3e9, leaf: false }, { path: '/slow', name: '/slow', files: 300, bytes: 3e9, leaf: false }], next: null } });
+        if (path === '/slow') {
+          if (u.searchParams.get('after')) { await sleep(1500); return r.fulfill({ json: { children: Array.from({ length: 100 }, (_, i) => ({ path: `/slow/f${200 + i}`, name: `f${200 + i}`, files: 1, bytes: 1e7, leaf: true })), next: null } }); }
+          return r.fulfill({ json: { children: Array.from({ length: 200 }, (_, i) => ({ path: `/slow/f${i}`, name: `f${i}`, files: 1, bytes: 1e7, leaf: true })), next: 'f199' } });
+        }
         asks++;
         if (u.searchParams.get('after')) return r.fulfill({ status: 500, json: { error: 'the share went away' } });
         return r.fulfill({ json: { children: Array.from({ length: 200 }, (_, i) => ({ path: `/big/f${i}`, name: `f${i}`, files: 1, bytes: 1e7, leaf: true })), next: 'f199' } });
@@ -206,6 +246,13 @@ const homeFiles = Array.from({ length: 20000 }, (_, i) => ({ path: `/priv/pubky.
       check(asks - before <= 1, `a failed page is asked for once, not again and again (${asks - before})`);
       check(await p.getAttribute('.ctrow[data-cpath="/big"]', 'aria-checked') === 'true' && await p.getAttribute('.ctrow[data-cpath="/big/f1"]', 'aria-checked') === 'true', 'the untick is not done: the folder stays ticked');
       check(/Couldn’t load every folder/.test(await p.textContent('#toast')), 'and it says why');
+      // A level whose next page is still on its way (Show more pressed), then an untick inside it:
+      // the untick waits for that page instead of spinning, and the tab stays responsive
+      await p.click('.ctrow[data-cpath="/slow"]'); await p.click('.ctrow[data-cpath="/slow"] [data-ccaret]'); await p.waitForSelector('.ctrow[data-cpath="/slow/f1"]');
+      await p.click('[data-cmore="/slow"]'); await p.click('.ctrow[data-cpath="/slow/f1"]');
+      const alive = await Promise.race([p.evaluate(() => 1), sleep(4000).then(() => 0)]);
+      check(alive === 1, 'an untick while that level loads leaves the tab responsive');
+      check(await until(async () => (await p.getAttribute('.ctrow[data-cpath="/slow"]', 'aria-checked')) === 'mixed' && (await p.getAttribute('.ctrow[data-cpath="/slow/f1"]', 'aria-checked')) === 'false' && (await p.getAttribute('.ctrow[data-cpath="/slow/f250"]', 'aria-checked')) === 'true', 6000), 'and the untick is done once the page is in');
       // The album picker pages through a library with 2 500 albums (the node answers 1 000 at most)
       const albumAsks = [];
       await ctx.route(/\/v1\/library\/albums(\?.*)?$/, (r) => { const u = new URL(r.request().url()); albumAsks.push(u.search); const after = Number(u.searchParams.get('after') || 0); const lim = Math.min(1000, Number(u.searchParams.get('limit') || 100)); return r.fulfill({ json: Array.from({ length: Math.max(0, Math.min(lim, 2500 - after)) }, (_, i) => ({ id: after + i + 1, title: `Album ${after + i + 1}`, album_artist: 'Someone' })) }); });

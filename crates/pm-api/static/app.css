@@ -836,6 +836,8 @@ a.btn { text-decoration: none; }
 .jobchip .jc-bar { position: absolute; left: 10px; right: 10px; bottom: 3px; height: 2px; border-radius: 1px; background: var(--surface-3); }
 .jobchip .jc-bar span { display: block; height: 100%; border-radius: 1px; background: var(--accent); transition: width 0.4s var(--ease); }
 .jobchip.done { color: var(--accent-strong); }
+.jobchip.stopped { color: var(--warn); border-color: var(--warn); }
+.jobchip.stopped .jc-bar span { background: var(--warn); }
 #jobpop { width: min(340px, calc(100vw - 32px)); }
 .jobpace, .jobwhy { margin: 2px 0; }
 .jeprob { font-weight: 600; }

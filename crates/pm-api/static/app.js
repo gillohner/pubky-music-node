@@ -573,8 +573,9 @@
   const fmtLeft = (s) => (s >= 3600 ? `${Math.floor(s / 3600)} h ${Math.round((s % 3600) / 60)} min left` : s >= 60 ? `${Math.round(s / 60)} min left` : 'less than a minute left');
   // A call whose answer is read whatever its status (a 507's numbers, a node without the route)
   const call = async (method, path, body) => {
-    // A change made while the connection is down waits for it, as with api()
-    if (method !== 'GET') await whenConnected();
+    // A change made while the connection is down waits for it, as with api(); when the wait gives
+    // up, the answer is a failed one (the callers show it), never a throw
+    if (method !== 'GET') { try { await whenConnected(); } catch (e) { return { status: 0, ok: false, json: { error: (e && e.message) || 'The node isn’t connected. Try again in a moment.' } }; } }
     const sent = state.token;
     let r; try { r = await fetch('/v1' + path, { method, headers: { 'content-type': 'application/json', ...(sent ? { authorization: 'Bearer ' + sent } : {}) }, body: body === undefined ? undefined : JSON.stringify(body) }); } catch { return { status: 0, ok: false, json: { error: 'Can’t reach the node.' } }; }
     let json = null; try { json = await r.json(); } catch { json = null; }
@@ -613,8 +614,11 @@
     const mixed = (p) => { const on = effOn(p); for (const [q, v] of t.sel) if (v !== on && under(q, p)) return true; return false; };
     const boxState = (p) => (mixed(p) ? 'mixed' : effOn(p) ? 'true' : 'false');
     const level = (p) => { let n = 0; for (let q = p; q != null && q !== ROOT; q = node(q).parent) n++; return n; };
-    const loadLevel = async (p, more) => {
-      const n = node(p); if (n.loading) return;
+    // One request per level at a time: a second caller (Show more and an untick's loadAll at once)
+    // waits for the one under way instead of returning at once, so loadAll never spins
+    const loadLevel = (p, more) => { const n = node(p); if (!n.req) n.req = fetchLevel(p, more).finally(() => { n.req = null; }); return n.req; };
+    const fetchLevel = async (p, more) => {
+      const n = node(p);
       const qs = new URLSearchParams({ limit: '200' }); if (p !== ROOT) qs.set('path', p); if (more && n.next) qs.set('after', n.next);
       n.loading = true; n.error = null; drawTree();
       const r = await call('GET', `/library/tree?${qs}`);
@@ -763,7 +767,8 @@
       return paths.length ? { paths } : null;
     };
     const tot = { timer: null, gen: 0, body: null };
-    const totalsSoon = () => { clearTimeout(tot.timer); go.disabled = true; tot.timer = setTimeout(showTotals, 400); };
+    // A new selection: an answer still on its way for the old one is dropped (it can't turn Copy on)
+    const totalsSoon = () => { clearTimeout(tot.timer); tot.gen++; tot.body = null; go.disabled = true; tot.timer = setTimeout(showTotals, 400); };
     const showTotals = async () => {
       const gen = ++tot.gen; let body;
       try { body = await selection(); } catch (e) { totals.textContent = e.message; return; }
@@ -773,6 +778,7 @@
       totals.innerHTML = '<span class="muted"><span class="spin" aria-hidden="true"></span> Counting…</span>';
       const r = await call('POST', '/pubky/files/upload', { ...body, dry_run: true });
       if (gen !== tot.gen) return;
+      if (r.status === 0) { totals.innerHTML = `<span class="warn-text">${esc(r.json.error)}</span> <button class="btn sm" type="button" id="copyretot">Try again</button>`; $('#copyretot', d).onclick = () => totalsSoon(); go.disabled = true; return; }
       const j = r.json;
       if (!r.ok && r.status !== 507) { totals.innerHTML = `<span class="warn-text">${esc(j.error || `HTTP ${r.status}`)}</span>`; go.disabled = true; return; }
       const files = j.total ?? 0; const bytes = j.bytes_total ?? 0; const skip = j.skipped ?? 0;
@@ -900,10 +906,16 @@
   const jobs = { cur: null, queued: [], last: null, eventAt: 0, timer: null, showErrors: false, watch: null, hideAt: null };
   const fjob = { get p() { return jobs.cur || jobs.last; } };
   const jobDone = (p) => !!(p && (p.finished || ['finished', 'cancelled', 'failed'].includes(p.state)));
-  const jobTitle = (p) => (p.kind === 'import' ? (jobDone(p) ? (p.cancelled || p.state === 'cancelled' ? 'Copy stopped' : 'Copied into your library') : 'Copying into your library') : p.kind === 'bring'
-    ? (jobDone(p) ? (p.cancelled || p.state === 'cancelled' ? 'Stopped bringing files' : 'Brought files here') : 'Bringing files here')
+  // A job that ended before its last file: cancelled, or stopped by the node (`stopped_reason`:
+  // the space it keeps free running out, failures in a row), never shown as done
+  const jobCancelled = (p) => !!(p.cancelled || p.state === 'cancelled');
+  const jobStopped = (p) => jobDone(p) && (jobCancelled(p) || p.state === 'failed' || !!p.stopped_reason || !!p.full);
+  const jobStopWhy = (p) => p.stopped_reason || (p.full ? 'Your homeserver is full.' : jobCancelled(p) ? 'Cancelled.' : p.state === 'failed' ? 'It stopped on an error.' : '');
+  const jobStopShort = (p) => (jobCancelled(p) && !p.stopped_reason ? 'Cancelled' : /space|full|reserve|room/i.test(jobStopWhy(p)) ? 'Stopped: full' : /in a row/i.test(jobStopWhy(p)) ? 'Stopped: failures' : 'Stopped');
+  const jobTitle = (p) => (p.kind === 'import' ? (jobDone(p) ? (jobStopped(p) ? 'Copy stopped' : 'Copied into your library') : 'Copying into your library') : p.kind === 'bring'
+    ? (jobDone(p) ? (jobStopped(p) ? 'Stopped bringing files' : 'Brought files here') : 'Bringing files here')
     : p.state === 'queued' ? 'Waiting to copy' : p.state === 'paused' ? 'Copy paused'
-      : (jobDone(p) ? (p.cancelled || p.state === 'cancelled' ? 'Copy stopped' : p.stopped_reason || p.full ? 'Copy stopped' : 'Copied to your homeserver') : 'Copying to your homeserver'));
+      : (jobDone(p) ? (jobStopped(p) ? 'Copy stopped' : 'Copied to your homeserver') : 'Copying to your homeserver'));
   const jobPct = (p) => (p.bytes_total ? Math.min(100, Math.round((100 * p.bytes_done) / p.bytes_total)) : (jobDone(p) ? 100 : 0));
   const jobPop = () => $('#jobpop');
   const closeJobPop = (fromBack) => { const jp = jobPop(); if (!jp || jp.hidden) return; jp.hidden = true; $('#scrim').hidden = true; if (fromBack !== true) popTransient(); };
@@ -918,7 +930,7 @@
       ? [`${countOf(p.done, 'files')} copied`, p.skipped ? `${p.skipped} already ${p.kind === 'bring' ? 'here' : 'there'}` : '', p.not_audio ? `${p.not_audio} not audio` : '', p.failed ? `${p.failed} failed` : ''].filter(Boolean).join(' · ')
       : `${files} of ${countOf(p.total, 'files')} · ${fmtBytes(p.bytes_done)} of ${fmtBytes(p.bytes_total)}${p.skipped ? ` · ${p.skipped} already ${p.kind === 'bring' ? 'here' : 'there'}` : ''}${p.failed ? ` · ${p.failed} failed` : ''}`;
     const pace = !done && p.state !== 'paused' && p.state !== 'queued' && p.speed_bps ? `${fmtRate(p.speed_bps)}${p.eta_s ? ` · ${fmtLeft(p.eta_s)}` : ''}` : '';
-    const why = p.stopped_reason || (p.full ? 'Your homeserver is full.' : '');
+    const why = done && jobStopped(p) ? jobStopWhy(p) : p.stopped_reason || '';
     const canAct = p.kind !== 'bring' && p.kind !== 'import' && p.state;
     const btns = done
       ? `${(p.failed_retryable ?? p.failed) && canAct ? '<button class="btn" data-jact="retry">Retry failed</button>' : ''}${canAct ? '<button class="btn ghost" data-jact="dismiss">Dismiss</button>' : ''}<button class="btn ghost" data-jobclose>Close</button>`
@@ -929,7 +941,7 @@
       + (pace ? `<p class="muted small jobpace">${pace}</p>` : '')
       + (p.kind === 'bring' && p.dest ? `<p class="muted small">Into ${esc(p.dest)}, then added to your library.</p>` : '')
       + (!done && (p.current_folder || p.current) ? `<p class="muted small jobcur">${esc(p.current_folder || p.current)}</p>` : '')
-      + (why ? `<p class="small warn-text jobwhy">${esc(why)}</p>` : '')
+      + (why ? `<p class="small warn-text jobwhy" role="status">${done && p.total > files + (p.skipped || 0) + (p.not_audio || 0) ? `Stopped after ${files} of ${countOf(p.total, 'files')}: ` : ''}${esc(why)}</p>` : '')
       + (nErr ? `<button class="lnk small" type="button" data-jerrs aria-expanded="${jobs.showErrors}">${countOf(nErr, 'errors')}</button>${jobs.showErrors ? `<ul class="small joberr">${errs.map((e) => `<li>${jobErr(e)}</li>`).join('')}</ul>` : ''}` : '')
       + (jobs.queued.length ? `<p class="muted small">Then: ${jobs.queued.map((q) => esc(q.label || countOf(q.total || 0, 'files'))).join(', ')}</p>` : '')
       + `<div class="row-btns">${btns}</div></div>`;
@@ -954,15 +966,17 @@
     if (!p) { hideJobChip(); return; }
     c.hidden = false;
     const done = jobDone(p);
-    c.classList.toggle('done', done);
-    c.innerHTML = `${icon(p.kind === 'bring' ? 'download' : 'upload')}<span class="jc-text">${done ? (p.failed ? `${p.failed} failed` : 'Done') : p.state === 'paused' ? 'Paused' : p.state === 'queued' ? 'Waiting' : `${p.done + (p.failed || 0)}/${p.total}`}</span><span class="jc-bar"><span style="width:${jobPct(p)}%"></span></span>`;
-    const tl = `${jobTitle(p)}: ${p.done + (p.failed || 0)} of ${p.total} files, ${fmtBytes(p.bytes_done)} of ${fmtBytes(p.bytes_total)}`;
+    const stopped = jobStopped(p);
+    c.classList.toggle('done', done && !stopped); c.classList.toggle('stopped', stopped);
+    c.innerHTML = `${icon(p.kind === 'bring' ? 'download' : 'upload')}<span class="jc-text">${stopped ? jobStopShort(p) : done ? (p.failed ? `${p.failed} failed` : 'Done') : p.state === 'paused' ? 'Paused' : p.state === 'queued' ? 'Waiting' : `${p.done + (p.failed || 0)}/${p.total}`}</span><span class="jc-bar"><span style="width:${jobPct(p)}%"></span></span>`;
+    const tl = `${jobTitle(p)}: ${p.done + (p.failed || 0)} of ${p.total} files, ${fmtBytes(p.bytes_done)} of ${fmtBytes(p.bytes_total)}${stopped ? `. ${jobStopWhy(p)}` : ''}`;
     c.title = tl; c.setAttribute('aria-label', tl);
   };
   const drawJobs = () => {
     drawJobChip();
     if (!jobPop().hidden) drawJobPop();
-    const dj = $('#dljob'); if (dj) { const p = fjob.p; dj.innerHTML = p ? `<div class="card jobcard">${jobCard(p)}</div>` : ''; bindJobCard(dj); }
+    // On Downloads the card is part of the page: no Hide or Close (they belong to the popover)
+    const dj = $('#dljob'); if (dj) { const p = fjob.p; dj.innerHTML = p ? `<div class="card jobcard">${jobCard(p)}</div>` : ''; $$('[data-jobclose]', dj).forEach((b) => b.remove()); bindJobCard(dj); }
   };
   // What `/jobs` (or an event) says, in either shape: `{current, queued, last}`, or one job
   const onJobs = async (j) => {
@@ -974,7 +988,7 @@
     // one that finished before the first look): its own answer is the result
     if (!jobs.cur && jobs.watch && !(jobs.last && jobs.last.id === jobs.watch)) {
       const id = jobs.watch; jobs.watch = null;
-      try { const p = await api('GET', `/pubky/files/jobs/${id}`); if (p && p.id) { jobs.last = p; if (p.kind === 'bring' && p.done) toast(`Brought ${countOf(p.done, 'files')} here; they are being added to your library.`); } } catch { /* gone */ }
+      try { const p = await api('GET', `/pubky/files/jobs/${id}`); if (p && p.id) { jobs.last = p; if (p.kind === 'bring' && jobStopped(p)) toast(`Stopped bringing files: ${jobStopWhy(p)}`, 'error'); else if (p.kind === 'bring' && p.done) toast(`Brought ${countOf(p.done, 'files')} here; they are being added to your library.`); } } catch { /* gone */ }
     }
     if (jobs.cur == null && jobs.last && jobs.last.id === jobs.watch) jobs.watch = null;
     drawJobs(); pollJobs();
@@ -987,7 +1001,8 @@
     // While one runs: every 2 s, unless the node's events came lately
     if (jobs.cur && !jobDone(jobs.cur)) jobs.timer = setTimeout(() => { if (Date.now() - jobs.eventAt > 5000) refreshJobs(); else pollJobs(); }, 2000);
   };
-  const refreshJobs = async () => { try { onJobs(await api('GET', '/pubky/files/jobs')); } catch { /* not signed in */ } };
+  // A failed look while a job runs is tried again (the chip must not freeze on one bad answer)
+  const refreshJobs = async () => { try { onJobs(await api('GET', '/pubky/files/jobs')); } catch { if ((jobs.cur && !jobDone(jobs.cur)) || jobs.watch) { clearTimeout(jobs.timer); jobs.timer = setTimeout(refreshJobs, 4000); } } };
   const watchJob = (id) => { if (id) jobs.watch = id; refreshJobs(); };
   // A job already running (another tab started it, or the node carried on after a restart)
   const findJob = refreshJobs;
