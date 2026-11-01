@@ -561,7 +561,11 @@ fn begin_waiting(lib: &Library) -> Result<()> {
 /// homeserver keeps its content hash in front of its name (`f80da35cdf86-14_wasted_bits`): that
 /// prefix is not part of the title (UX sweep 11-01, A12).
 pub fn title_from_file_name(stem: &str) -> String {
-    let stem = strip_hash_prefix(stem);
+    tidy_stem(strip_hash_prefix(stem))
+}
+
+/// [`title_from_file_name`] without dropping a hash prefix: the title an older scan stored.
+pub(crate) fn tidy_stem(stem: &str) -> String {
     let spaced: String = stem.replace('_', " ");
     let trimmed = spaced.trim();
     // A leading track number: "03 - ", "14 ", "1. "
@@ -585,7 +589,7 @@ pub fn title_from_file_name(stem: &str) -> String {
 }
 
 /// A content-hash prefix (12 to 16 lowercase hex digits and a dash) in front of a stored name.
-fn strip_hash_prefix(stem: &str) -> &str {
+pub(crate) fn strip_hash_prefix(stem: &str) -> &str {
     match stem.split_once('-') {
         Some((h, rest))
             if (12..=16).contains(&h.len())

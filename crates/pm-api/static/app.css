@@ -775,6 +775,7 @@ button.chip:hover { border-color: var(--line-strong); color: var(--fg); }
 .card-row .card-sub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .list-row.filtered { display: none; }
 .plsummary { margin-bottom: 12px; }
+.pfnote { margin: 0 0 12px; }
 .chip.warnchip { border-color: rgba(232, 178, 74, 0.4); }
 .porder { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; max-width: 520px; }
 .porder-row { display: flex; align-items: center; gap: 10px; padding: 6px 8px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface-2); transition: transform 0.15s var(--ease); }
@@ -1106,7 +1107,8 @@ html[data-shell="phone"] .np-vol { display: flex; }
 .bnav:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .libnav { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; padding-bottom: 2px; }
 /* A chip row that scrolls says so: its end fades, and chips snap into place (UX sweep 11-01, A15) */
-html:not([data-shell="desktop"]) :is(.libnav, .scopechips, .np-sheet-tabs) { scroll-snap-type: x proximity; mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent); -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent); }
+html:not([data-shell="desktop"]) :is(.libnav, .scopechips, .np-sheet-tabs) { scroll-snap-type: x proximity; }
+html:not([data-shell="desktop"]) :is(.libnav, .scopechips, .np-sheet-tabs).more-right { mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent); -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent); }
 .libnav > *, .scopechips > *, .np-sheet-tabs > * { scroll-snap-align: start; }
 .libnav::-webkit-scrollbar { display: none; }
 .libnav .chip { flex: none; }
@@ -1220,6 +1222,7 @@ body.kiosk .shell { grid-template-columns: 1fr; grid-template-rows: 1fr; grid-te
 body.kiosk .main { padding: 0; }
 .dash-home { position: absolute; top: 12px; left: 14px; z-index: 2; color: var(--muted); font-size: 13px; text-decoration: none; padding: 8px 10px; border-radius: 8px; }
 .dash-home:hover, .dash-home:focus-visible { color: var(--fg); background: var(--surface-2); }
+.main > .dash-home + .dash { margin-top: 0; }
 /* The Log in heading takes the focus to be announced; it shows no ring for that (UX sweep A20) */
 #loginh:focus { outline: none; }
 .still-loading { margin: 6px 0 0; }

@@ -366,7 +366,8 @@ impl Library {
     }
 
     /// Tracks still titled by their raw file name (scanned before
-    /// [`crate::scan::title_from_file_name`]) get the tidy title. Idempotent.
+    /// [`crate::scan::title_from_file_name`]), or by the tidy form that kept a homeserver hash
+    /// prefix (`F80da35cdf86-14 wasted bits`), get the tidy title. Idempotent.
     fn tidy_file_name_titles(&self) -> Result<usize> {
         let conn = self.lock();
         let rows: Vec<(i64, String, String)> = {
@@ -381,7 +382,8 @@ impl Library {
                 .file_stem()
                 .map(|s| s.to_string_lossy().to_string())
                 .unwrap_or_default();
-            if title != stem {
+            let hashed = crate::scan::strip_hash_prefix(&stem) != stem;
+            if title != stem && !(hashed && title == crate::scan::tidy_stem(&stem)) {
                 continue;
             }
             let tidy = crate::scan::title_from_file_name(&stem);
@@ -3359,6 +3361,39 @@ mod tests {
         assert_eq!((f.label.as_str(), f.dsd, f.hi_res), ("DSD128", true, false));
         let f = describe_format(1, "mp3", "pcm", 44_100, 16);
         assert_eq!((f.label.as_str(), f.lossless), ("MP3", false));
+    }
+
+    #[test]
+    fn titles_from_hashed_file_names_lose_the_hash_on_open() {
+        let lib = Library::open_in_memory().unwrap();
+        let old = lib
+            .upsert_track(&sample_track(
+                "/hs/f80da35cdf86-14_wasted_bits.flac",
+                "F80da35cdf86-14 wasted bits",
+            ))
+            .unwrap();
+        let raw = lib
+            .upsert_track(&sample_track(
+                "/hs/0d4c7c38c2e2e811-Donna.flac",
+                "0d4c7c38c2e2e811-Donna",
+            ))
+            .unwrap();
+        let tagged = lib
+            .upsert_track(&sample_track("/hs/f80da35cdf86-Other.flac", "A tagged title"))
+            .unwrap();
+        let plain = lib
+            .upsert_track(&sample_track(
+                "/music/123456789012-Song.flac",
+                "123456789012-Song",
+            ))
+            .unwrap();
+        assert_eq!(lib.tidy_file_name_titles().unwrap(), 2);
+        let title = |id| lib.get_track(id).unwrap().unwrap().title;
+        assert_eq!(title(old), "Wasted bits");
+        assert_eq!(title(raw), "Donna");
+        assert_eq!(title(tagged), "A tagged title", "a tag's title is kept");
+        assert_eq!(title(plain), "123456789012-Song", "digits only are not a hash");
+        assert_eq!(lib.tidy_file_name_titles().unwrap(), 0, "idempotent");
     }
 
     #[test]
