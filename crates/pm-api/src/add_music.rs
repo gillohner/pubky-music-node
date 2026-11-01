@@ -120,15 +120,6 @@ fn blake3_hex(bytes: &[u8]) -> String {
     h.finalize().to_hex().to_string()
 }
 
-fn needs_session(s: &NodeState) -> Result<Arc<crate::sync::PubkySync>, ApiError> {
-    s.sync_handle().ok_or_else(|| {
-        ApiError::new(
-            StatusCode::PRECONDITION_FAILED,
-            "sign in to your homeserver first (Settings › Pubky)",
-        )
-    })
-}
-
 /// Homeserver files by `<hash prefix>` → size.
 async fn present(target: &dyn crate::copy_guard::Target) -> Result<HashMap<String, Option<u64>>, String> {
     let list = target.list().await?;
@@ -152,13 +143,16 @@ pub(crate) enum Stored {
 
 /// Stores one file's bytes on the homeserver (unless the same content is there), and for an
 /// external homeserver also in the node's "From homeserver" folder.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn store(
     s: &Arc<NodeState>,
     target: &dyn crate::copy_guard::Target,
+    room: &dyn crate::copy_guard::Room,
     have: &HashMap<String, Option<u64>>,
     name: &str,
     relative: Option<&str>,
     bytes: Vec<u8>,
+    source: Option<&std::path::Path>,
 ) -> Result<Stored, String> {
     if bytes.is_empty() {
         return Err(format!("{name}: the file is empty"));
@@ -171,6 +165,10 @@ pub(crate) async fn store(
     })
     .await
     .map_err(|e| e.to_string())?;
+    // Remembered for the file it came from: the next copy knows it is there without reading it
+    if let Some(p) = source {
+        crate::files::remember_hash(s, p, &hash);
+    }
     let remote = format!("{PRIVATE_FILES_DIR}{}-{safe}", &hash[..16]);
     let bundled = crate::storage::homeserver_music_dir(s).is_some();
     if have
@@ -182,30 +180,25 @@ pub(crate) async fn store(
     // To the node's own homeserver there is no uplink to spare; to another one, pace the copy.
     let rate = if bundled { 0 } else { crate::files::copy_rate(s) };
     let keep_local = (!bundled).then(|| bytes.clone());
-    // A failed or short upload may leave part of the file there: it is deleted, never left
-    // looking like a song
-    match target.upload(&remote, bytes, (rate > 0).then_some(rate)).await {
+    // Guarded: the reserve of the disk it lands on (the bundled homeserver's, else this node's
+    // mirror), and nothing half written left there (a file the homeserver had before untouched)
+    let existed = have.contains_key(&hash[..16]);
+    let rate = (rate > 0).then_some(rate);
+    match crate::copy_guard::upload_guarded(s, target, room, &remote, bytes, rate, existed).await {
         Ok(()) => {}
-        Err(crate::copy_guard::UploadError::Full(_)) => {
+        Err(crate::copy_guard::Refused::Space(why)) => return Err(format!("{name}: {why}")),
+        Err(crate::copy_guard::Refused::Full) => {
             crate::storage::note_full(s, true);
-            crate::copy_guard::drop_partial(target, &remote).await;
             return Err(format!("{name}: {FULL}"));
         }
-        Err(e) => {
-            crate::copy_guard::drop_partial(target, &remote).await;
-            return Err(format!("{name}: {e}"));
-        }
-    }
-    crate::storage::note_full(s, false);
-    match target.stat(&remote).await {
-        Ok(Some(kept)) if kept != len => {
-            crate::copy_guard::drop_partial(target, &remote).await;
+        Err(crate::copy_guard::Refused::Short(kept)) => {
             return Err(format!(
                 "{name}: the homeserver kept {kept} of {len} bytes; try again"
-            ));
+            ))
         }
-        _ => {}
+        Err(crate::copy_guard::Refused::Other(e)) => return Err(format!("{name}: {e}")),
     }
+    crate::storage::note_full(s, false);
     if let Some(bytes) = keep_local {
         // Into the "From homeserver" folder, under the dropped folder's own path when given
         let rel = relative
@@ -226,7 +219,16 @@ pub(crate) async fn store(
                 .await
                 .map_err(|e| e.to_string())?;
         }
-        tokio::fs::write(&dest, bytes).await.map_err(|e| e.to_string())?;
+        // Written beside it and moved into place: a failed write leaves no half a song
+        let part = dest.with_file_name(format!(
+            ".{}.part",
+            dest.file_name().map(|n| n.to_string_lossy()).unwrap_or_default()
+        ));
+        if let Err(e) = tokio::fs::write(&part, bytes).await {
+            let _ = tokio::fs::remove_file(&part).await;
+            return Err(e.to_string());
+        }
+        tokio::fs::rename(&part, &dest).await.map_err(|e| e.to_string())?;
         let root = s.mirror_dir.clone();
         let known = s
             .library
@@ -285,7 +287,12 @@ pub(crate) async fn start(
     State(s): State<Arc<NodeState>>,
     Json(b): Json<NewUpload>,
 ) -> ApiResult<UploadStarted> {
-    let sync = needs_session(&s)?;
+    let target = crate::copy_guard::target_of(&s).map_err(|_| {
+        ApiError::new(
+            StatusCode::PRECONDITION_FAILED,
+            "sign in to your homeserver first (Settings › Pubky)",
+        )
+    })?;
     let name = safe_name(&b.name);
     if name.is_empty() || !pm_library::tags::is_supported(std::path::Path::new(&name)) {
         return Err(ApiError::bad_request(format!(
@@ -298,7 +305,7 @@ pub(crate) async fn start(
     }
     if let Some(h) = b.blake3.as_deref().map(str::to_ascii_lowercase) {
         if h.len() == 64 && h.bytes().all(|c| c.is_ascii_hexdigit()) {
-            let have = present(sync.as_ref())
+            let have = present(target.as_ref())
                 .await
                 .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, e))?;
             if have
@@ -313,6 +320,14 @@ pub(crate) async fn start(
                 }));
             }
         }
+    }
+    // The disk it lands on keeps its reserve (the bundled homeserver's, or this node's mirror):
+    // refused before any of it is sent
+    if let Some(why) = crate::copy_guard::room_for_store(&s)
+        .space()
+        .and_then(|sp| sp.too_little(b.size))
+    {
+        return Err(ApiError::new(StatusCode::INSUFFICIENT_STORAGE, why));
     }
     tokio::fs::create_dir_all(parts_dir(&s))
         .await
@@ -478,13 +493,16 @@ async fn finish(s: &Arc<NodeState>, id: &str) {
             ));
         }
         let have = present(sync.as_ref()).await?;
+        let room = crate::copy_guard::room_for_store(s);
         store(
             s,
             sync.as_ref(),
+            room.as_ref(),
             &have,
             &up.name,
             up.relative_path.as_deref(),
             bytes,
+            None,
         )
         .await
     }
@@ -573,13 +591,30 @@ pub(crate) async fn import(
         bytes_total: files.iter().map(|(_, n)| n).sum(),
         ..Default::default()
     };
-    let room = crate::copy_guard::room_of(&s);
-    let fits = crate::copy_guard::plan(room.as_ref(), &mut progress);
+    // The disk the files land on: the bundled homeserver's, or this node's mirror of them
+    let room = crate::copy_guard::room_for_store(&s);
+    let target = crate::copy_guard::target_of(&s);
+    // What the homeserver has already is skipped: counted out of the space needed
+    let listed = match &target {
+        Ok(t) => present(t.as_ref()).await.ok(),
+        Err(_) => None,
+    };
+    let needed = files
+        .iter()
+        .filter(|(p, n)| {
+            !listed.as_ref().is_some_and(|have| {
+                crate::files::known_hash(&s, p)
+                    .is_some_and(|h| have.get(&h[..16]).is_some_and(|sz| sz.is_none_or(|k| k == *n)))
+            })
+        })
+        .map(|(_, n)| n)
+        .sum();
+    let fits = crate::copy_guard::plan(room.as_ref(), &mut progress, needed);
     if b.dry_run {
         return Ok(Json(progress));
     }
     fits?;
-    let target = crate::copy_guard::target_of(&s)?;
+    let target = target?;
     claim(&s, &progress)?;
     let s2 = s.clone();
     let id = progress.id.clone();
@@ -596,7 +631,11 @@ pub(crate) async fn import(
                 .get(&id)
                 .is_some_and(|j| j.cancelled)
         };
-        let have = match present(target.as_ref()).await {
+        let have = match listed {
+            Some(h) => Ok(h),
+            None => present(target.as_ref()).await,
+        };
+        let have = match have {
             Ok(h) => h,
             Err(e) => {
                 set(&|j| {
@@ -631,13 +670,21 @@ pub(crate) async fn import(
                 set(&|j| j.not_audio += 1);
                 continue;
             }
-            // Never into the reserve the homeserver's database needs
-            if let Some(why) = room.space().and_then(|sp| sp.too_little(size)) {
-                stop(why);
-                break;
-            }
+            // Never into the disk's reserve: checked right before each real upload (store)
             let res = match tokio::fs::read(&path).await {
-                Ok(bytes) => store(&s2, target.as_ref(), &have, &name, rel.as_deref(), bytes).await,
+                Ok(bytes) => {
+                    store(
+                        &s2,
+                        target.as_ref(),
+                        room.as_ref(),
+                        &have,
+                        &name,
+                        rel.as_deref(),
+                        bytes,
+                        Some(&path),
+                    )
+                    .await
+                }
                 Err(e) => Err(format!("{name}: {e}")),
             };
             match res {
@@ -659,6 +706,11 @@ pub(crate) async fn import(
                 Err(e) if is_full_error(&e) => {
                     set(&|j| j.failed += 1);
                     stop(format!("{e}; the files after it were not copied"));
+                    break;
+                }
+                // The disk's reserve reached: nothing more is written
+                Err(e) if crate::copy_guard::is_space_stop(&e) => {
+                    stop(e);
                     break;
                 }
                 Err(e) => {

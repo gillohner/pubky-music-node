@@ -112,8 +112,9 @@ pub trait Room: Send + Sync {
 pub struct Disk(pub PathBuf);
 
 impl Room for Disk {
+    /// The folder's own filesystem, or its nearest existing parent's (a folder not made yet).
     fn space(&self) -> Option<Space> {
-        statvfs(&self.0)
+        self.0.ancestors().find_map(statvfs)
     }
 }
 
@@ -163,14 +164,20 @@ pub fn target_of(s: &NodeState) -> Result<Arc<dyn Target>, crate::ApiError> {
 
 /// Before a copy starts: the planned bytes against the disk it lands on. Fills in the plan's
 /// `needed_bytes`, `free_bytes` and `reserve_bytes`; the refusal (507) when they don't fit.
-pub fn plan(room: &dyn Room, progress: &mut crate::types::UploadProgress) -> Result<(), crate::ApiError> {
-    progress.needed_bytes = Some(progress.bytes_total);
+/// `needed` counts only what will be sent: files already on the homeserver are skipped, so a copy
+/// run again over a library mostly there isn't refused for them.
+pub fn plan(
+    room: &dyn Room,
+    progress: &mut crate::types::UploadProgress,
+    needed: u64,
+) -> Result<(), crate::ApiError> {
+    progress.needed_bytes = Some(needed);
     let Some(space) = room.space() else {
         return Ok(());
     };
     progress.free_bytes = Some(space.free);
     progress.reserve_bytes = Some(space.reserve());
-    match space.too_little(progress.bytes_total) {
+    match space.too_little(needed) {
         Some(why) => Err(crate::ApiError::new(
             axum::http::StatusCode::INSUFFICIENT_STORAGE,
             why,
@@ -221,10 +228,151 @@ pub async fn is_audio(path: &Path) -> bool {
 }
 
 /// Deletes what an upload left at `remote` (best effort): the homeserver may have kept part of it.
-pub async fn drop_partial(target: &dyn Target, remote: &str) {
-    if let Err(e) = target.delete(remote).await {
-        tracing::warn!(remote, "a partly copied file stays on the homeserver: {e}");
+/// After a failed or short upload: what this attempt may have left at `remote`. A file the
+/// homeserver had before the attempt is never touched (it may be the good copy); one this attempt
+/// made is deleted when its size isn't what was sent (a complete one whose answer got lost stays).
+/// False when that can't be told now (the homeserver didn't answer): the in-flight record stays
+/// for the next start ([`settle_in_flight`]).
+pub async fn drop_partial(target: &dyn Target, remote: &str, existed: bool, sent: u64) -> bool {
+    if existed {
+        return true;
     }
+    match target.stat(remote).await {
+        Ok(Some(kept)) if kept != sent => {
+            if let Err(e) = target.delete(remote).await {
+                tracing::warn!(remote, "a partly copied file stays on the homeserver: {e}");
+                return false;
+            }
+            true
+        }
+        Ok(_) => true,
+        Err(e) => {
+            tracing::warn!(remote, "couldn't check what a failed upload left: {e}");
+            false
+        }
+    }
+}
+
+/// Uploads in progress, kept until settled: a node stopped in the middle of one (a crash, a
+/// restart) finds them at the next start and removes what it left half written there.
+pub const IN_FLIGHT_KEY: &str = "files.in_flight";
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+struct InFlight {
+    size: u64,
+    /// The homeserver had a file there before: never deleted.
+    existed: bool,
+}
+
+fn in_flight(lib: &pm_library::Library) -> std::collections::BTreeMap<String, InFlight> {
+    lib.get_setting(IN_FLIGHT_KEY)
+        .ok()
+        .flatten()
+        .and_then(|v| serde_json::from_str(&v).ok())
+        .unwrap_or_default()
+}
+
+fn note_in_flight(s: &NodeState, remote: &str, entry: Option<InFlight>) {
+    let lib = s.library.lock().expect("library poisoned");
+    let mut all = in_flight(&lib);
+    match entry {
+        Some(e) => {
+            all.insert(remote.to_string(), e);
+        }
+        None => {
+            all.remove(remote);
+        }
+    }
+    let _ = if all.is_empty() {
+        lib.delete_setting(IN_FLIGHT_KEY).map(drop)
+    } else {
+        lib.set_setting(IN_FLIGHT_KEY, &serde_json::to_string(&all).expect("serializes"))
+    };
+}
+
+/// At start: the uploads a stopped node left unsettled. One this node made that the homeserver
+/// keeps at another size than was sent is deleted; anything else is left as it is.
+pub async fn settle_in_flight(s: &Arc<NodeState>) {
+    let all = in_flight(&s.library.lock().expect("library poisoned"));
+    if all.is_empty() {
+        return;
+    }
+    let Ok(target) = target_of(s) else { return };
+    for (remote, e) in all {
+        if drop_partial(target.as_ref(), &remote, e.existed, e.size).await {
+            note_in_flight(s, &remote, None);
+        }
+    }
+}
+
+/// Why an upload didn't go through.
+#[derive(Debug)]
+pub enum Refused {
+    /// It would eat into the disk's reserve: the copy stops.
+    Space(String),
+    /// The homeserver is full (507): the copy stops.
+    Full,
+    /// The homeserver kept another size.
+    Short(u64),
+    Other(String),
+}
+
+/// One file to the homeserver, guarded: the space check right before it with what is really sent,
+/// recorded while in flight, checked afterwards, and what a failure left cleaned up as
+/// [`drop_partial`] says. `existed`: the homeserver listed a file at `remote` before.
+pub async fn upload_guarded(
+    s: &NodeState,
+    target: &dyn Target,
+    room: &dyn Room,
+    remote: &str,
+    bytes: Vec<u8>,
+    rate: Option<u64>,
+    existed: bool,
+) -> Result<(), Refused> {
+    let len = bytes.len() as u64;
+    if let Some(why) = room.space().and_then(|sp| sp.too_little(len)) {
+        return Err(Refused::Space(why));
+    }
+    note_in_flight(s, remote, Some(InFlight { size: len, existed }));
+    let failed = match target.upload(remote, bytes, rate).await {
+        Ok(()) => match target.stat(remote).await {
+            Ok(Some(kept)) if kept != len => Some(Refused::Short(kept)),
+            Ok(None) => Some(Refused::Short(0)),
+            // Kept whole, or couldn't check: counted as sent
+            _ => None,
+        },
+        Err(UploadError::Full(_)) => Some(Refused::Full),
+        Err(UploadError::Other(e)) => Some(Refused::Other(e)),
+    };
+    match failed {
+        None => {
+            note_in_flight(s, remote, None);
+            Ok(())
+        }
+        Some(r) => {
+            if drop_partial(target, remote, existed, len).await {
+                note_in_flight(s, remote, None);
+            }
+            Err(r)
+        }
+    }
+}
+
+/// The refusal of a file that would eat into the disk's reserve: the copy stops there.
+pub fn is_space_stop(e: &str) -> bool {
+    e.contains("not enough space on this machine")
+}
+
+/// Where a folder import or a browser upload lands on this machine: the bundled homeserver's
+/// disk; with another homeserver, the node's own copy of each file in its mirror folder.
+pub fn room_for_store(s: &NodeState) -> Arc<dyn Room> {
+    if let Some(r) = s.copy_seams.lock().expect("copy seams").1.clone() {
+        return r;
+    }
+    if crate::storage::homeserver_music_dir(s).is_some() {
+        return room_of(s);
+    }
+    Arc::new(Disk(s.mirror_dir.clone()))
 }
 
 #[cfg(test)]

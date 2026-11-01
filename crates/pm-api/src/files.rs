@@ -40,7 +40,7 @@ pub fn remote_name(bytes: &[u8], local: &Path) -> String {
 }
 
 /// A file's name with anything but letters, digits, `.`, `-` and `_` turned into `_`.
-fn safe_file_name(local: &Path) -> String {
+pub(crate) fn safe_file_name(local: &Path) -> String {
     let name = local
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -60,7 +60,7 @@ fn safe_file_name(local: &Path) -> String {
 
 /// `<first 16 hex of the hash>-<name>`, adding the prefix once: a file the node brought from the
 /// homeserver already carries it (that is how `x-x-01.flac` names appeared, owner 2026-10-22).
-fn remote_name_for(hash: &str, safe_name: &str) -> String {
+pub(crate) fn remote_name_for(hash: &str, safe_name: &str) -> String {
     let prefix = &hash[..16];
     match split_remote_name(safe_name) {
         Some((h, _)) if h == prefix => safe_name.to_string(),
@@ -189,12 +189,35 @@ pub(crate) async fn upload_many(
         ..Default::default()
     };
     let room = crate::copy_guard::room_of(&s);
-    let fits = crate::copy_guard::plan(room.as_ref(), &mut progress);
+    let target = crate::copy_guard::target_of(&s);
+    // Path → size of what the homeserver has: a file there with another size (an empty upload) is
+    // sent again; what is there whole is skipped, and counted out of the space needed
+    let listed: Option<std::collections::HashMap<String, Option<u64>>> = match &target {
+        Ok(t) => t
+            .list()
+            .await
+            .ok()
+            .map(|l| l.into_iter().map(|f| (f.path, f.size)).collect()),
+        Err(_) => None,
+    };
+    let needed = files
+        .iter()
+        .filter(|(p, n)| {
+            !listed.as_ref().is_some_and(|present| {
+                known_hash(&s, p).is_some_and(|h| {
+                    let remote = format!("{PRIVATE_FILES_DIR}{}", remote_name_for(&h, &safe_file_name(p)));
+                    present.get(&remote).is_some_and(|sz| *sz == Some(*n))
+                })
+            })
+        })
+        .map(|(_, n)| n)
+        .sum();
+    let fits = crate::copy_guard::plan(room.as_ref(), &mut progress, needed);
     if body.dry_run {
         return Ok(Json(progress));
     }
     fits?;
-    let target = crate::copy_guard::target_of(&s)?;
+    let target = target?;
     claim_job(&s, &progress)?;
     let s2 = s.clone();
     let id = progress.id.clone();
@@ -210,9 +233,15 @@ pub(crate) async fn upload_many(
                 j.stopped_reason = Some(why.clone());
             })
         };
-        // Path → size: a file there with another size (an empty upload) is sent again
-        let present: std::collections::HashMap<String, Option<u64>> = match target.list().await {
-            Ok(l) => l.into_iter().map(|f| (f.path, f.size)).collect(),
+        let listed = match listed {
+            Some(l) => Ok(l),
+            None => target
+                .list()
+                .await
+                .map(|l| l.into_iter().map(|f| (f.path, f.size)).collect()),
+        };
+        let present: std::collections::HashMap<String, Option<u64>> = match listed {
+            Ok(l) => l,
             Err(msg) => {
                 set(&|j| {
                     j.errors
@@ -236,12 +265,8 @@ pub(crate) async fn upload_many(
                 set(&|j| j.not_audio += 1);
                 continue;
             }
-            // Never into the reserve the homeserver's database needs
-            if let Some(why) = room.space().and_then(|sp| sp.too_little(size)) {
-                stop(why);
-                break;
-            }
-            match copy_one(&s2, target.as_ref(), &present, &path, &name).await {
+            // Never into the disk's reserve: checked right before each real upload (copy_one)
+            match copy_one(&s2, target.as_ref(), room.as_ref(), &present, &path, &name).await {
                 Ok(sent) => {
                     streak.ok();
                     set(&|j| {
@@ -258,6 +283,11 @@ pub(crate) async fn upload_many(
                     crate::storage::note_full(&s2, true);
                     set(&|j| j.failed += 1);
                     stop(format!("{e}; the files after it were not copied"));
+                    break;
+                }
+                // The disk's reserve reached: nothing more is written
+                Err(e) if crate::copy_guard::is_space_stop(&e) => {
+                    stop(e);
                     break;
                 }
                 Err(e) => {
@@ -290,6 +320,7 @@ pub(crate) async fn upload_many(
 async fn copy_one(
     s: &Arc<NodeState>,
     target: &dyn crate::copy_guard::Target,
+    room: &dyn crate::copy_guard::Room,
     present: &std::collections::HashMap<String, Option<u64>>,
     path: &std::path::Path,
     name: &str,
@@ -316,29 +347,21 @@ async fn copy_one(
         return Ok(false);
     }
     let rate = copy_rate(s);
-    match target.upload(&remote, bytes, (rate > 0).then_some(rate)).await {
-        Ok(()) => {}
-        Err(crate::copy_guard::UploadError::Full(_)) => {
-            crate::copy_guard::drop_partial(target, &remote).await;
-            return Err(format!("{name}: {}", crate::add_music::FULL));
+    // Guarded: the reserve with what is really sent, recorded while in flight, checked after, and
+    // nothing half written left there (a file the homeserver listed before is never deleted)
+    let existed = present.contains_key(&remote);
+    let rate = (rate > 0).then_some(rate);
+    match crate::copy_guard::upload_guarded(s, target, room, &remote, bytes, rate, existed).await {
+        Ok(()) => {
+            crate::storage::note_full(s, false);
+            Ok(true)
         }
-        Err(e) => {
-            crate::copy_guard::drop_partial(target, &remote).await;
-            return Err(format!("{name}: {e}"));
-        }
-    }
-    crate::storage::note_full(s, false);
-    // Check what the homeserver kept; one it couldn't say counts as sent
-    match target.stat(&remote).await {
-        Ok(Some(kept)) if kept == len => Ok(true),
-        Ok(kept) => {
-            crate::copy_guard::drop_partial(target, &remote).await;
-            Err(format!(
-                "{name}: the homeserver kept {} of {len} bytes; run the copy again",
-                kept.unwrap_or(0)
-            ))
-        }
-        Err(_) => Ok(true),
+        Err(crate::copy_guard::Refused::Space(why)) => Err(format!("{name}: {why}")),
+        Err(crate::copy_guard::Refused::Full) => Err(format!("{name}: {}", crate::add_music::FULL)),
+        Err(crate::copy_guard::Refused::Short(kept)) => Err(format!(
+            "{name}: the homeserver kept {kept} of {len} bytes; run the copy again"
+        )),
+        Err(crate::copy_guard::Refused::Other(e)) => Err(format!("{name}: {e}")),
     }
 }
 
@@ -419,8 +442,20 @@ fn mtime_of(m: &std::fs::Metadata) -> i64 {
         .unwrap_or(0)
 }
 
+/// The content hash this node already knows for a file (a copy or import hashed it before, and it
+/// hasn't changed since).
+pub(crate) fn known_hash(s: &NodeState, path: &Path) -> Option<String> {
+    let m = std::fs::metadata(path).ok()?;
+    s.library
+        .lock()
+        .expect("library poisoned")
+        .cached_file_hash(path, m.len(), mtime_of(&m))
+        .ok()
+        .flatten()
+}
+
 /// Keep a library file's content hash (the copy job just computed it).
-fn remember_hash(s: &NodeState, path: &Path, hash: &str) {
+pub(crate) fn remember_hash(s: &NodeState, path: &Path, hash: &str) {
     if let Ok(m) = std::fs::metadata(path) {
         let _ =
             s.library
@@ -736,6 +771,9 @@ fn start_bring(s: Arc<NodeState>, sync: Arc<crate::sync::PubkySync>, plan: Bring
 /// After a restart: carry on with a bring job the node was running (what already arrived is
 /// matched and not fetched again).
 pub fn resume_jobs(s: &Arc<NodeState>) {
+    // Uploads a stopped node left unsettled: what they half wrote on the homeserver goes
+    let s2 = s.clone();
+    tokio::spawn(async move { crate::copy_guard::settle_in_flight(&s2).await });
     let Some(v) = s
         .library
         .lock()
