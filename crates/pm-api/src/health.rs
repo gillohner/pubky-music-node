@@ -61,7 +61,8 @@ fn refresh_in_background(s: &Arc<NodeState>) {
     }
     let s = s.clone();
     tokio::spawn(async move {
-        let parts = probe_all(&s).await;
+        // The node's health, as its owner's sign-ins see it
+        let parts = crate::accounts::as_owner(probe_all(&s)).await;
         cache()
             .lock()
             .expect("health cache")

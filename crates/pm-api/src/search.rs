@@ -188,14 +188,16 @@ pub(crate) async fn search(
     let (tx, rx) = tokio::sync::mpsc::channel::<SourceAnswer>(sources.len().max(1));
     for src in sources {
         let (s, q, tx) = (s.clone(), q.clone(), tx.clone());
-        tokio::spawn(async move {
-            // The library's answer differs for a listener (no owner's playlists): cached apart
+        crate::accounts::spawn_asking(async move {
+            // Each person's answers apart: their own sign-ins (and, for a listener, no owner's
+            // playlists) make them differ
+            let who = crate::accounts::asking();
             let key = (
                 q.to_lowercase(),
                 if owner {
                     src.clone()
                 } else {
-                    format!("{src}|listener")
+                    format!("{src}|{}", who.tag())
                 },
             );
             let hit = s

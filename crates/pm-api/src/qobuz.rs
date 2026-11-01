@@ -13,6 +13,7 @@
 //! - **Health:** a failure of the mode itself (refused app, ended session) switches it off and the
 //!   page says why, with Retry. Qobuz links still open on qobuz.com and match through Pinakes.
 
+use crate::accounts::Who;
 use crate::state::NodeState;
 use crate::streaming::StreamingService;
 use crate::types::*;
@@ -151,33 +152,39 @@ impl std::fmt::Debug for App {
     }
 }
 
-pub fn load(lib: &pm_library::Library) -> ModeState {
-    lib.get_setting(STATE_KEY)
-        .ok()
-        .flatten()
+/// This person's Qobuz: their own sign-in, switch, quality and health.
+pub fn load(lib: &pm_library::Library, who: &Who) -> ModeState {
+    who.get(lib, STATE_KEY)
         .and_then(|v| serde_json::from_str(&v).ok())
         .unwrap_or_default()
 }
 
-fn save(lib: &pm_library::Library, st: &ModeState) {
-    let _ = lib.set_setting(STATE_KEY, &serde_json::to_string(st).expect("state serializes"));
+fn save(lib: &pm_library::Library, who: &Who, st: &ModeState) {
+    let _ = who.put(
+        lib,
+        STATE_KEY,
+        Some(&serde_json::to_string(st).expect("state serializes")),
+    );
 }
 
-pub(crate) fn update(s: &NodeState, f: impl FnOnce(&mut ModeState)) {
+pub(crate) fn update(s: &NodeState, who: &Who, f: impl FnOnce(&mut ModeState)) {
     let lib = s.library.lock().expect("library poisoned");
-    let mut st = load(&lib);
+    let mut st = load(&lib, who);
     f(&mut st);
-    save(&lib, &st);
+    save(&lib, who, &st);
 }
 
-/// [`update`] for an interactive sign-in: the state and the vault's "new sign-in" mark are
-/// written under one library guard, so no vault pass sees one without the other.
-pub(crate) fn update_signed_in(s: &NodeState, service: &str, f: impl FnOnce(&mut ModeState)) {
+/// [`update`] for an interactive sign-in: the state and the vault's "new sign-in" mark (the
+/// owner's only: the vault is theirs) are written under one library guard, so no vault pass sees
+/// one without the other.
+pub(crate) fn update_signed_in(s: &NodeState, who: &Who, service: &str, f: impl FnOnce(&mut ModeState)) {
     let lib = s.library.lock().expect("library poisoned");
-    let mut st = load(&lib);
+    let mut st = load(&lib, who);
     f(&mut st);
-    save(&lib, &st);
-    crate::vault_cache::new_sign_in(&lib, service);
+    save(&lib, who, &st);
+    if who.is_owner() {
+        crate::vault_cache::new_sign_in(&lib, service);
+    }
 }
 
 fn config_app() -> &'static std::sync::OnceLock<App> {
@@ -224,17 +231,17 @@ pub fn app_of(lib: &pm_library::Library) -> Option<App> {
     })
 }
 
-/// On, signed in and with an app: Qobuz searches and plays.
-pub fn streams(s: &NodeState) -> bool {
+/// On, signed in and with an app: Qobuz searches and plays for this person.
+pub fn streams(s: &NodeState, who: &Who) -> bool {
     let lib = s.library.lock().expect("library poisoned");
-    let st = load(&lib);
+    let st = load(&lib, who);
     st.enabled && st.session.is_some() && app_of(&lib).is_some()
 }
 
-/// The app and the session token, when the source can answer.
-fn ready(s: &NodeState) -> Result<(App, Session), ApiError> {
+/// The app and this person's session token, when the source can answer for them.
+fn ready(s: &NodeState, who: &Who) -> Result<(App, Session), ApiError> {
     let lib = s.library.lock().expect("library poisoned");
-    let st = load(&lib);
+    let st = load(&lib, who);
     let app = app_of(&lib).ok_or_else(|| {
         ApiError::new(
             StatusCode::PRECONDITION_FAILED,
@@ -247,19 +254,27 @@ fn ready(s: &NodeState) -> Result<(App, Session), ApiError> {
             "Qobuz is off: switch it on under Sources › Qobuz",
         ));
     }
-    let sess = st.session.ok_or_else(|| {
-        ApiError::new(
-            StatusCode::PRECONDITION_FAILED,
-            "Sign in to Qobuz first (Sources › Qobuz)",
-        )
-    })?;
+    let sess = st
+        .session
+        .ok_or_else(|| ApiError::new(StatusCode::PRECONDITION_FAILED, not_connected(who)))?;
     Ok((app, sess))
+}
+
+/// Why Qobuz can't answer for this person: no sign-in of their own.
+pub(crate) fn not_connected(who: &Who) -> String {
+    match who {
+        Who::Owner => "Sign in to Qobuz first (Sources › Qobuz)".into(),
+        Who::Listener(_) => "Connect Qobuz (Settings › You › Services) to play this".into(),
+        Who::Nobody => "Qobuz plays with the account of whoever queued it, and this has none".into(),
+    }
 }
 
 // ---- API -----------------------------------------------------------------------------------------
 
+/// A catalogue call with the asking person's sign-in (never someone else's).
 async fn get_json(s: &NodeState, path: &str, query: &[(&str, String)]) -> Result<Value, ApiError> {
-    let (app, sess) = ready(s)?;
+    let who = crate::accounts::asking();
+    let (app, sess) = ready(s, &who)?;
     let resp = s
         .http_client()
         .get(format!("{}/{path}", api_base()))
@@ -294,7 +309,7 @@ fn message(v: &Value) -> String {
 /// A failure of the mode itself: switch it off and say why.
 fn mark_down(s: &NodeState, why: &str) {
     tracing::warn!("Qobuz (unofficial) switched off: {why}");
-    update(s, |st| {
+    update(s, &crate::accounts::asking(), |st| {
         st.enabled = false;
         st.health = Some(Health {
             ok: false,
@@ -434,7 +449,7 @@ impl StreamingService for Qobuz {
     }
 
     fn unified(&self, s: &NodeState) -> bool {
-        streams(s)
+        streams(s, &crate::accounts::asking())
     }
 
     fn features(&self) -> &'static [&'static str] {
@@ -447,7 +462,7 @@ impl StreamingService for Qobuz {
 
     fn info(&self, s: &NodeState) -> SourceInfo {
         let lib = s.library.lock().expect("library poisoned");
-        let st = load(&lib);
+        let st = load(&lib, &crate::accounts::asking());
         let status = if app_of(&lib).is_none() {
             "not configured: enter a Qobuz app ID and secret under Sources › Qobuz".to_string()
         } else if let Some(h) = st.health.as_ref().filter(|h| !h.ok && !st.enabled) {
@@ -597,9 +612,9 @@ pub struct QobuzStatus {
     pub warning: String,
 }
 
-pub(crate) fn view(s: &NodeState) -> QobuzStatus {
+pub(crate) fn view(s: &NodeState, who: &Who) -> QobuzStatus {
     let lib = s.library.lock().expect("library poisoned");
-    let st = load(&lib);
+    let st = load(&lib, who);
     let app = app_of(&lib);
     QobuzStatus {
         enabled: st.enabled,
@@ -623,8 +638,11 @@ pub(crate) fn view(s: &NodeState) -> QobuzStatus {
 }
 
 /// `GET /v1/sources/qobuz/unofficial`.
-pub(crate) async fn get_status(State(s): State<Arc<NodeState>>) -> ApiResult<QobuzStatus> {
-    Ok(Json(view(&s)))
+pub(crate) async fn get_status(
+    State(s): State<Arc<NodeState>>,
+    axum::Extension(caller): axum::Extension<crate::accounts::Caller>,
+) -> ApiResult<QobuzStatus> {
+    Ok(Json(view(&s, &Who::of(&caller))))
 }
 
 #[derive(Debug, Deserialize)]
@@ -639,8 +657,17 @@ pub struct QobuzUpdate {
 /// `PUT /v1/sources/qobuz/unofficial {enabled?, quality?, app_id?, app_secret?}`.
 pub(crate) async fn put(
     State(s): State<Arc<NodeState>>,
+    axum::Extension(caller): axum::Extension<crate::accounts::Caller>,
     Json(u): Json<QobuzUpdate>,
 ) -> ApiResult<QobuzStatus> {
+    let who = Who::of(&caller);
+    // The app is the node's, set by its owner; the switch and quality are each person's
+    if u.app_id.is_some() && !who.is_owner() {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "only the node's owner sets the Qobuz app",
+        ));
+    }
     if let Some(q) = &u.quality {
         if q != "max" && q != "cd" && q != "mp3" {
             return Err(ApiError::bad_request("quality is max, cd or mp3"));
@@ -656,7 +683,7 @@ pub(crate) async fn put(
             lib.set_setting(APP_KEY, &serde_json::to_string(&a).expect("app serializes"))?;
         }
     }
-    update(&s, |st| {
+    update(&s, &who, |st| {
         if let Some(e) = u.enabled {
             st.enabled = e;
             if e {
@@ -669,7 +696,7 @@ pub(crate) async fn put(
         }
     });
     crate::search::forget_answers(&s);
-    Ok(Json(view(&s)))
+    Ok(Json(view(&s, &who)))
 }
 
 /// An app as the owner typed it, in the shape Qobuz issues them (so a paste of the wrong thing is
@@ -791,7 +818,15 @@ pub struct Login {
 /// `POST /v1/sources/qobuz/unofficial/login {email, password}`: signs in once; the node keeps
 /// only the session token. The password is sent to Qobuz as its MD5 (Qobuz's login takes that)
 /// and never stored or logged.
-pub(crate) async fn login(State(s): State<Arc<NodeState>>, Json(l): Json<Login>) -> ApiResult<QobuzStatus> {
+pub(crate) async fn login(
+    State(s): State<Arc<NodeState>>,
+    axum::Extension(caller): axum::Extension<crate::accounts::Caller>,
+    Json(l): Json<Login>,
+) -> ApiResult<QobuzStatus> {
+    let who = Who::of(&caller);
+    if who == Who::Nobody {
+        return Err(ApiError::new(StatusCode::FORBIDDEN, "sign in to the node first"));
+    }
     let app = app_of(&s.library.lock().expect("library poisoned")).ok_or_else(|| {
         ApiError::new(
             StatusCode::PRECONDITION_FAILED,
@@ -803,13 +838,13 @@ pub(crate) async fn login(State(s): State<Arc<NodeState>>, Json(l): Json<Login>)
     }
     let hash = hex(&Md5::digest(l.password.as_bytes()));
     let sess = sign_in_hashed(&s, &app, l.email.trim(), &hash).await?;
-    update_signed_in(&s, "qobuz", |st| {
+    update_signed_in(&s, &who, "qobuz", |st| {
         st.session = Some(sess);
         st.health = None;
     });
     crate::search::forget_answers(&s);
     tracing::info!("Qobuz sign-in stored");
-    Ok(Json(view(&s)))
+    Ok(Json(view(&s, &who)))
 }
 
 /// `user/login` with the password's MD5 (what Qobuz takes; also what other apps keep): the
@@ -949,13 +984,23 @@ impl QobuzSignIn {
 
 #[async_trait::async_trait]
 impl crate::signin::SignInSource for QobuzSignIn {
-    fn describe(&self, s: &NodeState, headers: Option<&axum::http::HeaderMap>) -> crate::signin::SignIn {
+    fn describe(
+        &self,
+        s: &NodeState,
+        who: &Who,
+        headers: Option<&axum::http::HeaderMap>,
+    ) -> crate::signin::SignIn {
         use crate::signin::{SignIn, Way, NOT_SIGNED_IN};
         let (st, app, chosen) = {
             let lib = s.library.lock().expect("library poisoned");
-            (load(&lib), app_of(&lib), crate::signin::chosen(&lib, SOURCE_ID))
+            (
+                load(&lib, who),
+                app_of(&lib),
+                crate::signin::chosen(&lib, who, SOURCE_ID),
+            )
         };
-        let scanned = if headers.is_some() {
+        // Other apps' files are on the owner's machine: looked at for the owner only
+        let scanned = if headers.is_some() && who.is_owner() {
             crate::imports::scan_qobuz()
         } else {
             Vec::new()
@@ -987,8 +1032,10 @@ impl crate::signin::SignInSource for QobuzSignIn {
                 ),
                 action: "setup".into(),
                 recommended: true,
-                available: true,
-                reason: None,
+                // The app is the node's: a listener signs in once the owner has set one
+                available: app.is_some() || who.is_owner(),
+                reason: (app.is_none() && !who.is_owner())
+                    .then(|| "The node's owner hasn't set up a Qobuz app yet.".to_string()),
             },
             Way {
                 id: WAY_IMPORT.into(),
@@ -996,8 +1043,9 @@ impl crate::signin::SignInSource for QobuzSignIn {
                 note: format!("{note} {app_note}"),
                 action: "import".into(),
                 recommended: false,
-                available: true,
-                reason: None,
+                available: who.is_owner(),
+                reason: (!who.is_owner())
+                    .then(|| "The sign-ins on the node's machine are the owner's; paste your own instead.".to_string()),
             },
             Way {
                 id: WAY_PASTE.into(),
@@ -1027,15 +1075,15 @@ impl crate::signin::SignInSource for QobuzSignIn {
                 Vec::new()
             },
             details: if headers.is_some() {
-                serde_json::json!({ "unofficial": view(s) })
+                serde_json::json!({ "unofficial": view(s, who) })
             } else {
                 serde_json::Value::Null
             },
         }
     }
 
-    fn sign_out_of(&self, s: &NodeState, _way: &str) -> Result<(), ApiError> {
-        update(s, |st| st.session = None);
+    fn sign_out_of(&self, s: &NodeState, who: &Who, _way: &str) -> Result<(), ApiError> {
+        update(s, who, |st| st.session = None);
         crate::search::forget_answers(s);
         Ok(())
     }
@@ -1043,6 +1091,7 @@ impl crate::signin::SignInSource for QobuzSignIn {
     async fn import(
         &self,
         s: &Arc<NodeState>,
+        who: &Who,
         body: crate::signin::ImportBody,
     ) -> Result<&'static str, ApiError> {
         let (imp, from, way) = match (body.text.as_deref().map(str::trim), body.id.as_deref()) {
@@ -1077,6 +1126,14 @@ impl crate::signin::SignInSource for QobuzSignIn {
             secret: imp.secrets[0].clone(),
             from: "import".into(),
         };
+        // A listener's sign-in only works with the node's app, which only the owner sets
+        if !who.is_owner()
+            && app_of(&s.library.lock().expect("library poisoned")).map(|a| a.id) != Some(app.id.clone())
+        {
+            return Err(ApiError::bad_request(
+                "Not usable here: it was made with another Qobuz app than this node's. Sign in with your email instead",
+            ));
+        }
         let mut sess = match (&imp.token, &imp.email, &imp.password_md5) {
             (Some(token), _, _) => sign_in_token(s, &app, token, imp.user_id.as_deref())
                 .await
@@ -1089,11 +1146,11 @@ impl crate::signin::SignInSource for QobuzSignIn {
             _ => return Err(ApiError::bad_request("Not usable: no sign-in in it")),
         };
         sess.from = Some(from);
-        {
+        if who.is_owner() {
             let lib = s.library.lock().expect("library poisoned");
             lib.set_setting(APP_KEY, &serde_json::to_string(&app).expect("app serializes"))?;
         }
-        update_signed_in(s, "qobuz", |st| {
+        update_signed_in(s, who, "qobuz", |st| {
             st.session = Some(sess);
             st.health = None;
             st.enabled = true;
@@ -1104,10 +1161,14 @@ impl crate::signin::SignInSource for QobuzSignIn {
 }
 
 /// `DELETE /v1/sources/qobuz/unofficial/login`: forget the session (the mode stays as set).
-pub(crate) async fn logout(State(s): State<Arc<NodeState>>) -> ApiResult<QobuzStatus> {
-    update(&s, |st| st.session = None);
+pub(crate) async fn logout(
+    State(s): State<Arc<NodeState>>,
+    axum::Extension(caller): axum::Extension<crate::accounts::Caller>,
+) -> ApiResult<QobuzStatus> {
+    let who = Who::of(&caller);
+    update(&s, &who, |st| st.session = None);
     crate::search::forget_answers(&s);
-    Ok(Json(view(&s)))
+    Ok(Json(view(&s, &who)))
 }
 
 fn hex(b: &[u8]) -> String {
@@ -1207,17 +1268,18 @@ fn judge_file_url(status: u16, v: &Value) -> Result<String, StreamError> {
 pub fn file_url_blocking(
     library: &std::sync::Mutex<pm_library::Library>,
     id: &str,
+    who: &Who,
 ) -> Result<String, StreamError> {
     let (app, st) = {
         let lib = library.lock().map_err(|_| StreamError::Track("library".into()))?;
-        (app_of(&lib), load(&lib))
+        (app_of(&lib), load(&lib, who))
     };
     let app = app.ok_or_else(|| StreamError::Track("no Qobuz app on this node".into()))?;
     let sess = st
         .session
         .clone()
         .filter(|_| st.enabled)
-        .ok_or_else(|| StreamError::Track("Qobuz is off or not signed in (Sources › Qobuz)".into()))?;
+        .ok_or_else(|| StreamError::Track(not_connected(who)))?;
     let resp = crate::sources::http_client()
         .get(format!("{}/track/getFileUrl", api_base()))
         .header("X-App-Id", &app.id)
@@ -1230,8 +1292,8 @@ pub fn file_url_blocking(
     judge_file_url(status, &v)
 }
 
-async fn file_url(s: &NodeState, id: &str, format: u32) -> Result<String, StreamError> {
-    let (app, sess) = ready(s).map_err(|e| StreamError::Track(e.message))?;
+async fn file_url(s: &NodeState, who: &Who, id: &str, format: u32) -> Result<String, StreamError> {
+    let (app, sess) = ready(s, who).map_err(|e| StreamError::Track(e.message))?;
     let resp = s
         .http_client()
         .get(format!("{}/track/getFileUrl", api_base()))
@@ -1247,9 +1309,9 @@ async fn file_url(s: &NodeState, id: &str, format: u32) -> Result<String, Stream
 }
 
 /// Record how the source did: a failure of the mode itself switches it off.
-pub fn record(library: &std::sync::Mutex<pm_library::Library>, r: &Result<String, StreamError>) {
+pub fn record(library: &std::sync::Mutex<pm_library::Library>, who: &Who, r: &Result<String, StreamError>) {
     let Ok(lib) = library.lock() else { return };
-    let mut st = load(&lib);
+    let mut st = load(&lib, who);
     match r {
         Ok(_) => {
             st.health = Some(Health {
@@ -1269,13 +1331,14 @@ pub fn record(library: &std::sync::Mutex<pm_library::Library>, r: &Result<String
         }
         Err(StreamError::Track(_)) => return,
     }
-    save(&lib, &st);
+    save(&lib, who, &st);
 }
 
 /// A `qobuz:track:<id>` for a zone.
 pub(crate) fn open_track_blocking(
     library: &std::sync::Mutex<pm_library::Library>,
     id: &str,
+    who: &Who,
 ) -> Result<Box<dyn pm_zones::FrameSource>, pm_zones::SourceError> {
     let fail = |reason: String| pm_zones::SourceError::Open {
         uri: track_uri(id),
@@ -1284,8 +1347,8 @@ pub(crate) fn open_track_blocking(
     if id.is_empty() || !id.bytes().all(|b| b.is_ascii_digit()) {
         return Err(fail("bad Qobuz track id".into()));
     }
-    let r = file_url_blocking(library, id);
-    record(library, &r);
+    let r = file_url_blocking(library, id, who);
+    record(library, who, &r);
     let url = r.map_err(|e| match e {
         StreamError::Mode(m) | StreamError::Track(m) => fail(m),
     })?;
@@ -1296,13 +1359,16 @@ pub(crate) fn open_track_blocking(
 /// session and the app never reach the page.
 pub(crate) async fn stream(
     State(s): State<Arc<NodeState>>,
+    axum::Extension(caller): axum::Extension<crate::accounts::Caller>,
     Path(id): Path<String>,
 ) -> Result<axum::response::Response, ApiError> {
     let id = numeric(&id)?.to_string();
+    // With the caller's own account
+    let who = Who::of(&caller);
     // Use one snapshot for the request and its response type, even if quality changes in flight.
-    let format = format_id(&load(&s.library.lock().expect("library poisoned")));
-    let r = file_url(&s, &id, format).await;
-    record(&s.library, &r);
+    let format = format_id(&load(&s.library.lock().expect("library poisoned"), &who));
+    let r = file_url(&s, &who, &id, format).await;
+    record(&s.library, &who, &r);
     let url = r.map_err(|e| match e {
         StreamError::Mode(m) => ApiError::new(StatusCode::BAD_GATEWAY, m),
         StreamError::Track(m) => ApiError::not_found(m),

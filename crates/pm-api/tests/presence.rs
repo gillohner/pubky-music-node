@@ -563,3 +563,35 @@ async fn joining_never_stops_someone_elses_music() {
     let (st, g) = call(&app, &l1, "POST", "/v1/presence/along", Some(along("hall"))).await;
     assert_eq!(st, StatusCode::OK, "a zone nobody plays on: {g}");
 }
+
+/// Listening along keeps who queued each song (TASK-per-person-service-accounts): the group
+/// takes the host's queue with its queuer on each item, so a streaming song keeps playing with
+/// the host's own account, not the joiner's nor the owner's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn listening_along_keeps_who_queued_each_song() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_s, app, track, l1, l2) = rooms(dir.path(), &["Kitchen", "Den", "Hall"]).await;
+    play(&app, &l2, "hall", track).await;
+    let (_, q) = call(&app, OWNER, "GET", "/v1/zones/hall/queue", None).await;
+    assert_eq!(q[0]["by"], KEY2, "{q}");
+    let (st, g) = call(
+        &app,
+        &l1,
+        "POST",
+        "/v1/presence/along",
+        Some(serde_json::json!({"key": KEY2, "zone": "den"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{g}");
+    let gid = g["id"].as_str().unwrap().to_string();
+    let (_, q) = call(&app, OWNER, "GET", &format!("/v1/zones/{gid}/queue"), None).await;
+    assert_eq!(
+        q[0]["by"], KEY2,
+        "the host's song keeps its queuer in the group: {q}"
+    );
+    // And back home when the joiner leaves
+    let (st, _) = call(&app, &l1, "DELETE", "/v1/presence/along", None).await;
+    assert_eq!(st, StatusCode::OK);
+    let (_, q) = call(&app, OWNER, "GET", "/v1/zones/hall/queue", None).await;
+    assert_eq!(q[0]["by"], KEY2, "{q}");
+}

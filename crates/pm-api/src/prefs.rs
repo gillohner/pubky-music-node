@@ -157,6 +157,11 @@ where
     Option::<T>::deserialize(d).map(Some)
 }
 
+/// Where a listener's preferences are kept.
+pub(crate) fn storage_key_of(key: &str) -> String {
+    format!("{LISTENER_PREFIX}{key}")
+}
+
 fn storage_key(c: &Caller) -> Result<String, ApiError> {
     match c.role {
         Role::Owner => Ok(OWNER_KEY.to_string()),
