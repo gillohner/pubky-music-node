@@ -686,14 +686,32 @@ async fn extras(s: &Arc<NodeState>, pg: &mut ItemPage) -> Option<InCollections> 
             .map(|c| crate::discover::card_item(&acc, &lib, c))
             .collect()
     };
+    // What this Pinakes ships (one probe, cached), then the page's card once for both uses
+    let (wants_related, wants_collections) = match &pg.uri {
+        Some(_) => tokio::time::timeout(budget, async {
+            (
+                crate::home::pinakes_has_related(s).await,
+                crate::home::pinakes_has_collections(s).await,
+            )
+        })
+        .await
+        .unwrap_or((false, false)),
+        None => (false, false),
+    };
+    let card_id = match &pg.uri {
+        Some(u) if wants_related || wants_collections => tokio::time::timeout(budget, d.resource_for(u))
+            .await
+            .ok()
+            .and_then(|r| r.ok().flatten())
+            .map(|r| r.card.id),
+        _ => None,
+    };
     let related = async {
-        let card_id = pg.uri.clone()?;
-        if !crate::home::pinakes_has_related(s).await {
+        if !wants_related {
             return None;
         }
-        let r = d.resource_for(&card_id).await.ok()??;
         let q = pm_pubky::pinakes::SearchQuery {
-            related: Some(r.card.id.clone()),
+            related: Some(card_id.clone()?),
             collapse: Some("group".into()),
             limit: Some(12),
             ..Default::default()
@@ -732,53 +750,23 @@ async fn extras(s: &Arc<NodeState>, pg: &mut ItemPage) -> Option<InCollections> 
         d.pinakes().search(&q).await.ok()
     };
     // The owner's own collections come first (Pinakes sorts by the viewer) and are marked
-    let viewer = s
-        .sync_handle()
-        .map(|h| h.z32().trim_start_matches("pubky").to_string());
+    let viewer = s.sync_handle().map(|h| h.z32().to_string());
     let collections = async {
-        let card_id = pg.uri.clone()?;
-        if !crate::home::pinakes_has_collections(s).await {
+        if !wants_collections {
             return None;
         }
-        let r = d.resource_for(&card_id).await.ok()??;
         let page = d
             .pinakes()
-            .resource_collections(&r.card.id, viewer.as_deref(), IN_COLLECTIONS_SHOWN)
+            .resource_collections(card_id.as_deref()?, viewer.as_deref(), IN_COLLECTIONS_SHOWN)
             .await
             .ok()?;
-        let count = page.total.unwrap_or(page.items.len() as u64);
-        let refs: Vec<(String, String, String)> = page
-            .items
-            .iter()
-            .filter_map(|c| {
-                let (author, id) = crate::shared::parse_post(&c.uri)?;
-                Some((c.uri.clone(), author, id))
-            })
-            .take(IN_COLLECTIONS_SHOWN)
-            .collect();
-        // Their names, from the authors' homeservers, as many as answer within the budget
-        let names = futures_util::future::join_all(refs.iter().map(|(_, author, id)| {
-            tokio::time::timeout(budget, crate::shared::collection_name(s, author, id))
-        }))
-        .await;
-        let items = refs
-            .into_iter()
-            .zip(names)
-            .map(|((uri, author, id), name)| CollectionItem {
-                mine: viewer.as_deref() == Some(author.as_str()),
-                name: name.ok().flatten(),
-                uri,
-                author,
-                id,
-            })
-            .collect();
-        Some(InCollections { count, items })
+        Some(in_collections(&page, viewer.as_deref()))
     };
     // All at once, each within the budget: what is not ready is left out
     let (related, concerts, collections) = tokio::join!(
         tokio::time::timeout(budget, related),
         tokio::time::timeout(budget, concerts),
-        tokio::time::timeout(budget * 2, collections)
+        tokio::time::timeout(budget, collections)
     );
     if let Ok(Some(p)) = related {
         pg.related = to_items(p.items);
@@ -786,7 +774,53 @@ async fn extras(s: &Arc<NodeState>, pg: &mut ItemPage) -> Option<InCollections> 
     if let Ok(Some(p)) = concerts {
         pg.concerts = to_items(p.items);
     }
-    collections.ok().flatten()
+    let mut collections = collections.ok().flatten()?;
+    // The names, from the authors' homeservers, in a budget of their own: the list is already in
+    // hand, so a slow stranger's homeserver costs its name, not the row
+    let names = tokio::time::timeout(
+        budget,
+        futures_util::future::join_all(
+            collections
+                .items
+                .iter()
+                .map(|c| crate::shared::collection_name(s, &c.author, &c.id)),
+        ),
+    )
+    .await
+    .unwrap_or_default();
+    for (c, name) in collections.items.iter_mut().zip(names) {
+        c.name = name;
+    }
+    Some(collections)
+}
+
+/// The "In collections" row from a Pinakes page: the lines that are public post links, the
+/// viewer's own marked, and a count of the collections the node can open (Pinakes's total less
+/// the lines that aren't posts). Names come later.
+fn in_collections(page: &pm_pubky::pinakes::CollectionsPage, viewer: Option<&str>) -> InCollections {
+    let posts: Vec<CollectionItem> = page
+        .items
+        .iter()
+        .filter_map(|c| {
+            let (author, id) = crate::shared::parse_post(&c.uri)?;
+            Some(CollectionItem {
+                mine: viewer == Some(author.as_str()),
+                uri: c.uri.clone(),
+                author,
+                id,
+                name: None,
+            })
+        })
+        .collect();
+    let dropped = (page.items.len() - posts.len()) as u64;
+    let count = page
+        .total
+        .unwrap_or(page.items.len() as u64)
+        .saturating_sub(dropped);
+    InCollections {
+        count,
+        items: posts.into_iter().take(IN_COLLECTIONS_SHOWN).collect(),
+    }
 }
 
 /// A library track's page id: its canonical identity when known.
@@ -1522,5 +1556,46 @@ mod instance_tests {
             vec![("deezer", Some("deezer-9")), ("tidal", Some("tidal-111"))]
         );
         assert_eq!(pg.open_on.len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod in_collections_tests {
+    use super::*;
+    use pm_pubky::pinakes::{CollectionRef, CollectionsPage};
+
+    /// The owner's own is marked, a line that isn't a post is left out of the rows and the count,
+    /// and the count is Pinakes's total less what was left out.
+    #[test]
+    fn the_rows_mark_the_owners_and_count_what_the_node_can_open() {
+        const A: &str = "gujx6qd8ksydh1makdphd3bxu351d9b8waqka8hfg6q7hnqkxexo";
+        const B: &str = "o3ftkuxjd9k6zgnc4hhbhbg5jusubr4zqyb1dtzi8hhm3hf5wbmy";
+        let page = CollectionsPage {
+            items: vec![
+                CollectionRef {
+                    uri: format!("pubky://{A}/pub/social/v1/posts/0035WKVKQDHSM"),
+                    author: A.into(),
+                },
+                CollectionRef {
+                    uri: "https://example.org/not-a-post".into(),
+                    author: String::new(),
+                },
+                CollectionRef {
+                    uri: format!("pubky://{B}/pub/social/v1/posts/00351MT54YS9G"),
+                    author: B.into(),
+                },
+            ],
+            total: Some(5),
+            next_cursor: None,
+        };
+        let ic = in_collections(&page, Some(A));
+        assert_eq!(ic.count, 4, "five in all, one line the node can't open");
+        assert_eq!(ic.items.len(), 2);
+        assert!(ic.items[0].mine && ic.items[0].author == A && ic.items[0].id == "0035WKVKQDHSM");
+        assert!(!ic.items[1].mine && ic.items[1].name.is_none());
+        let none = in_collections(&page, None);
+        assert!(none.items.iter().all(|c| !c.mine));
+        let empty = in_collections(&CollectionsPage::default(), Some(A));
+        assert_eq!((empty.count, empty.items.len()), (0, 0));
     }
 }

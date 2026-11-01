@@ -14165,7 +14165,7 @@ exec sleep 300
         let (st, v) = call(&app2, "GET", &format!("/v1/item/song/{id}/extras"), None).await;
         assert_eq!(st, StatusCode::OK, "{v}");
         let c = &v["collections"];
-        assert_eq!(c["count"], 5, "{v}");
+        assert_eq!(c["count"], 4, "five in all, one line that isn't a post: {v}");
         let items = c["items"].as_array().unwrap();
         assert_eq!(items.len(), 2, "a line that is not a post is left out: {v}");
         assert_eq!(items[0]["author"], A);
@@ -14178,6 +14178,12 @@ exec sleep 300
         assert!(
             !v.to_string().contains("bookmark"),
             "nothing about bookmarks: {v}"
+        );
+        let (st, pg) = call(&app2, "GET", &format!("/v1/item/song/{id}"), None).await;
+        assert_eq!(st, StatusCode::OK, "{pg}");
+        assert!(
+            !pg.to_string().contains("bookmark"),
+            "the page itself carries no bookmark count either: {pg}"
         );
     }
 
