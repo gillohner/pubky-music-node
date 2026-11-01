@@ -546,7 +546,7 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
     await p.route(/\/v1\/pubky$/, (r) => r.fulfill({ json: { user: 'k'.repeat(52), sync: null, needs_resign: false } }));
     await p.route(/\/v1\/storage$/, (r) => r.fulfill({ json: { homeserver: { mode: 'bundled', quota_mb: 1000, used_bytes: 8300000 }, saving: { state: 'saved', pending: 0, last_saved_at: Math.floor(Date.now() / 1000) - 120 } } }));
     const HASHED = '0123456789abcdef-one.flac';
-    await p.route(/\/v1\/me\/music$/, (r) => r.fulfill({ json: { count: 2, bytes: 8300100, files: [
+    await p.route(/\/v1\/me\/music(\?.*)?$/, (r) => r.fulfill({ json: { count: 2, bytes: 8300100, files: [
       { path: `/priv/pubky.music/files/${HASHED}`, name: 'one.flac', size: 8300000, song: { id: lt0.id, title: lt0.title, artist: 'The Band', duration_ms: 5000, edited: false } },
       { path: '/priv/pubky.music/files/fedcba9876543210-new.flac', name: 'new.flac', size: 100 },
     ] } }));
@@ -587,7 +587,7 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
     check(await visible(p, '.toast.error'), 'a folder that isn’t there is refused before it is saved');
     await p.click('#libadd'); await choose('Import playlists');
     check(await p.locator('#libplimport').waitFor({ state: 'attached', timeout: 8000 }).then(() => true).catch(() => false) && new URL(p.url()).pathname === '/library/import' && /Move from Roon/.test(await p.textContent('#main')), 'Import playlists opens Your library › Import (playlist files, Move from Roon)');
-    await p.unroute(/\/v1\/pubky$/); await p.unroute(/\/v1\/storage$/); await p.unroute(/\/v1\/me\/music$/); await p.unroute(/\/v1\/pubky\/files$/);
+    await p.unroute(/\/v1\/pubky$/); await p.unroute(/\/v1\/storage$/); await p.unroute(/\/v1\/me\/music(\?.*)?$/); await p.unroute(/\/v1\/pubky\/files$/);
     // Node library: a song taken out from its ⋯ menu, then brought back
     const before = (await api('GET', '/library/tracks?limit=50')).tracks.length;
     await p.goto(BASE + '/tracks'); await p.waitForSelector('.track'); await p.hover('.track'); await p.click('.track [data-act="more"]');

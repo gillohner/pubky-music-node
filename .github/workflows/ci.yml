@@ -551,6 +551,9 @@ jobs:
           npx playwright install --with-deps chromium >/dev/null
       - name: sign-in choosers (imports, refusal, remembered way, sign out; desktop and phone)
         run: cd /tmp/pw && node $GITHUB_WORKSPACE/tools/ui-signin.js ci-token http://127.0.0.1:7788
+      - name: copy the library to the homeserver (folder tree, totals, the job chip; a 20 000-file library stays quick; desktop and phone)
+        timeout-minutes: 10
+        run: cd /tmp/pw && node $GITHUB_WORKSPACE/tools/ui-copy-library.js ci-token http://127.0.0.1:7788
       - name: guided setup for Qobuz and TIDAL full tracks (each state, Check, paste split, the code; desktop and phone)
         timeout-minutes: 10
         run: cd /tmp/pw && node $GITHUB_WORKSPACE/tools/ui-stream-setup.js ci-token http://127.0.0.1:7788
