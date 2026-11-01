@@ -912,8 +912,9 @@ a.btn { text-decoration: none; }
   .srow .sub { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .search kbd, .search .kbd { display: none; }
 }
+/* The narrowest phones keep the zone's name, shortened: the sound pill doesn't name it there */
 @media (max-width: 420px) {
-  .player .zone-btn span { display: none; }
+  html[data-shell="phone"] .player .player-right .zone-btn span { max-width: 64px; }
 }
 
 /* Settings: side tabs, one topic per tab, settings as rows (STEWARD-UX-SETTINGS.md) */
