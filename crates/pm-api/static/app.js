@@ -462,8 +462,8 @@
   // Scanning a key's QR code with the camera, where the browser reads QR codes itself (no library)
   const canScan = () => 'BarcodeDetector' in window && !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
   const scanKey = () => new Promise((resolve) => {
-    const d = document.createElement('dialog'); d.className = 'dialog scan-dialog';
-    d.innerHTML = '<h2>Scan their key</h2><p class="muted small">Point the camera at the QR code of their Pubky key, as Pubky Ring shows it.</p><video class="scan-video" playsinline muted></video><p class="muted small" data-scanmsg role="status"></p><div class="dialog-actions"><button class="btn" data-scanclose>Cancel</button></div>';
+    const d = document.createElement('dialog'); d.className = 'dialog scan-dialog'; d.setAttribute('aria-labelledby', 'scantitle');
+    d.innerHTML = '<h2 id="scantitle">Scan their key</h2><p class="muted small">Point the camera at the QR code of their Pubky key, as Pubky Ring shows it.</p><video class="scan-video" playsinline muted></video><p class="muted small" data-scanmsg role="status"></p><div class="dialog-actions"><button class="btn" data-scanclose>Cancel</button></div>';
     document.body.appendChild(d);
     const video = $('video', d); const msg = $('[data-scanmsg]', d);
     let stream = null; let timer = null; let over = false;
@@ -482,7 +482,8 @@
       try { stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } }); } catch (e) { msg.textContent = `The camera isn’t available (${e.message || e.name}). Paste their key instead.`; return; }
       if (over) { stream.getTracks().forEach((t) => t.stop()); return; }
       video.srcObject = stream; try { await video.play(); } catch { /* shows the first frame anyway */ }
-      const det = new window.BarcodeDetector({ formats: ['qr_code'] });
+      // A browser can have the API without reading QR codes: the camera goes off and it says so
+      let det; try { det = new window.BarcodeDetector({ formats: ['qr_code'] }); } catch (e) { stream.getTracks().forEach((t) => t.stop()); video.srcObject = null; msg.textContent = `This browser can’t read QR codes (${e.message || e.name}). Paste their key instead.`; return; }
       const look = async () => {
         if (over) return;
         try { for (const c of await det.detect(video)) { const k = keyFrom(c.rawValue); if (k) return done(k); msg.textContent = 'That QR code isn’t a Pubky key.'; } } catch { /* the next frame */ }
@@ -1829,6 +1830,7 @@
     const changed = document.documentElement.dataset.shell !== now;
     document.documentElement.dataset.shell = now;
     if (changed && state.view) markTabs();
+    if (changed) { const pb = $('#peoplebox'); if (pb && pb.reshell) pb.reshell(); }
     if (densePref()) document.documentElement.dataset.dense = '1'; else delete document.documentElement.dataset.dense;
     const up = $('#upstreams');
     if (up) { if (now === 'desktop') { if (up.parentElement !== $('#sidebar')) $('#sidebar').appendChild(up); } else if (up.parentElement !== $('.topbar')) $('.topbar').insertBefore(up, $('#me')); }
@@ -5774,7 +5776,7 @@
           };
           const quotaText = (q) => (q == null ? 'the default quota' : q === 'unlimited' || q === 'Unlimited' ? 'no limit' : `${q} MB`);
           const inviteQr = (inv, hsKey) => (inv.url ? `<div class="notice qrbox" style="margin-top:10px">${inv.qr_svg ? `<div class="qr">${inv.qr_svg}</div>` : ''}<div><p>Send this to ${inv.name ? esc(inv.name) : 'them'}: they scan it with Pubky Ring (or open the link on their phone), and Ring creates their account on this node’s homeserver.</p><p class="muted small">Older Ring versions can’t open it; they can sign up by hand with the code <code>${esc(inv.token || '')}</code>${hsKey ? ` and this homeserver’s key <code>${esc(hsKey)}</code>` : ''}.</p><a class="btn sm" href="${esc(ringUrl(inv.url))}">Open in Pubky Ring</a> <button class="btn sm ghost" data-copylink="${esc(inv.url)}">Copy link</button></div></div>` : '');
-          const loadPeople = async () => {
+          const loadPeople = async (keep = false) => {
             const box = $('#peoplebox'); if (!box) return;
             let r; try { r = await api('GET', '/people'); } catch (e) { box.innerHTML = `<p class="muted small">${esc(e.message)}</p>`; return; }
             const zl = await api('GET', '/people/zones').catch(() => ({ zones: [] }));
@@ -5797,8 +5799,9 @@
             // On phones each section folds (UX sweep 2026-11-01 S2); what was open stays open when
             // the page reloads after an action
             const was = new Map($$('[data-fold]', box).map((d) => [d.dataset.fold, d.open]));
+            const draft = keep ? { kind: ($('input[name="pinvkind"]:checked', box) || {}).value, ...Object.fromEntries(['pinvname', 'pinvquota', 'pinvkey'].map((id) => [id, ($(`#${id}`, box) || {}).value || ''])) } : null;
             const sec = (id, title, body, open) => (shellMode() === 'phone'
-              ? `<details class="set-group set-fold" data-fold="${id}" ${(was.has(id) ? was.get(id) : open) ? 'open' : ''}><summary class="set-h">${title}</summary><div class="set-rows">${body}</div></details>`
+              ? `<details class="set-group set-fold" data-fold="${id}" ${(was.has(id) ? was.get(id) : open) ? 'open' : ''}><summary><h3 class="set-h">${title}</h3></summary><div class="set-rows">${body}</div></details>`
               : group(title, body));
             box.innerHTML = sec('homeserver', 'This node’s homeserver', hs.configured
                 ? row(onHs ? `Pubky homeserver ${esc(hs.version || '')}` : 'Not reachable', onHs ? `${countOf(hs.users || 0, 'accounts')}${hs.disabled_users ? ` (${hs.disabled_users} turned off)` : ''} · ${fmtBytes((hs.disk_used_mb || 0) * 1e6)} used · whoever runs it (you) can read every account’s files, <code>/priv</code> included, so tell the people you invite.` : esc(hs.error || 'The node can’t reach its homeserver’s admin API.'), '')
@@ -5812,6 +5815,12 @@
             // The kind of invite: radio cards, the chosen one's details shown (S1)
             const kindOf = () => ($('input[name="pinvkind"]:checked', box) || {}).value || kinds[0];
             const keyIn = $('#pinvkey', box); const keyErr = $('#pinvkeyerr', box);
+            if (draft) {
+              const k = $$('input[name="pinvkind"]', box).find((i) => i.value === draft.kind); if (k) k.checked = true;
+              ['pinvname', 'pinvquota', 'pinvkey'].forEach((id) => { $(`#${id}`, box).value = draft[id]; });
+            }
+            // Turning a tablet into a phone (or back) folds the sections (or unfolds them)
+            box.reshell = () => loadPeople(true);
             const fit = () => {
               const k = kindOf(); const music = k === 'music';
               $$('.way', box).forEach((w) => { const on = w.querySelector('input').value === k; w.classList.toggle('on', on); w.querySelector('.way-more').hidden = !on; });
@@ -5824,7 +5833,7 @@
             keyIn.onchange = () => setKey(keyIn.value);
             keyIn.oninput = () => { if (!keyErr.hidden) checkKey(); };
             const paste = $('#pinvpaste', box); paste.hidden = !(navigator.clipboard && navigator.clipboard.readText);
-            paste.onclick = async () => { try { const t = await navigator.clipboard.readText(); if (!setKey(t)) toast('The clipboard has no Pubky key', 'error'); } catch { toast('The browser didn’t allow reading the clipboard: paste into the field instead', 'error'); } };
+            paste.onclick = async () => { try { const t = await navigator.clipboard.readText(); if (!setKey(t, true)) toast('The clipboard has no Pubky key', 'error'); } catch { toast('The browser didn’t allow reading the clipboard: paste into the field instead', 'error'); } };
             const scan = $('#pinvscan', box); scan.hidden = !canScan();
             scan.onclick = async () => { const k = await scanKey(); if (k) setKey(k); };
             $('#pinvgo', box).onclick = async () => {
