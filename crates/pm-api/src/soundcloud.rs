@@ -253,6 +253,8 @@ async fn get_json(
     } else {
         format!("{}/{}", api_base(), path.trim_start_matches('/'))
     };
+    // The sign-in token is the owner's: anyone else's request goes with the client ID alone
+    let c = &for_person(c, &crate::accounts::asking());
     let mut req = s
         .http_client()
         .get(&url)
@@ -281,6 +283,16 @@ async fn get_json(
         Err(StreamError::Track(m)) if status == 404 => Err(ApiError::not_found(m)),
         Err(StreamError::Track(m)) => Err(ApiError::new(StatusCode::BAD_GATEWAY, m)),
     }
+}
+
+/// The client as `who` may use it: the node's client ID, and the sign-in token only for the
+/// owner, whose account it is (a listener plays and searches what is public).
+fn for_person(c: &Client, who: &crate::accounts::Who) -> Client {
+    let mut c = c.clone();
+    if !who.is_owner() {
+        c.token.clear();
+    }
+    c
 }
 
 /// A cheap call with the client ID alone: does SoundCloud still take it?
@@ -1014,12 +1026,14 @@ pub(crate) async fn put(
 fn stream_url_blocking(
     library: &std::sync::Mutex<pm_library::Library>,
     id: &str,
+    who: &crate::accounts::Who,
 ) -> Result<(String, Pick), StreamError> {
     let (c, st) = {
         let lib = library.lock().map_err(|_| StreamError::Track("library".into()))?;
         (client_of(&lib), load(&lib))
     };
     let c = c.ok_or_else(|| StreamError::Track("no SoundCloud client ID on this node".into()))?;
+    let c = for_person(&c, who);
     if !st.enabled {
         return Err(StreamError::Track(
             "SoundCloud is off (Sources › SoundCloud)".into(),
@@ -1132,6 +1146,7 @@ pub fn record<T>(library: &std::sync::Mutex<pm_library::Library>, r: &Result<T, 
 pub(crate) fn open_track_blocking(
     library: &std::sync::Mutex<pm_library::Library>,
     id: &str,
+    who: &crate::accounts::Who,
 ) -> Result<Box<dyn pm_zones::FrameSource>, pm_zones::SourceError> {
     let fail = |reason: String| pm_zones::SourceError::Open {
         uri: track_uri(id),
@@ -1140,7 +1155,7 @@ pub(crate) fn open_track_blocking(
     if id.is_empty() || !id.bytes().all(|b| b.is_ascii_digit()) {
         return Err(fail("bad SoundCloud track id".into()));
     }
-    let r = stream_url_blocking(library, id);
+    let r = stream_url_blocking(library, id, who);
     record(library, &r);
     let (url, p) = r.map_err(|e| match e {
         StreamError::Mode(m) | StreamError::Track(m) => fail(m),

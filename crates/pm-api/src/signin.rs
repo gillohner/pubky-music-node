@@ -17,7 +17,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{state::NodeState, ApiError, ApiResult};
+use crate::{accounts::Who, state::NodeState, ApiError, ApiResult};
 
 /// One way to sign in to a source.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -91,18 +91,23 @@ pub struct ImportBody {
     pub text: Option<String>,
 }
 
-/// A source's sign-in ways.
+/// A source's sign-in ways, for one person (each signs in to their own account).
 #[async_trait::async_trait]
 pub(crate) trait SignInSource: Send + Sync {
     /// With `headers`, the tab's answer (other apps' files are looked at, status views come
     /// along); without, the overview line only.
-    fn describe(&self, s: &NodeState, headers: Option<&HeaderMap>) -> SignIn;
+    fn describe(&self, s: &NodeState, who: &Who, headers: Option<&HeaderMap>) -> SignIn;
     /// A way was picked (not yet signed in with).
-    fn way_chosen(&self, _s: &Arc<NodeState>, _way: &str) {}
+    fn way_chosen(&self, _s: &Arc<NodeState>, _who: &Who, _way: &str) {}
     /// Sign out of the way in use.
-    fn sign_out_of(&self, s: &NodeState, way: &str) -> Result<(), ApiError>;
+    fn sign_out_of(&self, s: &NodeState, who: &Who, way: &str) -> Result<(), ApiError>;
     /// Use a found sign-in or a pasted / picked file; the way to remember comes back.
-    async fn import(&self, s: &Arc<NodeState>, body: ImportBody) -> Result<&'static str, ApiError>;
+    async fn import(&self, s: &Arc<NodeState>, who: &Who, body: ImportBody)
+        -> Result<&'static str, ApiError>;
+    /// Each person signs in on their own (false: the node's one sign-in, the owner's).
+    fn per_person(&self) -> bool {
+        true
+    }
 }
 
 /// The sources that sign people in.
@@ -122,20 +127,40 @@ pub fn way_key(source: &str) -> String {
     format!("{source}.signin_way")
 }
 
-pub(crate) fn chosen(lib: &pm_library::Library, source: &str) -> Option<String> {
-    lib.get_setting(&way_key(source))
-        .ok()
-        .flatten()
-        .filter(|v| !v.is_empty())
+/// The way this person picked.
+pub(crate) fn chosen(lib: &pm_library::Library, who: &Who, source: &str) -> Option<String> {
+    who.get(lib, &way_key(source)).filter(|v| !v.is_empty())
 }
 
-/// The overview line for a source that signs people in; `None` for one that does not.
+/// The overview line for a source that signs people in, for whoever is asking; `None` for one
+/// that does not.
 pub(crate) fn line(s: &NodeState, source: &str) -> Option<String> {
-    source_of(source).map(|x| x.describe(s, None).line)
+    let who = crate::accounts::asking();
+    source_of(source)
+        .filter(|x| x.per_person() || who.is_owner())
+        .map(|x| x.describe(s, &who, None).line)
 }
 
 fn source_of(id: &str) -> Option<Box<dyn SignInSource>> {
     source(id)
+}
+
+/// The source's sign-in for this person: a source with one node-wide sign-in is the owner's.
+fn find_for(id: &str, who: &Who) -> Result<Box<dyn SignInSource>, ApiError> {
+    let x = find(id)?;
+    if !x.per_person() && !who.is_owner() {
+        return Err(ApiError::new(
+            axum::http::StatusCode::FORBIDDEN,
+            "that sign-in is the node owner's",
+        ));
+    }
+    if *who == Who::Nobody {
+        return Err(ApiError::new(
+            axum::http::StatusCode::FORBIDDEN,
+            "sign in to the node first: sign-ins are kept per person",
+        ));
+    }
+    Ok(x)
 }
 
 fn find(id: &str) -> Result<Box<dyn SignInSource>, ApiError> {
@@ -148,16 +173,75 @@ fn find(id: &str) -> Result<Box<dyn SignInSource>, ApiError> {
     )))
 }
 
-fn describe(s: &NodeState, id: &str, headers: Option<&HeaderMap>) -> Result<SignIn, ApiError> {
-    Ok(find(id)?.describe(s, headers))
-}
-
 pub(crate) async fn get(
     State(s): State<Arc<NodeState>>,
+    axum::Extension(caller): axum::Extension<crate::accounts::Caller>,
     Path(source): Path<String>,
     headers: HeaderMap,
 ) -> ApiResult<SignIn> {
-    Ok(Json(describe(&s, &source, Some(&headers))?))
+    let who = Who::of(&caller);
+    Ok(Json(find_for(&source, &who)?.describe(&s, &who, Some(&headers))))
+}
+
+/// One service in Settings › You › Services: the caller's own sign-in.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MyService {
+    pub source: String,
+    pub name: String,
+    /// The caller is signed in to their own account.
+    pub connected: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
+    /// The way in use.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub way: Option<String>,
+    /// Some way to sign in is open to the caller (false: the owner hasn't set up what it needs).
+    pub available: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// Where the sign-in ways are: `GET/PUT/DELETE` it.
+    pub setup: String,
+}
+
+/// The services each person signs in to on their own.
+pub(crate) const PER_PERSON: &[(&str, &str)] = &[
+    (crate::tidal::SOURCE_ID, "TIDAL"),
+    ("qobuz", "Qobuz"),
+    ("spotify", "Spotify"),
+];
+
+/// `GET /v1/me/services`: the caller's own streaming sign-ins (owner or listener), for
+/// Settings › You › Services. A source the caller isn't connected to plays nothing for them.
+pub(crate) async fn my_services(
+    State(s): State<Arc<NodeState>>,
+    axum::Extension(caller): axum::Extension<crate::accounts::Caller>,
+) -> ApiResult<Vec<MyService>> {
+    let who = Who::of(&caller);
+    if who == Who::Nobody {
+        return Err(ApiError::new(
+            axum::http::StatusCode::FORBIDDEN,
+            "sign in to the node first: sign-ins are kept per person",
+        ));
+    }
+    let mut out = Vec::new();
+    for (id, name) in PER_PERSON {
+        let Some(src) = source(id) else { continue };
+        let si = src.describe(&s, &who, None);
+        let available = si.ways.iter().any(|w| w.available);
+        out.push(MyService {
+            source: (*id).into(),
+            name: (*name).into(),
+            connected: si.in_use.is_some(),
+            user: si.in_use.as_ref().and_then(|u| u.user.clone()),
+            way: si.in_use.as_ref().map(|u| u.way.clone()),
+            available,
+            reason: (!available)
+                .then(|| si.ways.iter().find_map(|w| w.reason.clone()))
+                .flatten(),
+            setup: format!("/v1/sources/{id}/signin"),
+        });
+    }
+    Ok(Json(out))
 }
 
 #[derive(Debug, Deserialize)]
@@ -169,12 +253,14 @@ pub struct Choice {
 /// (TIDAL: the device way is what "Full tracks" used to switch on).
 pub(crate) async fn put(
     State(s): State<Arc<NodeState>>,
+    axum::Extension(caller): axum::Extension<crate::accounts::Caller>,
     Path(source): Path<String>,
     headers: HeaderMap,
     Json(b): Json<Choice>,
 ) -> ApiResult<SignIn> {
-    let src = find(&source)?;
-    let si = src.describe(&s, Some(&headers));
+    let who = Who::of(&caller);
+    let src = find_for(&source, &who)?;
+    let si = src.describe(&s, &who, Some(&headers));
     let Some(w) = si.ways.iter().find(|w| w.id == b.way) else {
         let ids: Vec<&str> = si.ways.iter().map(|w| w.id.as_str()).collect();
         return Err(ApiError::bad_request(format!(
@@ -190,12 +276,13 @@ pub(crate) async fn put(
                 .unwrap_or_else(|| format!("{} is not available on this node", w.label)),
         ));
     }
-    s.library
-        .lock()
-        .expect("library poisoned")
-        .set_setting(&way_key(&source), &b.way)?;
-    src.way_chosen(&s, &b.way);
-    Ok(Json(src.describe(&s, Some(&headers))))
+    who.put(
+        &s.library.lock().expect("library poisoned"),
+        &way_key(&source),
+        Some(&b.way),
+    )?;
+    src.way_chosen(&s, &who, &b.way);
+    Ok(Json(src.describe(&s, &who, Some(&headers))))
 }
 
 /// `POST /v1/sources/{source}/signin/import {id}` or `{text}`: use a sign-in found in another
@@ -203,35 +290,47 @@ pub(crate) async fn put(
 /// a token file); nothing is changed then.
 pub(crate) async fn import(
     State(s): State<Arc<NodeState>>,
+    axum::Extension(caller): axum::Extension<crate::accounts::Caller>,
     Path(source): Path<String>,
     headers: HeaderMap,
     Json(b): Json<ImportBody>,
 ) -> ApiResult<SignIn> {
-    let src = find(&source)?;
+    let who = Who::of(&caller);
+    let src = find_for(&source, &who)?;
+    // Other apps' files on the node's machine are the owner's: a listener pastes their own
+    if b.id.is_some() && !who.is_owner() {
+        return Err(ApiError::new(
+            axum::http::StatusCode::FORBIDDEN,
+            "the sign-ins found on this machine are the owner's; paste your own instead",
+        ));
+    }
     if b.id.as_deref().is_none_or(str::is_empty) && b.text.as_deref().is_none_or(|t| t.trim().is_empty()) {
         return Err(ApiError::bad_request(
             "Say which sign-in (id) or paste one (text)",
         ));
     }
-    let way = src.import(&s, b).await?;
-    s.library
-        .lock()
-        .expect("library poisoned")
-        .set_setting(&way_key(&source), way)?;
-    Ok(Json(src.describe(&s, Some(&headers))))
+    let way = src.import(&s, &who, b).await?;
+    who.put(
+        &s.library.lock().expect("library poisoned"),
+        &way_key(&source),
+        Some(way),
+    )?;
+    Ok(Json(src.describe(&s, &who, Some(&headers))))
 }
 
 /// `DELETE /v1/sources/{source}/signin`: sign out of the way in use. The picked way stays
 /// remembered.
 pub(crate) async fn sign_out(
     State(s): State<Arc<NodeState>>,
+    axum::Extension(caller): axum::Extension<crate::accounts::Caller>,
     Path(source): Path<String>,
     headers: HeaderMap,
 ) -> ApiResult<SignIn> {
-    let src = find(&source)?;
-    let si = src.describe(&s, Some(&headers));
+    let who = Who::of(&caller);
+    let src = find_for(&source, &who)?;
+    let si = src.describe(&s, &who, Some(&headers));
     if let Some(u) = &si.in_use {
-        src.sign_out_of(&s, &u.way)?;
+        src.sign_out_of(&s, &who, &u.way)?;
     }
-    Ok(Json(src.describe(&s, Some(&headers))))
+    Ok(Json(src.describe(&s, &who, Some(&headers))))
 }

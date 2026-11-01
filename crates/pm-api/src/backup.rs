@@ -297,6 +297,36 @@ fn counts_of(lib: &Library) -> Result<BackupCounts, BackupError> {
 }
 
 /// The backup file's bytes. `passphrase`: lock the sign-ins in; `None` leaves them out.
+/// A listener's own copy of a sign-in (`person.<key>.<setting>` for a [`SECRET_SETTINGS`] key):
+/// sealed and left out of the snapshot as the owner's are.
+pub fn is_person_signin(key: &str) -> bool {
+    key.strip_prefix(crate::accounts::PERSON_PREFIX)
+        .and_then(|rest| rest.split_once('.'))
+        .is_some_and(|(_, base)| SECRET_SETTINGS.iter().any(|(k, _)| *k == base))
+}
+
+/// Deletes every sign-in from a plain database copy: the owner's ([`SECRET_SETTINGS`]) and each
+/// listener's own (`pm-node backup`, and the web backup's snapshot).
+pub fn strip_signins(copy: &Library) -> Result<(), pm_library::LibraryError> {
+    for (key, _) in SECRET_SETTINGS {
+        copy.delete_setting(key)?;
+    }
+    for (key, _) in copy.settings_with_prefix(crate::accounts::PERSON_PREFIX)? {
+        if is_person_signin(&key) {
+            copy.delete_setting(&key)?;
+        }
+    }
+    Ok(())
+}
+
+fn person_signins(lib: &Library) -> Result<Vec<(String, String)>, BackupError> {
+    Ok(lib
+        .settings_with_prefix(crate::accounts::PERSON_PREFIX)?
+        .into_iter()
+        .filter(|(k, _)| is_person_signin(k))
+        .collect())
+}
+
 pub fn make(s: &NodeState, passphrase: Option<&str>) -> Result<(Vec<u8>, Manifest), BackupError> {
     let snap = Scratch::new("backup.db")?;
     let (counts, folders, mut secrets) = {
@@ -307,6 +337,9 @@ pub fn make(s: &NodeState, passphrase: Option<&str>) -> Result<(Vec<u8>, Manifes
             if let Some(v) = lib.get_setting(key)? {
                 secrets.settings.insert((*key).to_string(), v);
             }
+        }
+        for (key, v) in person_signins(&lib)? {
+            secrets.settings.insert(key, v);
         }
         let folders = lib
             .list_folders()?
@@ -319,9 +352,7 @@ pub fn make(s: &NodeState, passphrase: Option<&str>) -> Result<(Vec<u8>, Manifes
     let db = (|| -> Result<Vec<u8>, BackupError> {
         {
             let copy = Library::open(&snap)?;
-            for (key, _) in SECRET_SETTINGS {
-                copy.delete_setting(key)?;
-            }
+            strip_signins(&copy)?;
             for key in NODE_OWN {
                 copy.delete_setting(key)?;
             }
@@ -363,6 +394,9 @@ pub fn make(s: &NodeState, passphrase: Option<&str>) -> Result<(Vec<u8>, Manifes
                 if secrets.settings.contains_key(*key) {
                     left_out.push(format!("the {name} sign-in"));
                 }
+            }
+            if secrets.settings.keys().any(|k| is_person_signin(k)) {
+                left_out.push("the listeners' own sign-ins".into());
             }
             if secrets.files.contains_key("pubky-session.secret") {
                 left_out.push("the Pubky sign-in".into());
@@ -560,6 +594,7 @@ async fn restore_locked(
             .iter()
             .map(|(k, _)| Ok((*k, lib.get_setting(k)?)))
             .collect::<Result<_, BackupError>>()?;
+        let people_here = person_signins(&lib)?;
         lib.restore_from(&staged)?;
         for (k, v) in keep {
             match v {
@@ -581,6 +616,20 @@ async fn restore_locked(
                         lib.set_setting(key, v)?;
                     }
                 }
+            }
+        }
+        // Listeners' own: from the sealed backup, else the ones made here before the restore
+        let sealed_people: Vec<(&String, &String)> = secrets
+            .as_ref()
+            .map(|x| x.settings.iter().filter(|(k, _)| is_person_signin(k)).collect())
+            .unwrap_or_default();
+        if sealed_people.is_empty() {
+            for (k, v) in &people_here {
+                lib.set_setting(k, v)?;
+            }
+        } else {
+            for (k, v) in sealed_people {
+                lib.set_setting(k, v)?;
             }
         }
         lib.drop_missing_art()?;

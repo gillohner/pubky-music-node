@@ -392,11 +392,25 @@ fn cookies_file(s: &NodeState) -> std::path::PathBuf {
 
 #[async_trait::async_trait]
 impl crate::signin::SignInSource for YouTubeSignIn {
-    fn describe(&self, s: &NodeState, headers: Option<&axum::http::HeaderMap>) -> crate::signin::SignIn {
+    /// The node's one sign-in, the owner's (the scrobbles and the API key are the node's).
+    fn per_person(&self) -> bool {
+        false
+    }
+
+    fn describe(
+        &self,
+        s: &NodeState,
+        _who: &crate::accounts::Who,
+        headers: Option<&axum::http::HeaderMap>,
+    ) -> crate::signin::SignIn {
         use crate::signin::{InUse, SignIn, Way, NOT_SIGNED_IN};
         let key = api_key(s).is_some();
         let cookies = cookies_file(s).is_file();
-        let chosen = crate::signin::chosen(&s.library.lock().expect("library poisoned"), SOURCE_ID);
+        let chosen = crate::signin::chosen(
+            &s.library.lock().expect("library poisoned"),
+            &crate::accounts::Who::Owner,
+            SOURCE_ID,
+        );
         let ways = vec![
             Way {
                 id: WAY_KEY.into(),
@@ -465,7 +479,7 @@ impl crate::signin::SignInSource for YouTubeSignIn {
         }
     }
 
-    fn sign_out_of(&self, s: &NodeState, way: &str) -> Result<(), ApiError> {
+    fn sign_out_of(&self, s: &NodeState, _who: &crate::accounts::Who, way: &str) -> Result<(), ApiError> {
         if way == WAY_COOKIES {
             crate::imports::remove_private(&cookies_file(s)).map_err(|_| {
                 ApiError::new(
@@ -486,6 +500,7 @@ impl crate::signin::SignInSource for YouTubeSignIn {
     async fn import(
         &self,
         s: &Arc<NodeState>,
+        _who: &crate::accounts::Who,
         body: crate::signin::ImportBody,
     ) -> Result<&'static str, ApiError> {
         let Some(text) = body.text.as_deref().filter(|t| !t.trim().is_empty()) else {

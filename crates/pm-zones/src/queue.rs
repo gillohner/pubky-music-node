@@ -29,6 +29,11 @@ pub struct QueueItem {
     /// with it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<FetchLimit>,
+    /// Who queued it, when not the owner: a listener's Pubky key. A streaming service plays it
+    /// with that person's own account, never anyone else's. Kept with the item: moved, saved,
+    /// restored and taken into a listen-along group with it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by: Option<String>,
 }
 
 /// Where the node may connect to fetch an item for someone other than the owner: addresses that
@@ -69,6 +74,7 @@ impl QueueItem {
             duration_ms: None,
             image: None,
             limit: None,
+            by: None,
         }
     }
 

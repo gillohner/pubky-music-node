@@ -59,7 +59,10 @@ pub(crate) fn describe(s: &NodeState, source: &str) -> Result<Quality, ApiError>
     crate::streaming::find(source)?;
     Ok(match source {
         crate::tidal::SOURCE_ID => {
-            let st = crate::tidal_unofficial::load(&s.library.lock().expect("library poisoned"));
+            let st = crate::tidal_unofficial::load(
+                &s.library.lock().expect("library poisoned"),
+                &crate::accounts::asking(),
+            );
             Quality {
                 source: source.into(),
                 options: vec![
@@ -74,7 +77,10 @@ pub(crate) fn describe(s: &NodeState, source: &str) -> Result<Quality, ApiError>
             }
         }
         "qobuz" => {
-            let st = crate::qobuz::load(&s.library.lock().expect("library poisoned"));
+            let st = crate::qobuz::load(
+                &s.library.lock().expect("library poisoned"),
+                &crate::accounts::asking(),
+            );
             let cd_only = st.session.as_ref().is_some_and(|x| !x.hires);
             Quality {
                 source: source.into(),
@@ -153,10 +159,10 @@ pub(crate) async fn put(
     }
     match source.as_str() {
         crate::tidal::SOURCE_ID => {
-            crate::tidal_unofficial::update(&s, |st| st.quality = p.id.clone());
+            crate::tidal_unofficial::update(&s, &crate::accounts::asking(), |st| st.quality = p.id.clone());
         }
         "qobuz" => {
-            crate::qobuz::update(&s, |st| st.quality = p.id.clone());
+            crate::qobuz::update(&s, &crate::accounts::asking(), |st| st.quality = p.id.clone());
         }
         "spotify" => crate::librespot::set_bitrate(&s, &p.id).await,
         _ => {}
