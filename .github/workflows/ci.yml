@@ -560,6 +560,9 @@ jobs:
       - name: comments on item pages (post, replies, delete your own; desktop and phone)
         timeout-minutes: 5
         run: cd /tmp/pw && node $GITHUB_WORKSPACE/tools/ui-comments.js ci-token http://127.0.0.1:7788
+      - name: People on phones and tablets (invite cards, paste and scan a key, folds, tag chips to touch; 390 and 768)
+        timeout-minutes: 5
+        run: cd /tmp/pw && node $GITHUB_WORKSPACE/tools/ui-people.js ci-token http://127.0.0.1:7788
       - name: collections with web links and posts show their cards in order (desktop and phone)
         timeout-minutes: 5
         run: cd /tmp/pw && node $GITHUB_WORKSPACE/tools/ui-collection-cards.js ci-token http://127.0.0.1:7788
