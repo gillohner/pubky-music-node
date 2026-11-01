@@ -188,10 +188,13 @@ pub(crate) async fn upload_many(
         bytes_total: files.iter().map(|(_, b)| b).sum(),
         ..Default::default()
     };
+    let room = crate::copy_guard::room_of(&s);
+    let fits = crate::copy_guard::plan(room.as_ref(), &mut progress);
     if body.dry_run {
         return Ok(Json(progress));
     }
-    let sync = needs_session(&s)?;
+    fits?;
+    let target = crate::copy_guard::target_of(&s)?;
     claim_job(&s, &progress)?;
     let s2 = s.clone();
     let id = progress.id.clone();
@@ -201,11 +204,16 @@ pub(crate) async fn upload_many(
                 f(j);
             }
         };
+        let stop = |why: String| {
+            set(&|j| {
+                j.errors.push(why.clone());
+                j.stopped_reason = Some(why.clone());
+            })
+        };
         // Path → size: a file there with another size (an empty upload) is sent again
-        let present: std::collections::HashMap<String, Option<u64>> = match sync.list_private_files().await {
+        let present: std::collections::HashMap<String, Option<u64>> = match target.list().await {
             Ok(l) => l.into_iter().map(|f| (f.path, f.size)).collect(),
-            Err(e) => {
-                let msg = e.to_string();
+            Err(msg) => {
                 set(&|j| {
                     j.errors
                         .push(format!("the homeserver did not list its files: {msg}"));
@@ -214,6 +222,7 @@ pub(crate) async fn upload_many(
                 return;
             }
         };
+        let mut streak = crate::copy_guard::Streak::default();
         for (path, size) in files {
             if is_cancelled(&s2, &id) {
                 break;
@@ -223,100 +232,43 @@ pub(crate) async fn upload_many(
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
             set(&|j| j.current = Some(name.clone()));
-            let bytes = match tokio::fs::read(&path).await {
-                Ok(b) => b,
-                Err(e) => {
-                    let msg = format!("{name}: {e}");
+            if !crate::copy_guard::is_audio(&path).await {
+                set(&|j| j.not_audio += 1);
+                continue;
+            }
+            // Never into the reserve the homeserver's database needs
+            if let Some(why) = room.space().and_then(|sp| sp.too_little(size)) {
+                stop(why);
+                break;
+            }
+            match copy_one(&s2, target.as_ref(), &present, &path, &name).await {
+                Ok(sent) => {
+                    streak.ok();
                     set(&|j| {
-                        j.failed += 1;
-                        j.errors.push(msg.clone());
-                    });
-                    continue;
-                }
-            };
-            if bytes.is_empty() {
-                let msg = format!("{name}: the file is empty, not copied");
-                set(&|j| {
-                    j.failed += 1;
-                    j.errors.push(msg.clone());
-                });
-                continue;
-            }
-            let len = bytes.len() as u64;
-            // Hashing a big FLAC is CPU work: off the threads that answer requests
-            let (bytes, remote, hash) = {
-                let p = path.clone();
-                match tokio::task::spawn_blocking(move || {
-                    let hash = blake3_hex(&bytes);
-                    let r = format!(
-                        "{PRIVATE_FILES_DIR}{}",
-                        remote_name_for(&hash, &safe_file_name(&p))
-                    );
-                    (bytes, r, hash)
-                })
-                .await
-                {
-                    Ok(v) => v,
-                    Err(_) => continue,
-                }
-            };
-            remember_hash(&s2, &path, &hash);
-            if present.get(&remote).is_some_and(|sz| *sz == Some(len)) {
-                set(&|j| {
-                    j.skipped += 1;
-                    j.bytes_done += size;
-                });
-                continue;
-            }
-            let rate = copy_rate(&s2);
-            match sync
-                .upload_private_paced(&remote, bytes, (rate > 0).then_some(rate))
-                .await
-            {
-                // Check what the homeserver kept
-                Ok(()) => {
-                    crate::storage::note_full(&s2, false);
-                    match sync.stat_private(&remote).await {
-                        Ok(Some(kept)) if kept == len => set(&|j| {
+                        if sent {
                             j.done += 1;
-                            j.bytes_done += size;
-                        }),
-                        Ok(kept) => {
-                            let msg = format!(
-                                "{name}: the homeserver kept {} of {len} bytes; run the copy again",
-                                kept.unwrap_or(0)
-                            );
-                            set(&|j| {
-                                j.failed += 1;
-                                j.errors.push(msg.clone());
-                            });
+                        } else {
+                            j.skipped += 1;
                         }
-                        // Could not check: count it as sent
-                        Err(_) => set(&|j| {
-                            j.done += 1;
-                            j.bytes_done += size;
-                        }),
-                    }
+                        j.bytes_done += size;
+                    });
                 }
                 // Full: every further file would be sent whole only to be refused
-                Err(e) if e.is_full() => {
+                Err(e) if crate::add_music::is_full_error(&e) => {
                     crate::storage::note_full(&s2, true);
-                    let msg = format!(
-                        "{name}: {}; the files after it were not copied",
-                        crate::add_music::FULL
-                    );
-                    set(&|j| {
-                        j.failed += 1;
-                        j.errors.push(msg.clone());
-                    });
+                    set(&|j| j.failed += 1);
+                    stop(format!("{e}; the files after it were not copied"));
                     break;
                 }
                 Err(e) => {
-                    let msg = format!("{name}: {e}");
                     set(&|j| {
                         j.failed += 1;
-                        j.errors.push(msg.clone());
+                        j.errors.push(e.clone());
                     });
+                    if let Some(why) = streak.failed(&e) {
+                        stop(why);
+                        break;
+                    }
                 }
             }
         }
@@ -331,6 +283,63 @@ pub(crate) async fn upload_many(
     });
     progress.current = None;
     Ok(Json(progress))
+}
+
+/// One library file to the homeserver: Ok(true) sent, Ok(false) already there (same content and
+/// size). A failed or short upload is deleted there, never left looking like a song.
+async fn copy_one(
+    s: &Arc<NodeState>,
+    target: &dyn crate::copy_guard::Target,
+    present: &std::collections::HashMap<String, Option<u64>>,
+    path: &std::path::Path,
+    name: &str,
+) -> Result<bool, String> {
+    let bytes = tokio::fs::read(path).await.map_err(|e| format!("{name}: {e}"))?;
+    if bytes.is_empty() {
+        return Err(format!("{name}: the file is empty, not copied"));
+    }
+    let len = bytes.len() as u64;
+    // Hashing a big FLAC is CPU work: off the threads that answer requests
+    let p = path.to_path_buf();
+    let (bytes, remote, hash) = tokio::task::spawn_blocking(move || {
+        let hash = blake3_hex(&bytes);
+        let r = format!(
+            "{PRIVATE_FILES_DIR}{}",
+            remote_name_for(&hash, &safe_file_name(&p))
+        );
+        (bytes, r, hash)
+    })
+    .await
+    .map_err(|e| format!("{name}: {e}"))?;
+    remember_hash(s, path, &hash);
+    if present.get(&remote).is_some_and(|sz| *sz == Some(len)) {
+        return Ok(false);
+    }
+    let rate = copy_rate(s);
+    match target.upload(&remote, bytes, (rate > 0).then_some(rate)).await {
+        Ok(()) => {}
+        Err(crate::copy_guard::UploadError::Full(_)) => {
+            crate::copy_guard::drop_partial(target, &remote).await;
+            return Err(format!("{name}: {}", crate::add_music::FULL));
+        }
+        Err(e) => {
+            crate::copy_guard::drop_partial(target, &remote).await;
+            return Err(format!("{name}: {e}"));
+        }
+    }
+    crate::storage::note_full(s, false);
+    // Check what the homeserver kept; one it couldn't say counts as sent
+    match target.stat(&remote).await {
+        Ok(Some(kept)) if kept == len => Ok(true),
+        Ok(kept) => {
+            crate::copy_guard::drop_partial(target, &remote).await;
+            Err(format!(
+                "{name}: the homeserver kept {} of {len} bytes; run the copy again",
+                kept.unwrap_or(0)
+            ))
+        }
+        Err(_) => Ok(true),
+    }
 }
 
 /// `GET /v1/pubky/files/upload/{id}`.

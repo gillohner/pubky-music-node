@@ -2177,6 +2177,21 @@ pub struct UploadProgress {
     pub finished: bool,
     /// The last few problems, plainly.
     pub errors: Vec<String>,
+    /// Files left out because they are not audio (`._*` AppleDouble files, anything that doesn't
+    /// probe as audio).
+    #[serde(default)]
+    pub not_audio: usize,
+    /// Why the job stopped before its last file (space running out, failures in a row).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stopped_reason: Option<String>,
+    /// Planned (and dry runs): the bytes the copy may need, what is free on the bundled
+    /// homeserver's disk, and what stays free for it. None for another homeserver.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub needed_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub free_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reserve_bytes: Option<u64>,
 }
 
 /// `GET /v1/health`: one outside part the node uses.

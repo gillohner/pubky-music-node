@@ -16,6 +16,7 @@ pub mod archive;
 pub mod art;
 pub mod artist_info;
 pub mod audius;
+pub mod copy_guard;
 pub mod renderer;
 
 /// "1 album", "2 albums".
@@ -16027,5 +16028,288 @@ exec sleep 300
         let st = zone.wait_stopped().await;
         assert!(st.error.is_none(), "{:?}", st.error);
         assert_eq!(*seen.lock().unwrap(), ["Bearer owner-token"]);
+    }
+
+    /// A homeserver for the copy jobs' tests: records uploads and deletes; uploads fail while
+    /// `fails` is set, keep `short` bytes less than sent, and use up `disk`'s free space.
+    #[derive(Default)]
+    struct FakeHomeserver {
+        uploads: std::sync::Mutex<Vec<String>>,
+        deletes: std::sync::Mutex<Vec<String>>,
+        sizes: std::sync::Mutex<std::collections::HashMap<String, u64>>,
+        fails: std::sync::atomic::AtomicBool,
+        short: std::sync::atomic::AtomicU64,
+        disk: Option<Arc<FakeDisk>>,
+        /// What else each upload uses on the disk (the homeserver's database and logs).
+        extra: u64,
+    }
+
+    #[async_trait::async_trait]
+    impl copy_guard::Target for FakeHomeserver {
+        async fn list(&self) -> Result<Vec<pm_pubky::homeserver::RemoteFile>, String> {
+            Ok(Vec::new())
+        }
+        async fn upload(
+            &self,
+            remote: &str,
+            bytes: Vec<u8>,
+            _rate: Option<u64>,
+        ) -> Result<(), copy_guard::UploadError> {
+            self.uploads.lock().unwrap().push(remote.to_string());
+            if self.fails.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(copy_guard::UploadError::Other("500 Internal Server Error".into()));
+            }
+            let kept =
+                (bytes.len() as u64).saturating_sub(self.short.load(std::sync::atomic::Ordering::SeqCst));
+            self.sizes.lock().unwrap().insert(remote.to_string(), kept);
+            if let Some(d) = &self.disk {
+                let mut sp = d.0.lock().unwrap();
+                sp.free = sp.free.saturating_sub(kept + self.extra);
+            }
+            Ok(())
+        }
+        async fn stat(&self, remote: &str) -> Result<Option<u64>, String> {
+            Ok(self.sizes.lock().unwrap().get(remote).copied())
+        }
+        async fn delete(&self, remote: &str) -> Result<(), String> {
+            self.deletes.lock().unwrap().push(remote.to_string());
+            Ok(())
+        }
+    }
+
+    /// The bundled homeserver's disk, as the copy jobs see it.
+    struct FakeDisk(std::sync::Mutex<copy_guard::Space>);
+
+    impl copy_guard::Room for FakeDisk {
+        fn space(&self) -> Option<copy_guard::Space> {
+            Some(*self.0.lock().unwrap())
+        }
+    }
+
+    const GB: u64 = 1 << 30;
+
+    /// A node whose copy jobs go to `hs` on `disk`, and a folder of `n` short songs.
+    async fn copy_setup(
+        hs: Arc<FakeHomeserver>,
+        disk: Arc<FakeDisk>,
+        n: u32,
+    ) -> (tempfile::TempDir, Arc<NodeState>, Router, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        *s.copy_seams.lock().unwrap() = (Some(hs), Some(disk));
+        let src = dir.path().join("music");
+        std::fs::create_dir_all(&src).unwrap();
+        for i in 1..=n {
+            tone_wav(&src.join(format!("{i:02} song.wav")), 1);
+        }
+        let app = router(s.clone());
+        (dir, s, app, src)
+    }
+
+    async fn copy_finished(app: &Router, id: &str) -> serde_json::Value {
+        for _ in 0..200 {
+            let (_, v) = call(app, "GET", &format!("/v1/pubky/files/upload/{id}"), None).await;
+            if v["finished"] == true {
+                return v;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        panic!("the copy never finished");
+    }
+
+    /// A copy to the bundled homeserver whose disk is 95 % full is refused before anything is
+    /// sent (NUC, 2026-11-01: a folder copy filled the disk and took the homeserver's database
+    /// down); the dry run shows what it needs against what is free.
+    #[tokio::test]
+    async fn a_copy_into_the_disks_reserve_is_refused_before_it_starts() {
+        let hs = Arc::new(FakeHomeserver::default());
+        let disk = Arc::new(FakeDisk(std::sync::Mutex::new(copy_guard::Space {
+            free: 98 * GB / 20,
+            total: 98 * GB,
+        })));
+        let (_dir, _s, app, src) = copy_setup(hs.clone(), disk, 2).await;
+        let body = |dry: bool| Some(serde_json::json!({"path": src, "dry_run": dry}));
+        let (st, dry) = call(&app, "POST", "/v1/library/imports", body(true)).await;
+        assert_eq!(st, StatusCode::OK, "{dry}");
+        assert_eq!(dry["reserve_bytes"], 5 * GB, "{dry}");
+        assert_eq!(dry["free_bytes"], 98 * GB / 20, "{dry}");
+        assert!(dry["needed_bytes"].as_u64().unwrap() > 0, "{dry}");
+        let (st, e) = call(&app, "POST", "/v1/library/imports", body(false)).await;
+        assert_eq!(st, StatusCode::INSUFFICIENT_STORAGE, "{e}");
+        assert!(
+            e["error"]
+                .as_str()
+                .unwrap()
+                .starts_with("not enough space on this machine"),
+            "{e}"
+        );
+        assert!(hs.uploads.lock().unwrap().is_empty());
+    }
+
+    /// Space running low partway: the copy stops before the file that would eat into the
+    /// reserve, and says why.
+    #[tokio::test]
+    async fn a_copy_stops_before_the_disk_reaches_its_reserve() {
+        // Room for the three songs (about 176 KB each) at the start; each upload also uses
+        // 300 KB more on the disk, so after the first the second would eat into the reserve
+        let disk = Arc::new(FakeDisk(std::sync::Mutex::new(copy_guard::Space {
+            free: 5 * GB + 600_000,
+            total: 98 * GB,
+        })));
+        let hs = Arc::new(FakeHomeserver {
+            disk: Some(disk.clone()),
+            extra: 300_000,
+            ..Default::default()
+        });
+        let (_dir, _s, app, src) = copy_setup(hs.clone(), disk, 3).await;
+        let (st, job) = call(
+            &app,
+            "POST",
+            "/v1/library/imports",
+            Some(serde_json::json!({"path": src})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{job}");
+        let done = copy_finished(&app, job["id"].as_str().unwrap()).await;
+        assert_eq!(done["done"], 1, "{done}");
+        assert!(
+            done["stopped_reason"]
+                .as_str()
+                .unwrap()
+                .starts_with("not enough space on this machine"),
+            "{done}"
+        );
+        assert_eq!(hs.uploads.lock().unwrap().len(), 1);
+    }
+
+    /// The homeserver failing (500s, as when its disk was full on the NUC) stops the copy after
+    /// three failures in a row instead of trying every file; nothing half sent is left there.
+    #[tokio::test]
+    async fn three_failures_in_a_row_stop_a_copy() {
+        let hs = Arc::new(FakeHomeserver::default());
+        hs.fails.store(true, std::sync::atomic::Ordering::SeqCst);
+        let disk = Arc::new(FakeDisk(std::sync::Mutex::new(copy_guard::Space {
+            free: 500 * GB,
+            total: 1000 * GB,
+        })));
+        let (_dir, _s, app, src) = copy_setup(hs.clone(), disk, 6).await;
+        let (_, job) = call(
+            &app,
+            "POST",
+            "/v1/library/imports",
+            Some(serde_json::json!({"path": src})),
+        )
+        .await;
+        let done = copy_finished(&app, job["id"].as_str().unwrap()).await;
+        assert_eq!(done["failed"], 3, "{done}");
+        assert!(
+            done["stopped_reason"]
+                .as_str()
+                .unwrap()
+                .contains("3 failures in a row"),
+            "{done}"
+        );
+        let uploads = hs.uploads.lock().unwrap().clone();
+        assert_eq!(uploads.len(), 3, "no 4th file is sent");
+        assert_eq!(
+            *hs.deletes.lock().unwrap(),
+            uploads,
+            "each failed one is deleted there"
+        );
+    }
+
+    /// macOS's `._*` AppleDouble files and files that only look like audio are not copied; a
+    /// short upload is deleted on the homeserver, never left as a truncated song.
+    #[tokio::test]
+    async fn only_whole_audio_files_are_copied() {
+        let hs = Arc::new(FakeHomeserver::default());
+        let disk = Arc::new(FakeDisk(std::sync::Mutex::new(copy_guard::Space {
+            free: 500 * GB,
+            total: 1000 * GB,
+        })));
+        let (_dir, _s, app, src) = copy_setup(hs.clone(), disk, 1).await;
+        std::fs::write(src.join("._01 song.wav"), vec![0u8; 4096]).unwrap();
+        std::fs::write(src.join("02 notes.flac"), b"not audio at all").unwrap();
+        let (_, job) = call(
+            &app,
+            "POST",
+            "/v1/library/imports",
+            Some(serde_json::json!({"path": src})),
+        )
+        .await;
+        let done = copy_finished(&app, job["id"].as_str().unwrap()).await;
+        assert_eq!(
+            (done["done"].clone(), done["not_audio"].clone()),
+            (1.into(), 2.into()),
+            "{done}"
+        );
+        let uploads = hs.uploads.lock().unwrap().clone();
+        assert_eq!(uploads.len(), 1, "{uploads:?}");
+        assert!(uploads[0].ends_with("song.wav"), "{uploads:?}");
+
+        // The homeserver keeps less than was sent: deleted there, counted as failed
+        hs.short.store(10, std::sync::atomic::Ordering::SeqCst);
+        std::fs::remove_file(src.join("._01 song.wav")).unwrap();
+        tone_wav(&src.join("03 other.wav"), 2);
+        let (_, job) = call(
+            &app,
+            "POST",
+            "/v1/library/imports",
+            Some(serde_json::json!({"path": src})),
+        )
+        .await;
+        let done = copy_finished(&app, job["id"].as_str().unwrap()).await;
+        assert!(done["failed"].as_u64().unwrap() >= 1, "{done}");
+        assert!(
+            done["errors"].to_string().contains("the homeserver kept"),
+            "{done}"
+        );
+        let deletes = hs.deletes.lock().unwrap().clone();
+        assert!(deletes.iter().any(|d| d.ends_with("other.wav")), "{deletes:?}");
+    }
+
+    /// The library copy (`POST /v1/pubky/files/upload`) has the same guards: three failures in a
+    /// row stop it, and a disk at 95 % refuses it before it starts.
+    #[tokio::test]
+    async fn the_library_copy_has_the_same_guards() {
+        let hs = Arc::new(FakeHomeserver::default());
+        hs.fails.store(true, std::sync::atomic::Ordering::SeqCst);
+        let disk = Arc::new(FakeDisk(std::sync::Mutex::new(copy_guard::Space {
+            free: 500 * GB,
+            total: 1000 * GB,
+        })));
+        let (_dir, s, app, src) = copy_setup(hs.clone(), disk.clone(), 5).await;
+        for i in 1..=5 {
+            let t = untagged_track(src.join(format!("{i:02} song.wav")), &format!("Song {i}"), "Band");
+            s.library.lock().unwrap().upsert_track(&t).unwrap();
+        }
+        let (st, job) = call(
+            &app,
+            "POST",
+            "/v1/pubky/files/upload",
+            Some(serde_json::json!({"all": true})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{job}");
+        let done = copy_finished(&app, job["id"].as_str().unwrap()).await;
+        assert_eq!(done["failed"], 3, "{done}");
+        assert!(
+            done["stopped_reason"].to_string().contains("3 failures in a row"),
+            "{done}"
+        );
+        assert_eq!(hs.uploads.lock().unwrap().len(), 3);
+
+        *disk.0.lock().unwrap() = copy_guard::Space {
+            free: 98 * GB / 20,
+            total: 98 * GB,
+        };
+        let (st, e) = call(
+            &app,
+            "POST",
+            "/v1/pubky/files/upload",
+            Some(serde_json::json!({"all": true})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::INSUFFICIENT_STORAGE, "{e}");
     }
 }

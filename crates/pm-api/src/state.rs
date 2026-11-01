@@ -157,6 +157,12 @@ pub struct NodeState {
     /// What the Pinakes in use ships (the names of its `/v1/info` limits), asked at most every
     /// ten minutes (`home::pinakes_limits`).
     pub pinakes_caps: std::sync::Mutex<Option<(std::time::Instant, Vec<String>)>>,
+    /// A fake homeserver and disk for the copy jobs' tests (copy_guard.rs); none in use.
+    #[allow(clippy::type_complexity)]
+    pub(crate) copy_seams: std::sync::Mutex<(
+        Option<Arc<dyn crate::copy_guard::Target>>,
+        Option<Arc<dyn crate::copy_guard::Room>>,
+    )>,
     /// Controller sign-ins in progress: id → (flow, started, who asked: `lib::login_origin`).
     pub controller_logins: tokio::sync::Mutex<
         std::collections::HashMap<String, (pm_pubky::homeserver::LoginFlow, std::time::Instant, String)>,
@@ -419,6 +425,7 @@ impl NodeState {
             renewals: Default::default(),
             upload_jobs: Default::default(),
             pinakes_caps: Default::default(),
+            copy_seams: Default::default(),
             events,
             sources_off,
             sync: Mutex::new(None),
