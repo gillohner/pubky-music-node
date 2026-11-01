@@ -660,17 +660,14 @@ impl NodeHomeserver {
         Ok(out)
     }
 
-    /// The size of one private file, as the homeserver reports it (`None`: not there).
+    /// The size of one private file, as the homeserver reports it (`None`: not there; `Some(None)`:
+    /// there, its size not given).
     pub async fn stat_private(
         &self,
         session: &PubkySession,
         path: &str,
-    ) -> Result<Option<u64>, HomeserverError> {
-        Ok(session
-            .storage()
-            .stats(path)
-            .await?
-            .map(|s| s.content_length.unwrap_or(0)))
+    ) -> Result<Option<Option<u64>>, HomeserverError> {
+        Ok(session.storage().stats(path).await?.map(|s| s.content_length))
     }
 
     /// Remove one private file (only under the files folder).

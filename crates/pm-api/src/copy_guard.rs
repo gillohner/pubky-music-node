@@ -41,9 +41,13 @@ impl std::fmt::Display for UploadError {
 pub trait Target: Send + Sync {
     async fn list(&self) -> Result<Vec<pm_pubky::homeserver::RemoteFile>, String>;
     async fn upload(&self, remote: &str, bytes: Vec<u8>, rate: Option<u64>) -> Result<(), UploadError>;
-    /// The size the homeserver keeps at `remote`, if any.
-    async fn stat(&self, remote: &str) -> Result<Option<u64>, String>;
+    /// Whether the homeserver keeps a file at `remote`, and its size when it says (`Some(None)`:
+    /// a file whose size it didn't give, never taken for empty).
+    async fn stat(&self, remote: &str) -> Result<Option<Option<u64>>, String>;
     async fn delete(&self, remote: &str) -> Result<(), String>;
+    /// Whose files these are (the account's public key): what an in-flight record is checked
+    /// against before it is settled.
+    fn account(&self) -> String;
 }
 
 #[async_trait]
@@ -60,11 +64,14 @@ impl Target for crate::sync::PubkySync {
             }
         })
     }
-    async fn stat(&self, remote: &str) -> Result<Option<u64>, String> {
+    async fn stat(&self, remote: &str) -> Result<Option<Option<u64>>, String> {
         self.stat_private(remote).await.map_err(|e| e.to_string())
     }
     async fn delete(&self, remote: &str) -> Result<(), String> {
         self.delete_private(remote).await.map_err(|e| e.to_string())
+    }
+    fn account(&self) -> String {
+        self.z32().to_string()
     }
 }
 
@@ -230,24 +237,22 @@ pub async fn is_audio(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Deletes what an upload left at `remote` (best effort): the homeserver may have kept part of it.
-/// After a failed or short upload: what this attempt may have left at `remote`. A file the
-/// homeserver had before the attempt is never touched (it may be the good copy); one this attempt
-/// made is deleted when its size isn't what was sent (a complete one whose answer got lost stays).
-/// False when that can't be told now (the homeserver didn't answer): the in-flight record stays
-/// for the next start ([`settle_in_flight`]).
-pub async fn drop_partial(target: &dyn Target, remote: &str, existed: bool, sent: u64) -> bool {
-    if existed {
-        return true;
-    }
+/// After a failed or short upload: deletes what it left at `remote` when its size isn't what was
+/// sent (a complete one whose answer got lost stays). False when that can't be told now (the
+/// homeserver didn't answer, or didn't say the size): the in-flight record stays for the next
+/// start ([`settle_in_flight`]).
+pub async fn drop_partial(target: &dyn Target, remote: &str, sent: u64) -> bool {
     match target.stat(remote).await {
-        // 0: the homeserver didn't say how big it is (no Content-Length): never deleted on that
-        Ok(Some(kept)) if kept != sent && kept != 0 => {
+        Ok(Some(Some(kept))) if kept != sent => {
             if let Err(e) = target.delete(remote).await {
                 tracing::warn!(remote, "a partly copied file stays on the homeserver: {e}");
                 return false;
             }
             true
+        }
+        Ok(Some(None)) => {
+            tracing::warn!(remote, "the homeserver didn't say how much a failed upload left");
+            false
         }
         Ok(_) => true,
         Err(e) => {
@@ -264,8 +269,12 @@ pub const IN_FLIGHT_KEY: &str = "files.in_flight";
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 struct InFlight {
     size: u64,
-    /// The homeserver had a file there before: never deleted.
+    /// A file the homeserver had there before (records from before 2026-11-02): never deleted.
+    #[serde(default)]
     existed: bool,
+    /// Whose files: settled only under the same account (none: a record from before).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    account: Option<String>,
 }
 
 fn in_flight(lib: &pm_library::Library) -> std::collections::BTreeMap<String, InFlight> {
@@ -315,43 +324,35 @@ pub async fn settle_in_flight(s: &Arc<NodeState>, tries: u32, every: std::time::
         return;
     };
     let all = in_flight(&s.library.lock().expect("library poisoned"));
+    let account = target.account();
     for (remote, e) in all {
+        // Made under another account: its homeserver isn't this one, so nothing here is touched
+        if e.account.as_ref().is_some_and(|a| *a != account) {
+            tracing::warn!(remote, "an upload left by another account stays recorded");
+            continue;
+        }
         // A copy started meanwhile may be sending the same path: only the record as it was
         let unchanged = || in_flight(&s.library.lock().expect("library poisoned")).get(&remote) == Some(&e);
         if !unchanged() {
             continue;
         }
-        if drop_partial(target.as_ref(), &remote, e.existed, e.size).await && unchanged() {
+        let settled = e.existed || drop_partial(target.as_ref(), &remote, e.size).await;
+        if settled && unchanged() {
             note_in_flight(s, &remote, None);
         }
     }
 }
 
-/// What the homeserver has at a path it listed, right before a copy would send over it.
-#[derive(Debug, PartialEq)]
-pub enum There {
-    /// Nothing any more: sent as a new file.
-    Gone,
-    /// The same size as the source (or a size it doesn't say): kept, not sent.
-    Same,
-    /// Known to be another size: sent over it.
-    Differs,
-}
-
-/// The homeserver has no rename, so an upload over a file writes into it, and a failed one leaves
-/// a truncated copy where a good one was: a file is only sent over when its size is known to
-/// differ. `listed`: the size the listing gave (an empty file listed as 0 is known to differ;
-/// a 0 from the check alone is a size the homeserver didn't say).
-pub async fn there(
-    target: &dyn Target,
-    remote: &str,
-    len: u64,
-    listed: Option<u64>,
-) -> Result<There, String> {
+/// Whether a copy sends a file the homeserver listed at `remote`, asked right before: when it is
+/// gone, or its size is known to differ from the source's. Its name is the content's hash, so one
+/// of another size is a broken copy: sent over, and cleaned up as a new file is if that fails.
+/// One of the same size, or one whose size the homeserver doesn't say, is kept: the homeserver
+/// has no rename, so a failed upload over a good copy would cut it short.
+pub async fn needs_sending(target: &dyn Target, remote: &str, len: u64) -> Result<bool, String> {
     Ok(match target.stat(remote).await? {
-        None => There::Gone,
-        Some(n) if n == len || (n == 0 && listed != Some(0)) => There::Same,
-        Some(_) => There::Differs,
+        None => true,
+        Some(Some(n)) => n != len,
+        Some(None) => false,
     })
 }
 
@@ -369,7 +370,7 @@ pub enum Refused {
 
 /// One file to the homeserver, guarded: the space check right before it with what is really sent,
 /// recorded while in flight, checked afterwards, and what a failure left cleaned up as
-/// [`drop_partial`] says. `existed`: the homeserver listed a file at `remote` before.
+/// [`drop_partial`] says. Sent only where nothing good is ([`needs_sending`]).
 pub async fn upload_guarded(
     s: &NodeState,
     target: &dyn Target,
@@ -377,20 +378,28 @@ pub async fn upload_guarded(
     remote: &str,
     bytes: Vec<u8>,
     rate: Option<u64>,
-    existed: bool,
 ) -> Result<(), Refused> {
     let len = bytes.len() as u64;
     if let Some(why) = room.space().and_then(|sp| sp.too_little(len)) {
         return Err(Refused::Space(why));
     }
-    note_in_flight(s, remote, Some(InFlight { size: len, existed }));
+    let record = InFlight {
+        size: len,
+        existed: false,
+        account: Some(target.account()),
+    };
+    note_in_flight(s, remote, Some(record));
     let failed = match target.upload(remote, bytes, rate).await {
         Ok(()) => match target.stat(remote).await {
-            // 0: the homeserver didn't say how big it is; counted as sent
-            Ok(Some(kept)) if kept != len && kept != 0 => Some(Refused::Short(kept)),
+            Ok(Some(Some(kept))) if kept == len => None,
+            Ok(Some(Some(kept))) => Some(Refused::Short(kept)),
             Ok(None) => Some(Refused::Short(0)),
-            Ok(Some(_)) => None,
             // Not known whole: failed, and its record kept for the next start to settle
+            Ok(Some(None)) => {
+                return Err(Refused::Other(
+                    "the homeserver didn't say how much it kept; run the copy again".into(),
+                ))
+            }
             Err(e) => {
                 return Err(Refused::Other(format!(
                     "couldn't check what the homeserver kept ({e}); run the copy again"
@@ -406,7 +415,7 @@ pub async fn upload_guarded(
             Ok(())
         }
         Some(r) => {
-            if drop_partial(target, remote, existed, len).await {
+            if drop_partial(target, remote, len).await {
                 note_in_flight(s, remote, None);
             }
             Err(r)
@@ -417,6 +426,14 @@ pub async fn upload_guarded(
 /// The refusal of a file that would eat into the disk's reserve: the copy stops there.
 pub fn is_space_stop(e: &str) -> bool {
     e.contains("not enough space on this machine")
+}
+
+/// Where browser uploads wait until they are whole (`dir`, in the node's data folder).
+pub fn room_for_staging(s: &NodeState, dir: &Path) -> Arc<dyn Room> {
+    if let Some(r) = s.copy_seams.lock().expect("copy seams").1.clone() {
+        return r;
+    }
+    Arc::new(Disk(dir.to_path_buf()))
 }
 
 /// Where a folder import or a browser upload lands on this machine: the bundled homeserver's

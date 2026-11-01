@@ -269,7 +269,7 @@ impl PubkySync {
             .await?)
     }
 
-    pub async fn stat_private(&self, path: &str) -> Result<Option<u64>, SyncError> {
+    pub async fn stat_private(&self, path: &str) -> Result<Option<Option<u64>>, SyncError> {
         Ok(self.homeserver.stat_private(&self.session, path).await?)
     }
 

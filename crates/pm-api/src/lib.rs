@@ -16048,6 +16048,8 @@ exec sleep 300
         fail_after: Option<usize>,
         /// Checking a file's size fails (the homeserver went away after an upload).
         stat_fails: std::sync::atomic::AtomicBool,
+        /// Files whose size the homeserver doesn't say (no Content-Length).
+        no_size: std::sync::Mutex<std::collections::HashSet<String>>,
     }
 
     #[async_trait::async_trait]
@@ -16084,15 +16086,24 @@ exec sleep 300
             }
             Ok(())
         }
-        async fn stat(&self, remote: &str) -> Result<Option<u64>, String> {
+        async fn stat(&self, remote: &str) -> Result<Option<Option<u64>>, String> {
             if self.stat_fails.load(std::sync::atomic::Ordering::SeqCst) {
                 return Err("connection reset".into());
             }
-            Ok(self.sizes.lock().unwrap().get(remote).copied())
+            let no_size = self.no_size.lock().unwrap().contains(remote);
+            Ok(self
+                .sizes
+                .lock()
+                .unwrap()
+                .get(remote)
+                .map(|n| (!no_size).then_some(*n)))
         }
         async fn delete(&self, remote: &str) -> Result<(), String> {
             self.deletes.lock().unwrap().push(remote.to_string());
             Ok(())
+        }
+        fn account(&self) -> String {
+            "fake-account".into()
         }
     }
 
@@ -16373,11 +16384,11 @@ exec sleep 300
         )
     }
 
-    /// A re-send of a file the homeserver already has at another size that fails never deletes
-    /// it: that may be the better copy (#224 review). Only what an attempt itself made half is
-    /// removed.
+    /// A file the homeserver has at another size than the song (its name is the content's hash,
+    /// so a broken copy) is sent again; when that fails too, what it left is deleted like any half
+    /// written file, never kept as a truncated song (#224 follow-ups, Kimi 4).
     #[tokio::test]
-    async fn a_failed_upload_never_deletes_a_file_that_was_there() {
+    async fn a_failed_repair_of_a_broken_copy_leaves_nothing_half_written() {
         let hs = Arc::new(FakeHomeserver::default());
         hs.fails.store(true, std::sync::atomic::Ordering::SeqCst);
         let disk = Arc::new(FakeDisk(std::sync::Mutex::new(copy_guard::Space {
@@ -16403,16 +16414,18 @@ exec sleep 300
         .await;
         let done = copy_finished(&app, job["id"].as_str().unwrap()).await;
         assert_eq!(done["failed"], 1, "{done}");
-        assert_eq!(*hs.uploads.lock().unwrap(), [remote], "it was sent again");
-        assert!(
-            hs.deletes.lock().unwrap().is_empty(),
-            "the file there before stays"
+        assert_eq!(
+            *hs.uploads.lock().unwrap(),
+            std::slice::from_ref(&remote),
+            "it was sent again"
         );
+        assert_eq!(*hs.deletes.lock().unwrap(), [remote], "the half sent is removed");
     }
 
     /// An upload a stopped node left in flight (a crash, a restart) is settled at the next start:
-    /// one it made that the homeserver keeps at another size is deleted; a complete one, or a file
-    /// that was there before, stays (#224 review).
+    /// one it made that the homeserver keeps at another size is deleted, an empty one included; a
+    /// complete one, or a file that was there before, stays. One whose size the homeserver doesn't
+    /// say, or that another account made, stays recorded (#224 review; follow-ups Kimi 2 and 5).
     #[tokio::test]
     async fn uploads_a_stopped_node_left_half_written_are_removed_at_start() {
         let hs = Arc::new(FakeHomeserver::default());
@@ -16421,13 +16434,21 @@ exec sleep 300
             total: 1000 * GB,
         })));
         let (_dir, s, _app, _src) = copy_setup(hs.clone(), disk, 0).await;
+        let f = |n: &str| format!("/priv/pubky.music/files/{n}");
         {
             let mut sizes = hs.sizes.lock().unwrap();
-            sizes.insert("/priv/pubky.music/files/half".into(), 40);
-            sizes.insert("/priv/pubky.music/files/whole".into(), 70);
-            sizes.insert("/priv/pubky.music/files/before".into(), 10);
-            // A size the homeserver didn't say (no Content-Length reads as 0): never deleted on that
-            sizes.insert("/priv/pubky.music/files/unknown".into(), 0);
+            for (n, size) in [
+                ("half", 40),
+                ("whole", 70),
+                ("before", 10),
+                ("empty", 0),
+                ("unknown", 0),
+                ("elsewhere", 5),
+                ("mine", 5),
+            ] {
+                sizes.insert(f(n), size);
+            }
+            hs.no_size.lock().unwrap().insert(f("unknown"));
         }
         s.library
             .lock()
@@ -16435,23 +16456,33 @@ exec sleep 300
             .set_setting(
                 copy_guard::IN_FLIGHT_KEY,
                 &serde_json::json!({
-                    "/priv/pubky.music/files/half": {"size": 100, "existed": false},
-                    "/priv/pubky.music/files/whole": {"size": 70, "existed": false},
-                    "/priv/pubky.music/files/before": {"size": 50, "existed": true},
-                    "/priv/pubky.music/files/unknown": {"size": 30, "existed": false},
+                    f("half"): {"size": 100, "existed": false},
+                    f("whole"): {"size": 70, "existed": false},
+                    f("before"): {"size": 50, "existed": true},
+                    f("empty"): {"size": 30},
+                    f("unknown"): {"size": 30, "existed": false},
+                    f("elsewhere"): {"size": 30, "account": "someone-else"},
+                    f("mine"): {"size": 30, "account": "fake-account"},
                 })
                 .to_string(),
             )
             .unwrap();
         copy_guard::settle_in_flight(&s, 1, std::time::Duration::ZERO).await;
-        assert_eq!(*hs.deletes.lock().unwrap(), ["/priv/pubky.music/files/half"]);
-        assert!(s
-            .library
-            .lock()
-            .unwrap()
-            .get_setting(copy_guard::IN_FLIGHT_KEY)
-            .unwrap()
-            .is_none());
+        let mut deleted = hs.deletes.lock().unwrap().clone();
+        deleted.sort();
+        assert_eq!(deleted, [f("empty"), f("half"), f("mine")]);
+        let left: serde_json::Value = serde_json::from_str(
+            &s.library
+                .lock()
+                .unwrap()
+                .get_setting(copy_guard::IN_FLIGHT_KEY)
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        let mut left: Vec<&String> = left.as_object().unwrap().keys().collect();
+        left.sort();
+        assert_eq!(left, [&f("elsewhere"), &f("unknown")]);
     }
 
     /// Copying a library mostly there already: only what it sends counts against the disk's
@@ -16744,5 +16775,167 @@ exec sleep 300
             .unwrap()
             .unwrap_or_default();
         assert!(flight.contains(&remote), "{flight}");
+    }
+
+    /// The single-file upload (`POST /v1/pubky/files`) goes the guarded way of a copy: a good
+    /// copy there is never sent over, and a failed upload leaves nothing half written (#224
+    /// follow-ups, Kimi 1).
+    #[tokio::test]
+    async fn a_single_file_upload_never_sends_over_a_good_copy() {
+        let hs = Arc::new(FakeHomeserver::default());
+        hs.fails.store(true, std::sync::atomic::Ordering::SeqCst);
+        let disk = Arc::new(FakeDisk(std::sync::Mutex::new(copy_guard::Space {
+            free: 500 * GB,
+            total: 1000 * GB,
+        })));
+        let (_dir, s, app, src) = copy_setup(hs.clone(), disk, 2).await;
+        let one = src.join("01 song.wav");
+        let (remote, len) = copied_name(&s, &one);
+        hs.sizes.lock().unwrap().insert(remote.clone(), len);
+        let (st, v) = call(
+            &app,
+            "POST",
+            "/v1/pubky/files",
+            Some(serde_json::json!({"path": one})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        assert_eq!(v["path"], remote.as_str());
+        assert!(hs.uploads.lock().unwrap().is_empty(), "sent over the good copy");
+
+        // Nothing there, and the upload fails: what it left is deleted
+        std::fs::write(src.join("02 song.wav"), b"RIFF and then some other bytes").unwrap();
+        let two = src.join("02 song.wav");
+        let (st, v) = call(
+            &app,
+            "POST",
+            "/v1/pubky/files",
+            Some(serde_json::json!({"path": two})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_GATEWAY, "{v}");
+        let sent = hs.uploads.lock().unwrap().clone();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(*hs.deletes.lock().unwrap(), sent);
+    }
+
+    /// The homeserver not saying a file's size is never taken for empty: an upload it doesn't
+    /// confirm counts as failed and stays recorded, and a listed file of a size it doesn't say
+    /// is kept, not sent over (#224 follow-ups, Kimi 2).
+    #[tokio::test]
+    async fn a_size_the_homeserver_doesnt_say_is_not_confirmed() {
+        let hs = Arc::new(FakeHomeserver::default());
+        let disk = Arc::new(FakeDisk(std::sync::Mutex::new(copy_guard::Space {
+            free: 500 * GB,
+            total: 1000 * GB,
+        })));
+        let (_dir, s, app, src) = copy_setup(hs.clone(), disk, 0).await;
+        tone_wav(&src.join("01 song.wav"), 1);
+        tone_wav(&src.join("02 song.wav"), 2);
+        let (one, _) = copied_name(&s, &src.join("01 song.wav"));
+        let (two, len2) = copied_name(&s, &src.join("02 song.wav"));
+        hs.no_size.lock().unwrap().extend([one.clone(), two.clone()]);
+        hs.sizes.lock().unwrap().insert(two.clone(), len2);
+        hs.listed.lock().unwrap().push(pm_pubky::homeserver::RemoteFile {
+            path: two.clone(),
+            size: None,
+        });
+        for (i, p) in ["01 song.wav", "02 song.wav"].iter().enumerate() {
+            let t = untagged_track(src.join(p), &format!("Song {i}"), "Band");
+            s.library.lock().unwrap().upsert_track(&t).unwrap();
+        }
+        let (_, job) = call(
+            &app,
+            "POST",
+            "/v1/pubky/files/upload",
+            Some(serde_json::json!({"all": true})),
+        )
+        .await;
+        let done = copy_finished(&app, job["id"].as_str().unwrap()).await;
+        assert_eq!(
+            (
+                done["done"].clone(),
+                done["failed"].clone(),
+                done["skipped"].clone()
+            ),
+            (0.into(), 1.into(), 1.into()),
+            "{done}"
+        );
+        assert_eq!(*hs.uploads.lock().unwrap(), std::slice::from_ref(&one));
+        assert!(hs.deletes.lock().unwrap().is_empty());
+        let flight = s
+            .library
+            .lock()
+            .unwrap()
+            .get_setting(copy_guard::IN_FLIGHT_KEY)
+            .unwrap()
+            .unwrap_or_default();
+        assert!(flight.contains(&one), "{flight}");
+    }
+
+    /// An import to another homeserver writes each song into the node's own folder too, never
+    /// over another file there: a different one keeps its name and the song gets the next free
+    /// one (#224 follow-ups, Kimi 3).
+    #[tokio::test]
+    async fn an_imports_own_copy_never_replaces_another_file() {
+        let hs = Arc::new(FakeHomeserver::default());
+        let disk = Arc::new(FakeDisk(std::sync::Mutex::new(copy_guard::Space {
+            free: 500 * GB,
+            total: 1000 * GB,
+        })));
+        let (_dir, s, app, src) = copy_setup(hs.clone(), disk, 1).await;
+        assert!(storage::homeserver_music_dir(&s).is_none(), "another homeserver");
+        std::fs::create_dir_all(&s.mirror_dir).unwrap();
+        std::fs::write(s.mirror_dir.join("01_song.wav"), b"another song").unwrap();
+        let (_, job) = call(
+            &app,
+            "POST",
+            "/v1/library/imports",
+            Some(serde_json::json!({"path": src})),
+        )
+        .await;
+        let done = copy_finished(&app, job["id"].as_str().unwrap()).await;
+        assert_eq!(done["done"], 1, "{done}");
+        assert_eq!(
+            std::fs::read(s.mirror_dir.join("01_song.wav")).unwrap(),
+            b"another song"
+        );
+        assert_eq!(
+            std::fs::read(s.mirror_dir.join("01_song (2).wav")).unwrap(),
+            std::fs::read(src.join("01 song.wav")).unwrap()
+        );
+    }
+
+    /// Songs dropped on the Add music page wait in the node's data folder until whole: that disk
+    /// keeps its reserve too, counting what the other uploads still have to send, and checked
+    /// again for each piece (#224 follow-ups, Kimi 6).
+    #[tokio::test]
+    async fn browser_uploads_keep_the_reserve_of_the_disk_they_wait_on() {
+        let hs = Arc::new(FakeHomeserver::default());
+        let disk = Arc::new(FakeDisk(std::sync::Mutex::new(copy_guard::Space {
+            free: 5 * GB + 1_000_000,
+            total: 98 * GB,
+        })));
+        let (_dir, _s, app, _src) = copy_setup(hs, disk.clone(), 0).await;
+        let start = |name: &str| {
+            let app = app.clone();
+            let body = serde_json::json!({"name": name, "size": 600_000});
+            async move { call(&app, "POST", "/v1/library/uploads", Some(body)).await }
+        };
+        let (st, a) = start("01 Song.flac").await;
+        assert_eq!(st, StatusCode::OK, "{a}");
+        let (st, b) = start("02 Song.flac").await;
+        assert_eq!(st, StatusCode::INSUFFICIENT_STORAGE, "both wouldn't fit: {b}");
+
+        // The disk fills from elsewhere while the first arrives
+        disk.0.lock().unwrap().free = 5 * GB + 10;
+        let id = a["id"].as_str().unwrap();
+        let req = Request::builder()
+            .method("PUT")
+            .uri(format!("/v1/library/uploads/{id}?offset=0"))
+            .body(Body::from(vec![0u8; 1000]))
+            .unwrap();
+        let r = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(r.status(), StatusCode::INSUFFICIENT_STORAGE);
     }
 }
