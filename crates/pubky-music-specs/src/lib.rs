@@ -7,10 +7,9 @@
 //!
 //! - post kinds of its own on the shared [`PostEnvelope`] under the `music` namespace
 //!   (`/{pub,priv}/music/v1/posts/{id}/{editId}.json`), with their content rules:
-//!   [`MusicPostKind::Review`], [`MusicPostKind::Listen`] (one play) and
-//!   [`MusicPostKind::Listening`] (someone listening now: one post per session, a version per song;
-//!   others listen along from their own source). The path decides who sees a post: `/priv/` or
-//!   `/pub/`;
+//!   [`MusicPostKind::Review`] and [`MusicPostKind::Listen`] (one play). The path decides who sees
+//!   a post: `/priv/` or `/pub/`. Sharing what you listen to is a plain social post with the song
+//!   as its `embed`, not a music kind;
 //! - the music feed ([`MusicFeed`], `/{priv,pub}/music/v1/feeds/{id}.json`): a saved query for
 //!   music modelled on the social v1 feed, with a smart playlist's rules;
 //! - the `ext.music` hints a playlist carries on its items and on the collection ([`ext`]), and the
@@ -44,9 +43,8 @@ mod feed;
 mod kind;
 
 pub use content::{
-    generic_listening_name, is_service_name, micros_of, service_name, MusicListenContent,
-    MusicListeningContent, MusicReviewContent, MusicSource, LISTEN_DURATION_MAX_MS, LIVE_NAME_MAX_LENGTH,
-    LIVE_WINDOW_MAX_MICROS, MILLIS_BEFORE, REVIEW_RATING_MAX, REVIEW_RATING_MIN, REVIEW_TEXT_MAX_LENGTH,
+    is_service_name, micros_of, service_name, MusicListenContent, MusicReviewContent, MusicSource,
+    LISTEN_DURATION_MAX_MS, MILLIS_BEFORE, REVIEW_RATING_MAX, REVIEW_RATING_MIN, REVIEW_TEXT_MAX_LENGTH,
     SERVICE_MAX_LENGTH, SERVICE_NAMES, TIME_MIN_MICROS,
 };
 pub use feed::{
@@ -98,36 +96,6 @@ pub fn listen(
     PostEnvelope::new(content, MusicPostKind::Listen, None, Some(embed), Vec::new())
 }
 
-/// Listening to the song at `embed`, which started at `started_at`, shown until `expires_at` (Unix
-/// microseconds), called `name`. Trims the name; a blank one becomes absent. A pause or the end is
-/// a new version with `paused_at` or `ended_at` set ([`listening_post`]). Infallible; validate
-/// before writing.
-pub fn listening(
-    started_at: i64,
-    expires_at: Option<i64>,
-    name: Option<String>,
-    duration_ms: Option<i64>,
-    source: Option<MusicSource>,
-    embed: String,
-) -> MusicPost {
-    let content = MusicListeningContent {
-        started_at,
-        expires_at,
-        name: content::trimmed_name(name),
-        duration_ms,
-        source,
-        ..Default::default()
-    };
-    listening_post(&content, embed)
-}
-
-/// The `listening` post of `content` (any of its members: `paused_at`, `ended_at`, …) about the
-/// song at `embed`. Infallible; validate before writing.
-pub fn listening_post(content: &MusicListeningContent, embed: String) -> MusicPost {
-    let content = serde_json::to_string(content).expect("a listening always serializes");
-    PostEnvelope::new(content, MusicPostKind::Listening, None, Some(embed), Vec::new())
-}
-
 /// The review inside a `kind = review` post, checked against the review rules.
 pub fn read_review(post: &MusicPost) -> Result<MusicReviewContent, String> {
     if post.kind != MusicPostKind::Review {
@@ -143,14 +111,6 @@ pub fn read_listen(post: &MusicPost) -> Result<MusicListenContent, String> {
         return Err("Validation Error: not a listen".into());
     }
     content::parse_listen(&post.content)
-}
-
-/// The content of a `kind = listening` post, checked.
-pub fn read_listening(post: &MusicPost) -> Result<MusicListeningContent, String> {
-    if post.kind != MusicPostKind::Listening {
-        return Err("Validation Error: not a listening".into());
-    }
-    content::parse_listening(&post.content)
 }
 
 /// Mints a new post's id and its path under the music namespace.

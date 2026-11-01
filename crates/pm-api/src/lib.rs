@@ -62,7 +62,6 @@ pub mod library_edit;
 pub mod library_match;
 pub mod librespot;
 pub mod listenbrainz;
-pub mod listening_share;
 pub mod listens;
 pub mod loudness;
 pub mod lrclib;
@@ -705,10 +704,6 @@ pub fn router(state: Arc<NodeState>) -> Router {
         .route("/me/first-steps", get(first_steps::get))
         .route("/me/token", axum::routing::delete(accounts::sign_out))
         .route("/auth/pubky/renewal", post(login_renewal))
-        .route(
-            "/me/listening",
-            get(listening_share::get).put(listening_share::put),
-        )
         .route("/me/listens", get(listens::list).delete(listens::delete_all))
         .route("/me/listens/stats", get(listens::get_stats))
         .route(
@@ -14594,36 +14589,6 @@ exec sleep 300
             .is_empty());
     }
 
-    /// Review of #192: an end of the Live post that fails (the homeserver doesn't answer, a
-    /// sign-in being restored) keeps the session, so it is tried again, and a retry is waiting:
-    /// a stopped zone has no next change to try it.
-    #[tokio::test]
-    async fn a_failed_end_of_the_live_post_is_tried_again() {
-        let dir = tempfile::tempdir().unwrap();
-        let s = state(dir.path(), None).await;
-        let now = pm_pubky::ids::now_micros();
-        let post = serde_json::json!({"id": "0034A0Z4013G0", "edit": "0034A0Z4013G0", "zone": "gone",
-            "song": "https://musicbrainz.org/recording/b1a9c0e9-d987-4042-ae91-78d6a3267d69",
-            "session_at": now, "started_at": now, "expires_at": now + 600_000_000});
-        {
-            let lib = s.library.lock().unwrap();
-            lib.set_setting("listening.share", r#"{"share":true}"#).unwrap();
-            lib.set_setting("listening.post", &post.to_string()).unwrap();
-        }
-        crate::listening_share::zone_event(&s, "gone", &pm_zones::ZoneEvent::Stopped);
-        for _ in 0..200 {
-            if s.listening_retry.lock().unwrap().is_some() {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        assert_eq!(s.listening_retry.lock().unwrap().as_deref(), Some("gone"));
-        let kept = s.library.lock().unwrap().get_setting("listening.post").unwrap();
-        assert!(kept.is_some(), "the session stays until its end is written");
-        let (_, share) = call(&router(s.clone()), "GET", "/v1/me/listening", None).await;
-        assert_eq!(share["share"], true, "not refused: sharing stays on");
-    }
-
     /// Identify library as a ladder (owner, 2026-10-30: too slow on the NUC): a folder that is an
     /// album is identified from one MusicBrainz search and one release lookup, without decoding
     /// a file; only what doesn't fit (a bonus track, a compilation folder of mixed artists) is
@@ -15026,5 +14991,24 @@ exec sleep 300
             Some(pm_model::Mbid::parse(mbid).unwrap()),
             "the stored identity reached the file"
         );
+    }
+
+    /// "Share what I'm listening to" is removed (owner, 2026-10-31: Post about this covers it):
+    /// its API is gone, and a setting saved before is ignored.
+    #[tokio::test]
+    async fn sharing_what_you_listen_to_is_gone() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = state(dir.path(), None).await;
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting("listening.share", r#"{"share":true}"#)
+            .unwrap();
+        let app = router(s.clone());
+        let (st, _) = call(&app, "GET", "/v1/me/listening", None).await;
+        assert_eq!(st, StatusCode::NOT_FOUND);
+        let on = serde_json::json!({"share": true});
+        let (st, _) = call(&app, "PUT", "/v1/me/listening", Some(on)).await;
+        assert_eq!(st, StatusCode::NOT_FOUND);
     }
 }

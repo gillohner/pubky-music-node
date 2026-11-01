@@ -3742,21 +3742,6 @@
     toast(on ? 'Added to favourites' + note : 'Removed from favourites');
   };
   // Whether the node holds a Pubky session (menus offer homeserver uploads then).
-  // "Share what I'm listening to" (listening together): the player bar's Live switch, the owner's,
-  // shown once signed in with Pubky; off by default.
-  const wireLive = async () => {
-    const b = $('#livebtn'); if (!b) return;
-    if (!(await pubkyUser())) { b.hidden = true; return; }
-    const show = (v) => { b.hidden = false; b.setAttribute('aria-pressed', String(!!v.share)); b.classList.toggle('on', !!v.share); };
-    state.liveShow = show;
-    try { show(await api('GET', '/me/listening')); } catch { b.hidden = true; return; }
-    b.onclick = async () => {
-      const on = b.getAttribute('aria-pressed') !== 'true';
-      b.disabled = true;
-      // On an error the switch shows what the node has now, not what was asked
-      try { show(await api('PUT', '/me/listening', { share: on })); toast(on ? 'Live: what you play here is a public post on your homeserver' : 'Live is off: your session post ended'); } catch (e) { toast(e.message, 'error'); try { show(await api('GET', '/me/listening')); } catch { /* keep it */ } } finally { b.disabled = false; }
-    };
-  };
   const pubkyUser = async () => { if (isListener()) return null; if (state.pubkyUser === undefined) { try { const pk = await api('GET', '/pubky'); state.pubkyUser = pk.user || null; state.pubkyStatus = pk; } catch { state.pubkyUser = null; } } return state.pubkyUser; };
   // A session approved for fewer folders than the node uses: one plain line with the way out.
   // The node's own Pubky session lacks folders: the owner's next log in with Pubky Ring asks for
@@ -5933,7 +5918,6 @@
       document.body.classList.toggle('listener', isListener());
       drawMe().catch(() => {});
       if (isOwner()) {
-        wireLive();
         loadFavourites().catch(() => {});
         api('GET', '/sources').then((l) => { state.sources = l; applySourcesOff(); }).catch(() => {});
       } else { state.favUris = new Set(); state.sources = []; }
@@ -5998,7 +5982,6 @@
         if (yours) refreshAlong().finally(() => { ensureZone(); renderZoneName(); renderBar(); refreshQueue(); });
         else { ensureZone(); renderZoneName(); refreshAlong(); }
       }
-      else if (ev.type === 'listening_stopped') { if (state.liveShow) state.liveShow({ share: false }); toast(`Live is off: your homeserver refused the post (${ev.error})`, 'error'); }
       else if (ev.type === 'library_changed') { if (link.libRev != null) link.libRev++; onLibraryChanged(); }
       renderBar();
     };

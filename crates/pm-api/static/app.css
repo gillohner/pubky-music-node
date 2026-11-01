@@ -251,9 +251,6 @@ input[type=range]:hover::-moz-range-thumb, input[type=range]:focus-visible::-moz
 .quality.q-lossy .qdot { background: var(--q-lossy); }
 .volume { display: flex; align-items: center; gap: 6px; width: 130px; color: var(--muted); }
 .volbtn { display: none; }
-/* The Live switch (share what I'm listening to) next to the device pill */
-.live-btn { border: 1px solid var(--line); background: var(--surface-2); color: var(--muted); border-radius: 999px; padding: 6px 12px; cursor: pointer; font-size: 12px; font-weight: 600; letter-spacing: 0.04em; }
-.live-btn.on { color: var(--accent-fg, #fff); background: var(--accent); border-color: var(--accent); }
 .zone-btn { display: inline-flex; align-items: center; gap: 8px; border: 1px solid var(--line); background: var(--surface-2); color: var(--fg); border-radius: 999px; padding: 6px 10px 6px 12px; cursor: pointer; max-width: 220px; }
 .zone-btn:hover { border-color: var(--line-strong); }
 .zone-btn span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
