@@ -14820,9 +14820,12 @@ exec sleep 300
             ids.push(lib.upsert_track(&t).unwrap().0);
         }
         // A scan's connection takes the write lock and keeps it past the busy timeout; the scan
-        // ends a while after it lets go (its last batch is done, the rest is reading)
+        // ends a while after it lets go (its last batch is done, the rest is reading). The lock
+        // outlasts SQLite's own busy wait by a margin: on a loaded machine the job's first write
+        // starts seconds late, and with one second to spare its wait could end after the commit,
+        // so the write went through without waiting for the scan (flaky under a full test run)
         let (locked_tx, locked_rx) = std::sync::mpsc::channel();
-        let held = pm_library::db::BUSY_TIMEOUT + std::time::Duration::from_secs(1);
+        let held = pm_library::db::BUSY_TIMEOUT + std::time::Duration::from_secs(5);
         let after = std::time::Duration::from_millis(1500);
         assert!(s.begin_scan());
         let other = {
