@@ -104,7 +104,6 @@ pub(crate) async fn upload(
     State(s): State<Arc<NodeState>>,
     Json(body): Json<UploadFile>,
 ) -> ApiResult<UploadedFile> {
-    let sync = needs_session(&s)?;
     let local: PathBuf = match (body.track_id, body.path.as_deref()) {
         (Some(id), _) => {
             s.library
@@ -128,6 +127,14 @@ pub(crate) async fn upload(
         .await
         .map_err(|e| ApiError::bad_request(format!("read {}: {e}", local.display())))?;
     let size = bytes.len() as u64;
+    // The bundled homeserver's disk keeps its reserve, as for every copy
+    if let Some(why) = crate::copy_guard::room_of(&s)
+        .space()
+        .and_then(|sp| sp.too_little(size))
+    {
+        return Err(ApiError::new(StatusCode::INSUFFICIENT_STORAGE, why));
+    }
+    let sync = needs_session(&s)?;
     let remote = format!("{PRIVATE_FILES_DIR}{}", remote_name(&bytes, &local));
     if let Err(e) = sync.upload_private(&remote, bytes).await {
         if e.is_full() {
@@ -773,7 +780,9 @@ fn start_bring(s: Arc<NodeState>, sync: Arc<crate::sync::PubkySync>, plan: Bring
 pub fn resume_jobs(s: &Arc<NodeState>) {
     // Uploads a stopped node left unsettled: what they half wrote on the homeserver goes
     let s2 = s.clone();
-    tokio::spawn(async move { crate::copy_guard::settle_in_flight(&s2).await });
+    tokio::spawn(async move {
+        crate::copy_guard::settle_in_flight(&s2, 120, std::time::Duration::from_secs(1)).await
+    });
     let Some(v) = s
         .library
         .lock()

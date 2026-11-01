@@ -247,7 +247,11 @@
     for (;;) {
       const u = up.files.find((x) => x.state === 'waiting'); if (!u) break;
       u.state = 'sending'; drawUploads();
-      try { await sendOne(u); } catch (e) { u.state = 'failed'; u.error = e.message; }
+      try { await sendOne(u); } catch (e) {
+        u.state = 'failed'; u.error = e.message;
+        // Not enough space on the machine: the rest waits for the person, not for space to free up
+        if (e.status === 507) { up.files.filter((x) => x.state === 'waiting').forEach((x) => { x.state = 'failed'; x.error = e.message; }); }
+      }
       drawUploads();
     }
     up.running = false; drawUploads();

@@ -238,7 +238,8 @@ pub async fn drop_partial(target: &dyn Target, remote: &str, existed: bool, sent
         return true;
     }
     match target.stat(remote).await {
-        Ok(Some(kept)) if kept != sent => {
+        // 0: the homeserver didn't say how big it is (no Content-Length): never deleted on that
+        Ok(Some(kept)) if kept != sent && kept != 0 => {
             if let Err(e) = target.delete(remote).await {
                 tracing::warn!(remote, "a partly copied file stays on the homeserver: {e}");
                 return false;
@@ -292,14 +293,32 @@ fn note_in_flight(s: &NodeState, remote: &str, entry: Option<InFlight>) {
 
 /// At start: the uploads a stopped node left unsettled. One this node made that the homeserver
 /// keeps at another size than was sent is deleted; anything else is left as it is.
-pub async fn settle_in_flight(s: &Arc<NodeState>) {
-    let all = in_flight(&s.library.lock().expect("library poisoned"));
-    if all.is_empty() {
+/// Waits for the homeserver session first (it is restored after the jobs are looked at): up to
+/// `tries` × `every`.
+pub async fn settle_in_flight(s: &Arc<NodeState>, tries: u32, every: std::time::Duration) {
+    if in_flight(&s.library.lock().expect("library poisoned")).is_empty() {
         return;
     }
-    let Ok(target) = target_of(s) else { return };
+    let mut target = None;
+    for _ in 0..tries {
+        if let Ok(t) = target_of(s) {
+            target = Some(t);
+            break;
+        }
+        tokio::time::sleep(every).await;
+    }
+    let Some(target) = target else {
+        tracing::warn!("no homeserver session: uploads left unsettled stay recorded for the next start");
+        return;
+    };
+    let all = in_flight(&s.library.lock().expect("library poisoned"));
     for (remote, e) in all {
-        if drop_partial(target.as_ref(), &remote, e.existed, e.size).await {
+        // A copy started meanwhile may be sending the same path: only the record as it was
+        let unchanged = || in_flight(&s.library.lock().expect("library poisoned")).get(&remote) == Some(&e);
+        if !unchanged() {
+            continue;
+        }
+        if drop_partial(target.as_ref(), &remote, e.existed, e.size).await && unchanged() {
             note_in_flight(s, &remote, None);
         }
     }
@@ -336,7 +355,8 @@ pub async fn upload_guarded(
     note_in_flight(s, remote, Some(InFlight { size: len, existed }));
     let failed = match target.upload(remote, bytes, rate).await {
         Ok(()) => match target.stat(remote).await {
-            Ok(Some(kept)) if kept != len => Some(Refused::Short(kept)),
+            // 0: the homeserver didn't say how big it is; like a failed check, counted as sent
+            Ok(Some(kept)) if kept != len && kept != 0 => Some(Refused::Short(kept)),
             Ok(None) => Some(Refused::Short(0)),
             // Kept whole, or couldn't check: counted as sent
             _ => None,

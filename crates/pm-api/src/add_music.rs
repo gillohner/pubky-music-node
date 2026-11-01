@@ -99,7 +99,7 @@ fn part_path(s: &NodeState, id: &str) -> PathBuf {
 
 /// A file name with anything but letters, digits, `.`, `-` and `_` as `_` (as files.rs names
 /// homeserver files), and no path.
-fn safe_name(name: &str) -> String {
+pub(crate) fn safe_name(name: &str) -> String {
     let base = name.rsplit(['/', '\\']).next().unwrap_or(name);
     let s: String = base
         .chars()
@@ -122,15 +122,18 @@ fn blake3_hex(bytes: &[u8]) -> String {
 
 /// Homeserver files by `<hash prefix>` → size.
 async fn present(target: &dyn crate::copy_guard::Target) -> Result<HashMap<String, Option<u64>>, String> {
-    let list = target.list().await?;
-    Ok(list
-        .into_iter()
+    Ok(have_of(target.list().await?))
+}
+
+/// Homeserver files by `<hash prefix>` → size.
+fn have_of(list: Vec<pm_pubky::homeserver::RemoteFile>) -> HashMap<String, Option<u64>> {
+    list.into_iter()
         .filter_map(|f| {
             let name = f.path.rsplit('/').next()?.to_string();
             let (h, _) = crate::files::split_remote_name(&name)?;
             Some((h.to_string(), f.size))
         })
-        .collect())
+        .collect()
 }
 
 /// What happened to one file.
@@ -595,17 +598,33 @@ pub(crate) async fn import(
     let room = crate::copy_guard::room_for_store(&s);
     let target = crate::copy_guard::target_of(&s);
     // What the homeserver has already is skipped: counted out of the space needed
-    let listed = match &target {
-        Ok(t) => present(t.as_ref()).await.ok(),
+    let raw = match &target {
+        Ok(t) => t.list().await.ok(),
         Err(_) => None,
     };
+    // `<name> <size>` of what is there: files imported before their hashes were remembered are
+    // known by the name they were stored under (`<hash16>-<safe name>`) and their size
+    let named: std::collections::HashSet<(String, u64)> = raw
+        .iter()
+        .flatten()
+        .filter_map(|f| {
+            let (_, safe) = crate::files::split_remote_name(f.name())?;
+            Some((safe.to_string(), f.size?))
+        })
+        .collect();
+    let listed = raw.map(have_of);
     let needed = files
         .iter()
         .filter(|(p, n)| {
-            !listed.as_ref().is_some_and(|have| {
-                crate::files::known_hash(&s, p)
-                    .is_some_and(|h| have.get(&h[..16]).is_some_and(|sz| sz.is_none_or(|k| k == *n)))
-            })
+            !listed
+                .as_ref()
+                .is_some_and(|have| match crate::files::known_hash(&s, p) {
+                    Some(h) => have.get(&h[..16]).is_some_and(|sz| sz.is_none_or(|k| k == *n)),
+                    None => {
+                        let file = p.file_name().map(|f| f.to_string_lossy().into_owned());
+                        file.is_some_and(|f| named.contains(&(safe_name(&f), *n)))
+                    }
+                })
         })
         .map(|(_, n)| n)
         .sum();

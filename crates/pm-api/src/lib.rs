@@ -16399,6 +16399,8 @@ exec sleep 300
             sizes.insert("/priv/pubky.music/files/half".into(), 40);
             sizes.insert("/priv/pubky.music/files/whole".into(), 70);
             sizes.insert("/priv/pubky.music/files/before".into(), 10);
+            // A size the homeserver didn't say (no Content-Length reads as 0): never deleted on that
+            sizes.insert("/priv/pubky.music/files/unknown".into(), 0);
         }
         s.library
             .lock()
@@ -16409,11 +16411,12 @@ exec sleep 300
                     "/priv/pubky.music/files/half": {"size": 100, "existed": false},
                     "/priv/pubky.music/files/whole": {"size": 70, "existed": false},
                     "/priv/pubky.music/files/before": {"size": 50, "existed": true},
+                    "/priv/pubky.music/files/unknown": {"size": 30, "existed": false},
                 })
                 .to_string(),
             )
             .unwrap();
-        copy_guard::settle_in_flight(&s).await;
+        copy_guard::settle_in_flight(&s, 1, std::time::Duration::ZERO).await;
         assert_eq!(*hs.deletes.lock().unwrap(), ["/priv/pubky.music/files/half"]);
         assert!(s
             .library
@@ -16494,5 +16497,98 @@ exec sleep 300
             copy_guard::room_for_store(&s).space().is_some(),
             "the mirror folder's disk is measured"
         );
+    }
+
+    /// The crash settle at start waits for the homeserver session, which the node restores only
+    /// after it looked at its jobs (#224 delta review): it runs once the session is there.
+    #[tokio::test]
+    async fn uploads_left_in_flight_are_settled_once_the_session_arrives() {
+        let hs = Arc::new(FakeHomeserver::default());
+        let disk = Arc::new(FakeDisk(std::sync::Mutex::new(copy_guard::Space {
+            free: 500 * GB,
+            total: 1000 * GB,
+        })));
+        let (_dir, s, _app, _src) = copy_setup(hs.clone(), disk, 0).await;
+        // No session yet
+        s.copy_seams.lock().unwrap().0 = None;
+        hs.sizes
+            .lock()
+            .unwrap()
+            .insert("/priv/pubky.music/files/half".into(), 40);
+        s.library
+            .lock()
+            .unwrap()
+            .set_setting(
+                copy_guard::IN_FLIGHT_KEY,
+                &serde_json::json!({"/priv/pubky.music/files/half": {"size": 100, "existed": false}})
+                    .to_string(),
+            )
+            .unwrap();
+        let s2 = s.clone();
+        let settling = tokio::spawn(async move {
+            copy_guard::settle_in_flight(&s2, 50, std::time::Duration::from_millis(20)).await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(
+            hs.deletes.lock().unwrap().is_empty(),
+            "nothing before the session"
+        );
+        s.copy_seams.lock().unwrap().0 = Some(hs.clone());
+        settling.await.unwrap();
+        assert_eq!(*hs.deletes.lock().unwrap(), ["/priv/pubky.music/files/half"]);
+    }
+
+    /// A folder imported before the node remembered its files' hashes: running the import again
+    /// counts what the homeserver lists under the file's name and size as there, so it isn't
+    /// refused for the songs it would skip (#224 delta review; the NUC's 82 GB).
+    #[tokio::test]
+    async fn an_import_run_again_skips_what_was_stored_before_hashes_were_remembered() {
+        let hs = Arc::new(FakeHomeserver::default());
+        // Room for one more song at most: the two already there would not fit again
+        let disk = Arc::new(FakeDisk(std::sync::Mutex::new(copy_guard::Space {
+            free: 5 * GB + 200_000,
+            total: 98 * GB,
+        })));
+        let (_dir, _s, app, src) = copy_setup(hs.clone(), disk, 2).await;
+        for i in 1..=2 {
+            let name = format!("{i:02} song.wav");
+            let size = std::fs::metadata(src.join(&name)).unwrap().len();
+            hs.listed.lock().unwrap().push(pm_pubky::homeserver::RemoteFile {
+                path: format!(
+                    "{}0123456789abcde{i}-{}",
+                    pm_pubky::homeserver::PRIVATE_FILES_DIR,
+                    add_music::safe_name(&name)
+                ),
+                size: Some(size),
+            });
+        }
+        let (st, job) = call(
+            &app,
+            "POST",
+            "/v1/library/imports",
+            Some(serde_json::json!({"path": src})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{job}");
+        assert_eq!(job["needed_bytes"], 0, "{job}");
+    }
+
+    /// The single-file upload (`POST /v1/pubky/files`) keeps the bundled homeserver's reserve too.
+    #[tokio::test]
+    async fn a_single_file_upload_into_the_disks_reserve_is_refused() {
+        let hs = Arc::new(FakeHomeserver::default());
+        let disk = Arc::new(FakeDisk(std::sync::Mutex::new(copy_guard::Space {
+            free: 98 * GB / 20,
+            total: 98 * GB,
+        })));
+        let (_dir, _s, app, src) = copy_setup(hs, disk, 1).await;
+        let (st, e) = call(
+            &app,
+            "POST",
+            "/v1/pubky/files",
+            Some(serde_json::json!({"path": src.join("01 song.wav")})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::INSUFFICIENT_STORAGE, "{e}");
     }
 }
