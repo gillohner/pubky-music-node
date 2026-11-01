@@ -13,11 +13,11 @@ TIDAL has two sign-ins on this node, side by side in **Sources › TIDAL › Sig
 The **Full tracks** status at the top of the Sign in group says where you are: Needs client, Needs
 sign-in, Waiting (for the code), Working, Off, or Problem.
 
-## Step 1: a device client (only when the build has none)
+## Step 1: a device client
 
-The device sign-in needs a TIDAL **device client** ID and secret. Some builds of the node carry
-one; when yours doesn't, the page shows a step card for it. Enter a device client you are allowed
-to use. The node never takes one from another program and never ships one it isn't allowed to.
+The device sign-in needs a TIDAL **device client** ID and secret. The node carries none: until
+you enter one, the page shows a step card for it. Enter a device client you are allowed to use.
+The node never takes one from another program and never ships one it isn't allowed to.
 
 An app from TIDAL's developer site is **not** a device client: TIDAL refuses it for the code sign-in.
 That one goes in **Settings › This node › Service apps** and becomes your official app above.

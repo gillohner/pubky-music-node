@@ -69,7 +69,7 @@ pub(crate) fn describe(s: &NodeState, source: &str) -> Result<Quality, ApiError>
                 current: Some(if st.quality == "high" { "high" } else { "max" }.into()),
                 applies: Some("next_track".into()),
                 note: (!(st.enabled && st.session.is_some())).then(|| {
-                    "Applies to full tracks through the device sign-in (tidal-dl-ng's client or your own); the official app plays 30-second previews on TIDAL's third-party tier.".into()
+                    "Applies to full tracks through the device sign-in (a device client of your own); the official app plays 30-second previews on TIDAL's third-party tier.".into()
                 }),
             }
         }

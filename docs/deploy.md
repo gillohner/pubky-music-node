@@ -268,9 +268,8 @@ in use or yours, and what the service limits.
   distribution's package; it has no ready-made builds), then switch it on under Sources › Spotify › librespot. It can
   play on the machine's sound or into one of the node's zones.
 - **TIDAL full tracks (unofficial):** off by default; switch it on under Sources › TIDAL › Full tracks and press Sign
-  in with a code. Release builds carry a built-in TIDAL device client (python-tidal's); a device client of your own,
-  entered there or as `[tidal] unofficial_client_id/secret`, always wins (an app from TIDAL's developer site is not
-  a device client and won't work there).
+  in with a code. It needs a TIDAL device client of your own, entered there or as `[tidal] unofficial_client_id/secret`:
+  no build carries one (an app from TIDAL's developer site is not a device client and won't work there).
 - **SoundCloud (unofficial):** off by default. The node has no built-in client; you enter a SoundCloud web client ID
   you are allowed to use under Sources › SoundCloud, and, for your likes and playlists, your own sign-in token.
 - **Bandcamp (unofficial):** off by default. Search and streams need nothing; to download what you bought, paste the
@@ -291,8 +290,7 @@ in use or yours, and what the service limits.
 - Artist pages: a release build carries the project's fanart.tv and TheAudioDB keys (`PM_PROJECT_FANART_KEY`,
   `PM_PROJECT_AUDIODB_KEY`, public project keys) for portraits and biographies Wikipedia lacks; without them,
   fanart.tv is skipped and TheAudioDB's public test key is used (a few requests a minute).
-- A build from source without `PM_PROJECT_*_CLIENT_ID` / `PM_PROJECT_ACOUSTID_KEY` set has no built-in apps, and one
-  without `PM_TIDAL_DEVICE_CLIENT_ID` / `PM_TIDAL_DEVICE_CLIENT_SECRET` has no built-in TIDAL device client; add your
+- A build from source without `PM_PROJECT_*_CLIENT_ID` / `PM_PROJECT_ACOUSTID_KEY` set has no built-in apps; add your
   own in Settings › This node › Service apps.
 
 ## Phones and desktops without the native app

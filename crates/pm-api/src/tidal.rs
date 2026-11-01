@@ -1318,10 +1318,7 @@ pub(crate) fn sign_in(s: &NodeState, headers: Option<&axum::http::HeaderMap>) ->
         )
     };
     let app = app_label(&c);
-    let device_label = match device_client.as_ref().map(|d| d.from.as_str()) {
-        Some("builtin") => "tidal-dl-ng's client",
-        _ => "Your own device client",
-    };
+    let device_label = "Your own device client";
     // Other apps' files are looked at for the tab, not for the overview line
     let found = if headers.is_some() {
         crate::imports::scan_tidal()
@@ -1391,7 +1388,7 @@ pub(crate) fn sign_in(s: &NodeState, headers: Option<&axum::http::HeaderMap>) ->
             note: if device_client.is_some() {
                 "Full tracks (unofficial): the device sign-in tidal-dl-ng and python-tidal use, with a code you enter at link.tidal.com. TIDAL has not approved this for other apps and can stop it at any time.".into()
             } else {
-                "Full tracks (unofficial): a code you enter at link.tidal.com, as tidal-dl-ng and python-tidal do. This build has no built-in device client: enter one you are allowed to use first. TIDAL has not approved this for other apps and can stop it at any time.".into()
+                "Full tracks (unofficial): a code you enter at link.tidal.com, as tidal-dl-ng and python-tidal do. It needs a TIDAL device client: enter one you are allowed to use first. TIDAL has not approved this for other apps and can stop it at any time.".into()
             },
             action: "code".into(),
             recommended: false,

@@ -23,7 +23,7 @@ use crate::{state::NodeState, ApiError, ApiResult};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Way {
     pub id: String,
-    /// Plainly by where it comes from: "Pubky Music's app", "tidal-dl-ng's client", "Your own app".
+    /// Plainly by where it comes from: "Pubky Music's app", "Your own device client", "Your own app".
     pub label: String,
     pub note: String,
     /// `browser` (a sign-in page opens and comes back), `code` (a code to enter on another
@@ -64,7 +64,7 @@ pub struct SignIn {
     pub chosen: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub in_use: Option<InUse>,
-    /// One line for the Sources overview ("tidal-dl-ng's client · full tracks", "Not signed in").
+    /// One line for the Sources overview ("Your own device client · full tracks", "Not signed in").
     pub line: String,
     /// Sign-ins found in other apps' files on this machine (`crate::imports`), usable or not.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

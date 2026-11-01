@@ -1107,7 +1107,7 @@
     const out = el.querySelector('[data-sg="out"]'); if (out) out.onclick = async () => { try { await api('DELETE', `/sources/${cfg.source}/signin`); toast(`Signed out of ${cfg.name}`); m.change = false; state.sources = null; render(); } catch (e) { toast(e.message, 'error'); } };
     if (cfg.after) cfg.after(si, h, el);
   };
-  // TIDAL: the official app in the browser, tidal-dl-ng's device code, your own client; quality and
+  // TIDAL: the official app in the browser, a device code with your own client; quality and
   // health under the device way, which is what the Full tracks switch used to turn on (STEWARD-TIDAL-FULL.md).
   const tidalBrowserSignIn = async (btn) => { if (btn) btn.disabled = true; try { const r = await api('GET', '/sources/tidal/login'); location.href = r.url; let tries = 0; const t = setInterval(async () => { tries++; try { const st = await api('GET', '/sources/tidal/status'); if (st.signed_in) { clearInterval(t); toast('TIDAL signed in'); render(); } } catch { /* keep polling */ } if (tries > 60) clearInterval(t); }, 3000); } catch (e) { toast(e.message, 'error'); if (btn) btn.disabled = false; } };
   const tidalSigninCfg = (el) => ({
@@ -1116,9 +1116,9 @@
       const u = si.details.unofficial || {}; const st = si.details.status || {}; const w = h.wayOf(pick);
       if (pick === 'app') return st.signed_in ? h.useButton(w, st.user_id ? ' as user ' + esc(st.user_id) : '') : `<div class="toolbar"><button class="btn primary" id="tidalin">${icon('zone')} Sign in at TIDAL</button><span class="muted small">Opens TIDAL’s sign-in in this browser and comes back here.</span></div>${st.redirect_uri && !/^Pubky Music/.test(w.label || '') ? `<details class="small"><summary>Your app’s settings</summary><p class="muted small">It must list <code>${esc(st.redirect_uri)}</code> as a redirect URI and have these scopes enabled (<code>[tidal] scopes</code> in the node config):</p><div class="toolbar"><code class="path">${esc(st.requested_scopes || '')}</code></div></details>` : ''}${pasteBack('tidal')}`;
       if (pick === 'device') {
-        const client = u.client_from && u.client_from !== 'builtin' ? `<p class="muted small">Device client: ${u.client_from === 'config' ? 'set in the node config.' : 'entered here.'} ${u.client_from === 'settings' ? `<button class="btn ghost sm" id="tfclientforget">${u.builtin ? 'Use tidal-dl-ng’s instead' : 'Forget it'}</button>` : ''}</p>` : '';
-        // No device client in this build: the step card first (the node never ships another party's)
-        if (!u.client_from) return stepCard(1, 'Device client ID and secret', false, `This build has no built-in TIDAL device client. Enter one you are allowed to use; the node keeps it like a sign-in and never shows the secret again. An app from developer.tidal.com is not a device client: that one goes in Settings › This node › Service apps. ${guideLink('tidal-full-tracks.md')}`,
+        const client = u.client_from ? `<p class="muted small">Device client: ${u.client_from === 'config' ? 'set in the node config.' : 'entered here.'} ${u.client_from === 'settings' ? '<button class="btn ghost sm" id="tfclientforget">Forget it</button>' : ''}</p>` : '';
+        // No device client yet: the step card first (the node never ships another party's)
+        if (!u.client_from) return stepCard(1, 'Device client ID and secret', false, `Full tracks need a TIDAL device client: enter one you are allowed to use; the node keeps it like a sign-in and never shows the secret again. An app from developer.tidal.com is not a device client: that one goes in Settings › This node › Service apps. ${guideLink('tidal-full-tracks.md')}`,
           `<form class="stack" id="tfclient" autocomplete="off"><div class="toolbar"><input class="input" name="id" placeholder="Device client ID" autocomplete="off" spellcheck="false" aria-label="Device client ID" required>${secretInput('secret', 'Device client secret', 'Device client secret')}</div><div class="toolbar"><button class="btn" type="button" id="tfcheck">Check</button><button class="btn primary" type="submit">Save and sign in with a code</button><span class="check-out small" id="tfcheckout" role="status"></span></div><p class="muted small">Paste a whole <code>client_id=… client_secret=…</code> block or JSON into either field: it is split.</p></form>`);
         if (u.pending) return tidalCodeBox(u.pending);
         if (u.signed_in) return h.useButton(w, u.user ? ' as user ' + esc(u.user) : '') + client;
@@ -1138,7 +1138,7 @@
         const tc = $('#tfcheck'); if (tc) tc.onclick = () => { const f = new FormData(cf); runCheck(tc, $('#tfcheckout'), '/sources/tidal/unofficial/client/check', { client_id: f.get('id'), client_secret: f.get('secret') }); };
         cf.onsubmit = async (e) => { e.preventDefault(); const f = new FormData(cf); cf.querySelector('button[type=submit]').disabled = true; try { await api('PUT', '/sources/tidal/unofficial', { client_id: f.get('id'), client_secret: f.get('secret') }); toast('Device client saved'); if (await h.choose('device')) await api('POST', '/sources/tidal/unofficial/login'); } catch (er) { toast(er.message, 'error'); } h.refill(); };
       }
-      const cfg = $('#tfclientforget'); if (cfg) cfg.onclick = async () => { try { await api('PUT', '/sources/tidal/unofficial', { client_id: '' }); toast(u.builtin ? 'Using tidal-dl-ng’s device client' : 'Device client forgotten'); } catch (e) { toast(e.message, 'error'); } h.refill(); };
+      const cfg = $('#tfclientforget'); if (cfg) cfg.onclick = async () => { try { await api('PUT', '/sources/tidal/unofficial', { client_id: '' }); toast('Device client forgotten'); } catch (e) { toast(e.message, 'error'); } h.refill(); };
     },
     // The full-tracks status at the top: Off / Needs a device client / Needs sign-in / Working
     before: (si) => {

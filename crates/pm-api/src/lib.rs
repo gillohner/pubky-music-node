@@ -12238,7 +12238,7 @@ exec sleep 300
             si["ways"][2]["note"]
                 .as_str()
                 .unwrap()
-                .contains("no built-in device client"),
+                .contains("needs a TIDAL device client"),
             "{si}"
         );
         assert_eq!(si["ways"][3]["available"], true);
