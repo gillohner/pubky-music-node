@@ -1136,7 +1136,13 @@ pub(crate) struct External {
 
 pub(crate) async fn load_external(s: &Arc<NodeState>, uri: &str) -> External {
     let uri = uri.trim().to_string();
-    let cache_key = format!("item.contents.{uri}");
+    // Each person's apart: what plays in full (their own sign-ins) differs
+    let who = crate::accounts::asking();
+    let cache_key = if who.is_owner() {
+        format!("item.contents.{uri}")
+    } else {
+        format!("item.contents.{}.{uri}", who.tag())
+    };
     let cached: Option<ItemContents> = {
         let lib = s.library.lock().expect("library poisoned");
         lib.get_setting(&cache_key)
@@ -1195,7 +1201,8 @@ pub(crate) async fn load_external(s: &Arc<NodeState>, uri: &str) -> External {
     // has ("pending") and the fetch goes on in the background, filling the cache for the next
     // look.
     // One fetch per link at a time: a page asked again while its list is on the way answers at once
-    let fresh = in_flight().lock().expect("in flight").insert(uri.clone());
+    let flight = format!("{}|{uri}", who.tag());
+    let fresh = in_flight().lock().expect("in flight").insert(flight.clone());
     let task = fresh.then(|| {
         let (s, uri, it, r, acc, cache_key) = (
             s.clone(),
@@ -1206,9 +1213,10 @@ pub(crate) async fn load_external(s: &Arc<NodeState>, uri: &str) -> External {
             cache_key.clone(),
         );
         let res = res.clone();
-        tokio::spawn(async move {
+        let flight = flight.clone();
+        crate::accounts::spawn_asking(async move {
             let c = fetch_contents(&s, &uri, &it, album_id, r.as_ref(), &acc, &res, out, &cache_key).await;
-            in_flight().lock().expect("in flight").remove(&uri);
+            in_flight().lock().expect("in flight").remove(&flight);
             c
         })
     });

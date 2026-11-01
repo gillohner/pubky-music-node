@@ -163,9 +163,16 @@ impl Drop for CookieCopy {
     }
 }
 
-/// Ask yt-dlp for the audio URL of a video. Blocking (the audio thread).
-pub fn resolve_blocking(bin: &Path, id: &str) -> Result<String, String> {
-    resolve_with_cookies(bin, id, cookies_path().as_deref())
+/// Ask yt-dlp for the audio URL of a video, for `who`. Blocking (the audio thread). The saved
+/// cookies are the owner's YouTube sign-in: only the owner's plays go with them, anyone else's
+/// without (what is public).
+pub fn resolve_blocking(bin: &Path, id: &str, who: &crate::accounts::Who) -> Result<String, String> {
+    resolve_with_cookies(bin, id, cookies_for(who, cookies_path()).as_deref())
+}
+
+/// The saved cookies (the owner's YouTube sign-in) for the owner's lookups only.
+fn cookies_for(who: &crate::accounts::Who, saved: Option<PathBuf>) -> Option<PathBuf> {
+    saved.filter(|_| who.is_owner())
 }
 
 fn resolve_with_cookies(bin: &Path, id: &str, cookies: Option<&Path>) -> Result<String, String> {
@@ -268,6 +275,7 @@ fn record(library: &std::sync::Mutex<pm_library::Library>, r: &Result<String, St
 pub(crate) fn open_blocking(
     library: &std::sync::Mutex<pm_library::Library>,
     id: &str,
+    who: &crate::accounts::Who,
 ) -> Result<Box<dyn pm_zones::FrameSource>, pm_zones::SourceError> {
     let fail = |reason: String| pm_zones::SourceError::Open {
         uri: format!("{}{id}", crate::youtube::VIDEO_URI_PREFIX),
@@ -275,8 +283,11 @@ pub(crate) fn open_blocking(
     };
     let (bin, _) =
         binary().ok_or_else(|| fail("yt-dlp is not on this node any more (Sources › YouTube)".into()))?;
-    let r = resolve_blocking(&bin, id);
-    record(library, &r);
+    let r = resolve_blocking(&bin, id, who);
+    // How the owner's setup does: someone else's play without the cookies says nothing about it
+    if who.is_owner() {
+        record(library, &r);
+    }
     crate::sources::open_http_stream(&r.map_err(fail)?)
         .map_err(|_| fail("the YouTube stream did not open".into()))
 }
@@ -495,5 +506,16 @@ printf 'https://example.org/audio\n'
             1,
             "the working copy is removed"
         );
+    }
+
+    /// The owner's YouTube cookies go with the owner's lookups only: a listener's (or anyone
+    /// else's) YouTube item plays what is public, never with the owner's Google account.
+    #[test]
+    fn only_the_owners_lookups_use_the_saved_cookies() {
+        use crate::accounts::Who;
+        let saved = Some(PathBuf::from("/data/youtube/cookies.txt"));
+        assert_eq!(cookies_for(&Who::Owner, saved.clone()), saved);
+        assert_eq!(cookies_for(&Who::Listener("abc".into()), saved.clone()), None);
+        assert_eq!(cookies_for(&Who::Nobody, saved), None);
     }
 }

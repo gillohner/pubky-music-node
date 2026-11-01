@@ -99,6 +99,19 @@ fn now() -> i64 {
         .unwrap_or(0)
 }
 
+/// Whether `key` is listed with music access on (the library alone: the audio thread's check).
+pub(crate) fn listed_for_music(lib: &pm_library::Library, key: &str) -> bool {
+    lib.get_setting(SETTING)
+        .ok()
+        .flatten()
+        .and_then(|j| serde_json::from_str::<Roster>(&j).ok())
+        .is_some_and(|r| {
+            r.people
+                .iter()
+                .any(|p| p.key == key && p.access.music() && p.music_enabled)
+        })
+}
+
 pub fn load(s: &NodeState) -> Roster {
     s.library
         .lock()

@@ -2089,8 +2089,12 @@ async fn load(
         if caller.role != accounts::Role::Owner {
             accounts::check_listener_item(it)?;
         }
-        // Moved by this person from their browser: played with their accounts
+        // Moved by this person from their browser: played with their accounts (the owner's
+        // whole: no fetch limit left from someone else's queue either)
         it.by = accounts::Who::of(&caller).by();
+        if caller.role == accounts::Role::Owner {
+            it.limit = None;
+        }
     }
     let to = zone_of(&s, &id)?;
     Ok(Json(
@@ -15670,7 +15674,24 @@ exec sleep 300
         let (locked, _) = backup::make(&s, Some("correct horse")).unwrap();
         let locked = backup::parse(&locked).unwrap();
         assert!(!has(&locked.database, "anna-token"));
-        assert!(locked.secrets.is_some());
+        // The sealed part holds Anna's own sign-in, under her key
+        let sealed = backup::open_sealed(
+            locked.manifest.secrets.as_ref().unwrap(),
+            locked.secrets.as_ref().unwrap(),
+            "correct horse",
+        )
+        .unwrap();
+        let row = sealed
+            .settings
+            .iter()
+            .find(|(k, _)| k.starts_with("person.") && k.ends_with(".tidal.user"))
+            .map(|(_, v)| v.clone())
+            .unwrap_or_default();
+        assert!(
+            row.contains("anna-token"),
+            "{:?}",
+            sealed.settings.keys().collect::<Vec<_>>()
+        );
     }
 
     /// Qobuz plays each person's items with their own sign-in too: the owner's token for the
@@ -15742,5 +15763,269 @@ exec sleep 300
         );
         assert!(opened[3].is_err(), "nobody's item plays with no one's account");
         assert_eq!(*seen.lock().unwrap(), ["t-owner", "t-anna"]);
+    }
+
+    /// A request with a node token, and its status, JSON body and headers.
+    async fn send_as(
+        app: &Router,
+        method: &str,
+        uri: &str,
+        token: Option<&str>,
+        extra: &[(&str, &str)],
+        body: Option<serde_json::Value>,
+    ) -> (StatusCode, serde_json::Value, HeaderMap) {
+        let mut req = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("content-type", "application/json");
+        if let Some(t) = token {
+            req = req.header("authorization", format!("Bearer {t}"));
+        }
+        for (k, v) in extra {
+            req = req.header(*k, *v);
+        }
+        let r = app
+            .clone()
+            .oneshot(
+                req.body(
+                    body.map(|b| Body::from(b.to_string()))
+                        .unwrap_or_else(Body::empty),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let (st, h) = (r.status(), r.headers().clone());
+        let b = r.into_body().collect().await.unwrap().to_bytes();
+        (st, serde_json::from_slice(&b).unwrap_or_default(), h)
+    }
+
+    /// A TIDAL API mock: the token endpoint (`token` for any grant) and `/searchResults`,
+    /// recording each search's bearer.
+    async fn tidal_auth_and_search_mock(token: &'static str) -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen2 = seen.clone();
+        let mock = Router::new()
+            .route(
+                "/v1/oauth2/token",
+                post(move || async move {
+                    Json(serde_json::json!({"access_token": token, "refresh_token": "r", "expires_in": 3600, "user_id": 77}))
+                }),
+            )
+            .route(
+                "/searchResults",
+                get(move |headers: HeaderMap| {
+                    let seen = seen2.clone();
+                    async move {
+                        let b = headers.get("authorization").unwrap().to_str().unwrap().to_string();
+                        seen.lock().unwrap().push(b);
+                        Json(serde_json::json!({"data": [], "included": []}))
+                    }
+                }),
+            );
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        (base, seen)
+    }
+
+    /// A listener's search runs in a task of its own per source: it still uses their own TIDAL
+    /// sign-in (or the app's), never the owner's (#226 review H1).
+    #[tokio::test]
+    async fn a_listeners_search_uses_their_own_sign_in() {
+        let (base, seen) = tidal_auth_and_search_mock("app-token").await;
+        let dir = tempfile::tempdir().unwrap();
+        let (s, anna, ben) = two_people_node(dir.path(), &base).await;
+        let app = router(s.clone());
+        let (anna_tok, ben_tok) = (
+            accounts::mint(&s, anna).unwrap(),
+            accounts::mint(&s, ben).unwrap(),
+        );
+        let (st, v, _) = send_as(
+            &app,
+            "GET",
+            "/v1/search?q=lucky&scope=tidal",
+            Some(&anna_tok),
+            &[],
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        let mine: Vec<String> = seen.lock().unwrap().drain(..).collect();
+        assert!(!mine.is_empty(), "TIDAL was searched");
+        assert!(mine.iter().all(|b| b == "Bearer anna-token"), "{mine:?}");
+        let (st, _, _) = send_as(
+            &app,
+            "GET",
+            "/v1/search?q=other&scope=tidal",
+            Some(&ben_tok),
+            &[],
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let bens: Vec<String> = seen.lock().unwrap().drain(..).collect();
+        assert!(
+            bens.iter()
+                .all(|b| b != "Bearer owner-token" && b != "Bearer anna-token"),
+            "Ben searches with the app's token: {bens:?}"
+        );
+    }
+
+    /// A listener's own TIDAL sign-in in the browser: kept for them, and only when it comes back
+    /// to the browser that started it (#226 review M2). The owner approving a listener's sign-in
+    /// link binds nothing; removing a listener drops their sign-ins still on the way (L1).
+    #[tokio::test]
+    async fn a_listeners_browser_sign_in_is_kept_for_them_only_from_their_browser() {
+        let (base, _) = tidal_auth_and_search_mock("fresh-token").await;
+        let dir = tempfile::tempdir().unwrap();
+        let (s, anna, ben) = two_people_node(dir.path(), &base).await;
+        let app = router(s.clone());
+        let (anna_tok, ben_tok) = (
+            accounts::mint(&s, anna).unwrap(),
+            accounts::mint(&s, ben).unwrap(),
+        );
+        // Starts a login as `token`: the state and the cookie its browser got
+        let start = |token: String| {
+            let app = app.clone();
+            async move {
+                let (st, v, h) =
+                    send_as(&app, "GET", "/v1/sources/tidal/login", Some(&token), &[], None).await;
+                assert_eq!(st, StatusCode::OK, "{v}");
+                let url = url::Url::parse(v["url"].as_str().unwrap()).unwrap();
+                let state = url
+                    .query_pairs()
+                    .find(|(k, _)| k == "state")
+                    .unwrap()
+                    .1
+                    .to_string();
+                let cookie = h
+                    .get("set-cookie")
+                    .map(|c| c.to_str().unwrap().split(';').next().unwrap().to_string());
+                (state, cookie)
+            }
+        };
+        let callback = |state: String, cookie: Option<String>| {
+            let app = app.clone();
+            async move {
+                let extra: Vec<(&str, &str)> = cookie.iter().map(|c| ("cookie", c.as_str())).collect();
+                let (_, _, h) = send_as(
+                    &app,
+                    "GET",
+                    &format!("/tidal/callback?code=c&state={state}"),
+                    None,
+                    &extra,
+                    None,
+                )
+                .await;
+                h.get("location").unwrap().to_str().unwrap().to_string()
+            }
+        };
+        let row = |key: &str| s.library.lock().unwrap().get_setting(key).unwrap();
+        // Anna, in her own browser: hers
+        let (state, cookie) = start(anna_tok.clone()).await;
+        assert!(cookie.is_some(), "a listener's login is bound to their browser");
+        assert_eq!(callback(state, cookie).await, "/?tidal=signed_in");
+        assert!(row(&format!("person.{anna}.tidal.user"))
+            .unwrap()
+            .contains("fresh-token"));
+        assert!(
+            row("tidal.user").unwrap().contains("owner-token"),
+            "the owner's untouched"
+        );
+        // Ben's link approved in someone else's browser (no cookie), or pasted by the owner: refused
+        let (state, _) = start(ben_tok.clone()).await;
+        assert!(callback(state, None).await.starts_with("/?tidal=error"));
+        let (state, _) = start(ben_tok.clone()).await;
+        let pasted = serde_json::json!({"url": format!("http://node/tidal/callback?code=c&state={state}")});
+        let (st, _, _) = send_as(
+            &app,
+            "POST",
+            "/v1/sources/tidal/callback",
+            Some("s3cret"),
+            &[],
+            Some(pasted),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        assert!(row(&format!("person.{ben}.tidal.user")).is_none());
+        // Ben removed while his own sign-in is on the way: it never lands
+        let (state, cookie) = start(ben_tok.clone()).await;
+        let (st, _, _) = send_as(
+            &app,
+            "DELETE",
+            &format!("/v1/people/{ben}"),
+            Some("s3cret"),
+            &[],
+            None,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(callback(state, cookie).await.starts_with("/?tidal=error"));
+        assert!(row(&format!("person.{ben}.tidal.user")).is_none());
+    }
+
+    /// A listener whose music access is switched off (People) plays nothing with their sign-ins,
+    /// items they queued before included (L2); the owner taking a queue over from a browser takes
+    /// it whole, with no listener's fetch limit left on it (L4).
+    #[tokio::test]
+    async fn a_blocked_listeners_items_play_with_no_account_and_the_owner_takes_queues_whole() {
+        let flac = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../pm-audio/tests/fixtures/60_mono_audio.flac"
+        ))
+        .unwrap();
+        let (base, seen) = tidal_mock_recording_tokens(flac).await;
+        let dir = tempfile::tempdir().unwrap();
+        let (s, anna, _) = two_people_node(dir.path(), &base).await;
+        let app = router(s.clone());
+        let anna_tok = accounts::mint(&s, anna).unwrap();
+        let zid = s.zones.list()[0].id.clone();
+        let zone = s.zones.get(&zid).unwrap();
+        let item =
+            serde_json::json!({"items": [{"uri": "tidal:track:20115564"}], "replace": true, "play": false});
+        let (st, _, _) = send_as(
+            &app,
+            "POST",
+            &format!("/v1/zones/{zid}/queue"),
+            Some(&anna_tok),
+            &[],
+            Some(item),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let off = serde_json::json!({"music": false});
+        let (st, v, _) = send_as(
+            &app,
+            "PATCH",
+            &format!("/v1/people/{anna}"),
+            Some("s3cret"),
+            &[],
+            Some(off),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        zone.play();
+        let st = zone.wait_stopped().await;
+        assert!(st.error.is_some(), "Anna's item no longer plays with her account");
+        assert!(seen.lock().unwrap().is_empty(), "{:?}", seen.lock().unwrap());
+
+        // The owner moves a browser queue holding a listener's item: theirs now, whole
+        let moved = serde_json::json!({"items": [{"uri": "tidal:track:20115564", "by": anna, "limit": {"lan": false}}], "index": 0, "transport": "playing"});
+        let (st, v, _) = send_as(
+            &app,
+            "POST",
+            &format!("/v1/zones/{zid}/load"),
+            Some("s3cret"),
+            &[],
+            Some(moved),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        let q = zone.queue();
+        assert_eq!((q[0].by.as_deref(), q[0].limit), (None, None));
+        let st = zone.wait_stopped().await;
+        assert!(st.error.is_none(), "{:?}", st.error);
+        assert_eq!(*seen.lock().unwrap(), ["Bearer owner-token"]);
     }
 }

@@ -222,10 +222,18 @@ pub(crate) fn redirect_uri(s: &NodeState, headers: &axum::http::HeaderMap) -> St
 }
 
 /// Pending sign-ins: state → (PKCE verifier, redirect URI used).
-/// Sign-ins in progress: the PKCE state's nonce → (verifier, redirect, who started it).
-#[allow(clippy::type_complexity)]
-fn pending() -> &'static Mutex<HashMap<String, (String, String, Who)>> {
-    static P: std::sync::OnceLock<Mutex<HashMap<String, (String, String, Who)>>> = std::sync::OnceLock::new();
+/// A sign-in in progress, under its PKCE state's nonce.
+pub(crate) struct Pending {
+    verifier: String,
+    redirect: String,
+    /// Who started it: the sign-in is kept for them.
+    pub(crate) who: Who,
+    /// A listener's: the browser cookie it must come back with (`accounts::login_binding`).
+    binding: Option<String>,
+}
+
+pub(crate) fn pending() -> &'static Mutex<HashMap<String, Pending>> {
+    static P: std::sync::OnceLock<Mutex<HashMap<String, Pending>>> = std::sync::OnceLock::new();
     P.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -744,7 +752,7 @@ pub(crate) async fn login(
     State(s): State<Arc<NodeState>>,
     axum::Extension(caller): axum::Extension<crate::accounts::Caller>,
     headers: axum::http::HeaderMap,
-) -> ApiResult<crate::tidal::LoginUrl> {
+) -> Result<Response, ApiError> {
     let who = Who::of(&caller);
     if who == Who::Nobody {
         return Err(ApiError::new(StatusCode::FORBIDDEN, "sign in to the node first"));
@@ -769,10 +777,16 @@ pub(crate) async fn login(
     } else {
         crate::project_apps::return_state(&nonce, &callback_uri(&s, &headers))
     };
-    pending()
-        .lock()
-        .expect("pending")
-        .insert(nonce, (verifier, redirect.clone(), who));
+    let binding = crate::accounts::login_binding("spotify", &who);
+    pending().lock().expect("pending").insert(
+        nonce,
+        Pending {
+            verifier,
+            redirect: redirect.clone(),
+            who,
+            binding: binding.as_ref().map(|(v, _)| v.clone()),
+        },
+    );
     let mut url = url::Url::parse(&format!("{}/authorize", accounts_base(&s))).map_err(upstream)?;
     url.query_pairs_mut()
         .append_pair("response_type", "code")
@@ -782,7 +796,13 @@ pub(crate) async fn login(
         .append_pair("code_challenge_method", "S256")
         .append_pair("code_challenge", &challenge)
         .append_pair("state", &state);
-    Ok(Json(crate::tidal::LoginUrl { url: url.to_string() }))
+    let mut resp = Json(crate::tidal::LoginUrl { url: url.to_string() }).into_response();
+    if let Some((_, cookie)) = binding {
+        if let Ok(v) = axum::http::HeaderValue::from_str(&cookie) {
+            resp.headers_mut().append(axum::http::header::SET_COOKIE, v);
+        }
+    }
+    Ok(resp)
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -822,13 +842,18 @@ pub(crate) async fn pasted_callback(
     Json(body): Json<PastedCallback>,
 ) -> ApiResult<SpotifyStatus> {
     let q = callback_from_url(&body.url)?;
-    finish_login(&s, q).await?;
+    let finish = crate::accounts::LoginFinish::Pasted(Who::of(&caller));
+    finish_login(&s, q, finish).await?;
     Ok(Json(status_view(&s, &Who::of(&caller), &headers)))
 }
 
 /// `GET /spotify/callback`: finishes the sign-in and sends the browser back to the UI.
-pub(crate) async fn callback(State(s): State<Arc<NodeState>>, Query(q): Query<CallbackQuery>) -> Response {
-    match finish_login(&s, q).await {
+pub(crate) async fn callback(
+    State(s): State<Arc<NodeState>>,
+    Query(q): Query<CallbackQuery>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    match finish_login(&s, q, crate::accounts::LoginFinish::Browser(headers)).await {
         Ok(()) => Redirect::to("/?spotify=ok").into_response(),
         Err(e) => {
             Redirect::to(&format!("/?spotify=error&message={}", urlencoding(&e.message))).into_response()
@@ -840,7 +865,11 @@ fn urlencoding(s: &str) -> String {
     url::form_urlencoded::byte_serialize(s.as_bytes()).collect()
 }
 
-async fn finish_login(s: &NodeState, q: CallbackQuery) -> Result<(), ApiError> {
+async fn finish_login(
+    s: &NodeState,
+    q: CallbackQuery,
+    finish: crate::accounts::LoginFinish,
+) -> Result<(), ApiError> {
     if let Some(err) = q.error {
         return Err(ApiError::bad_request(format!(
             "Spotify refused the sign-in: {err}"
@@ -849,12 +878,19 @@ async fn finish_login(s: &NodeState, q: CallbackQuery) -> Result<(), ApiError> {
     let (Some(code), Some(state)) = (q.code, q.state) else {
         return Err(ApiError::bad_request("missing code or state"));
     };
-    // Kept for whoever started this sign-in (the callback itself comes without a node token)
-    let (verifier, redirect, who) = pending()
+    // Kept for whoever started this sign-in (the callback itself comes without a node token),
+    // and only where they started it
+    let Pending {
+        verifier,
+        redirect,
+        who,
+        binding,
+    } = pending()
         .lock()
         .expect("pending")
         .remove(crate::project_apps::state_nonce(&state))
         .ok_or_else(|| ApiError::bad_request("unknown or expired sign-in state; start again"))?;
+    crate::accounts::check_login("spotify", &who, binding.as_deref(), &finish)?;
     let c = creds(s);
     let v = token_request(
         s,

@@ -299,10 +299,24 @@ fn counts_of(lib: &Library) -> Result<BackupCounts, BackupError> {
 /// The backup file's bytes. `passphrase`: lock the sign-ins in; `None` leaves them out.
 /// A listener's own copy of a sign-in (`person.<key>.<setting>` for a [`SECRET_SETTINGS`] key):
 /// sealed and left out of the snapshot as the owner's are.
-pub(crate) fn is_person_signin(key: &str) -> bool {
+pub fn is_person_signin(key: &str) -> bool {
     key.strip_prefix(crate::accounts::PERSON_PREFIX)
         .and_then(|rest| rest.split_once('.'))
         .is_some_and(|(_, base)| SECRET_SETTINGS.iter().any(|(k, _)| *k == base))
+}
+
+/// Deletes every sign-in from a plain database copy: the owner's ([`SECRET_SETTINGS`]) and each
+/// listener's own (`pm-node backup`, and the web backup's snapshot).
+pub fn strip_signins(copy: &Library) -> Result<(), pm_library::LibraryError> {
+    for (key, _) in SECRET_SETTINGS {
+        copy.delete_setting(key)?;
+    }
+    for (key, _) in copy.settings_with_prefix(crate::accounts::PERSON_PREFIX)? {
+        if is_person_signin(&key) {
+            copy.delete_setting(&key)?;
+        }
+    }
+    Ok(())
 }
 
 fn person_signins(lib: &Library) -> Result<Vec<(String, String)>, BackupError> {
@@ -338,12 +352,7 @@ pub fn make(s: &NodeState, passphrase: Option<&str>) -> Result<(Vec<u8>, Manifes
     let db = (|| -> Result<Vec<u8>, BackupError> {
         {
             let copy = Library::open(&snap)?;
-            for (key, _) in SECRET_SETTINGS {
-                copy.delete_setting(key)?;
-            }
-            for (key, _) in person_signins(&copy)? {
-                copy.delete_setting(&key)?;
-            }
+            strip_signins(&copy)?;
             for key in NODE_OWN {
                 copy.delete_setting(key)?;
             }

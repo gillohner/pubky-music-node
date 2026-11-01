@@ -230,17 +230,32 @@ pub(crate) fn redirect_uri(s: &NodeState, headers: &axum::http::HeaderMap) -> St
 // ---- tokens ----
 
 /// Pending sign-ins: OAuth `state` → (PKCE verifier, redirect URI used).
-/// Sign-ins in progress: the PKCE state's nonce → (verifier, redirect, who started it).
-#[allow(clippy::type_complexity)]
-fn pending() -> &'static Mutex<HashMap<String, (String, String, Who)>> {
-    static P: std::sync::OnceLock<Mutex<HashMap<String, (String, String, Who)>>> = std::sync::OnceLock::new();
+/// A sign-in in progress, under its PKCE state's nonce.
+pub(crate) struct Pending {
+    verifier: String,
+    redirect: String,
+    /// Who started it: the sign-in is kept for them.
+    pub(crate) who: Who,
+    /// A listener's: the browser cookie it must come back with (`accounts::login_binding`).
+    binding: Option<String>,
+}
+
+pub(crate) fn pending() -> &'static Mutex<HashMap<String, Pending>> {
+    static P: std::sync::OnceLock<Mutex<HashMap<String, Pending>>> = std::sync::OnceLock::new();
     P.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 /// The app's own token (client credentials), cached until shortly before it expires.
-fn app_token_cache() -> &'static Mutex<Option<(String, i64)>> {
-    static T: std::sync::OnceLock<Mutex<Option<(String, i64)>>> = std::sync::OnceLock::new();
+/// The app token, with the app (`auth_base client_id`) it belongs to: another app (or another
+/// node in the same process, as in tests) never gets this one.
+#[allow(clippy::type_complexity)]
+fn app_token_cache() -> &'static Mutex<Option<(String, String, i64)>> {
+    static T: std::sync::OnceLock<Mutex<Option<(String, String, i64)>>> = std::sync::OnceLock::new();
     T.get_or_init(|| Mutex::new(None))
+}
+
+fn app_of_token(s: &NodeState) -> String {
+    format!("{} {}", auth_base(s), creds(s).client_id)
 }
 
 async fn token_request(s: &NodeState, form: &[(&str, &str)]) -> Result<Value, ApiError> {
@@ -314,8 +329,9 @@ async fn token_request_public(s: &NodeState, form: &[(&str, &str)]) -> Result<Va
 }
 
 async fn app_token(s: &NodeState) -> Result<String, ApiError> {
-    if let Some((t, exp)) = app_token_cache().lock().expect("app token").clone() {
-        if exp - now_unix() > 60 {
+    let app = app_of_token(s);
+    if let Some((for_app, t, exp)) = app_token_cache().lock().expect("app token").clone() {
+        if for_app == app && exp - now_unix() > 60 {
             return Ok(t);
         }
     }
@@ -333,7 +349,7 @@ async fn app_token(s: &NodeState) -> Result<String, ApiError> {
         .ok_or_else(|| upstream("no access_token in the token reply"))?
         .to_string();
     let expires_at = now_unix() + v["expires_in"].as_i64().unwrap_or(3600);
-    *app_token_cache().lock().expect("app token") = Some((token.clone(), expires_at));
+    *app_token_cache().lock().expect("app token") = Some((app, token.clone(), expires_at));
     Ok(token)
 }
 
@@ -1041,7 +1057,7 @@ pub(crate) async fn login(
     State(s): State<Arc<NodeState>>,
     axum::Extension(caller): axum::Extension<crate::accounts::Caller>,
     headers: axum::http::HeaderMap,
-) -> ApiResult<LoginUrl> {
+) -> Result<Response, ApiError> {
     let who = Who::of(&caller);
     if who == Who::Nobody {
         return Err(ApiError::new(StatusCode::FORBIDDEN, "sign in to the node first"));
@@ -1067,10 +1083,16 @@ pub(crate) async fn login(
     } else {
         crate::project_apps::return_state(&nonce, &callback_uri(&s, &headers))
     };
-    pending()
-        .lock()
-        .expect("pending")
-        .insert(nonce, (verifier, redirect.clone(), who));
+    let binding = crate::accounts::login_binding("tidal", &who);
+    pending().lock().expect("pending").insert(
+        nonce,
+        Pending {
+            verifier,
+            redirect: redirect.clone(),
+            who,
+            binding: binding.as_ref().map(|(v, _)| v.clone()),
+        },
+    );
     let mut url = url::Url::parse(&format!("{}/authorize", login_base(&s))).map_err(upstream)?;
     url.query_pairs_mut()
         .append_pair("response_type", "code")
@@ -1080,7 +1102,13 @@ pub(crate) async fn login(
         .append_pair("code_challenge_method", "S256")
         .append_pair("code_challenge", &challenge)
         .append_pair("state", &state);
-    Ok(Json(LoginUrl { url: url.to_string() }))
+    let mut resp = Json(LoginUrl { url: url.to_string() }).into_response();
+    if let Some((_, cookie)) = binding {
+        if let Ok(v) = axum::http::HeaderValue::from_str(&cookie) {
+            resp.headers_mut().append(axum::http::header::SET_COOKIE, v);
+        }
+    }
+    Ok(resp)
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -1125,13 +1153,18 @@ pub(crate) async fn pasted_callback(
     Json(body): Json<PastedCallback>,
 ) -> ApiResult<TidalStatus> {
     let q = callback_from_url(&body.url)?;
-    finish_login(&s, q).await?;
+    let finish = crate::accounts::LoginFinish::Pasted(Who::of(&caller));
+    finish_login(&s, q, finish).await?;
     Ok(Json(status_view(&s, &Who::of(&caller), &headers)))
 }
 
 /// `GET /tidal/callback?code&state`: finish the sign-in, then back to the web UI.
-pub(crate) async fn callback(State(s): State<Arc<NodeState>>, Query(q): Query<CallbackQuery>) -> Response {
-    match finish_login(&s, q).await {
+pub(crate) async fn callback(
+    State(s): State<Arc<NodeState>>,
+    Query(q): Query<CallbackQuery>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    match finish_login(&s, q, crate::accounts::LoginFinish::Browser(headers)).await {
         Ok(()) => Redirect::to("/?tidal=signed_in").into_response(),
         Err(e) => {
             tracing::warn!("tidal sign-in failed: {}", e.message);
@@ -1164,7 +1197,11 @@ fn record_public_probe(s: &NodeState, outcome: &str, detail: &str) {
     tracing::info!(outcome, detail, "TIDAL public-client test");
 }
 
-async fn finish_login(s: &NodeState, q: CallbackQuery) -> Result<(), ApiError> {
+async fn finish_login(
+    s: &NodeState,
+    q: CallbackQuery,
+    finish: crate::accounts::LoginFinish,
+) -> Result<(), ApiError> {
     if let Some(err) = q.error {
         return Err(ApiError::bad_request(format!(
             "TIDAL refused the sign-in: {err} {}",
@@ -1174,12 +1211,19 @@ async fn finish_login(s: &NodeState, q: CallbackQuery) -> Result<(), ApiError> {
     let (Some(code), Some(state)) = (q.code, q.state) else {
         return Err(ApiError::bad_request("missing code or state"));
     };
-    // Kept for whoever started this sign-in (the callback itself comes without a node token)
-    let (verifier, redirect, who) = pending()
+    // Kept for whoever started this sign-in (the callback itself comes without a node token),
+    // and only where they started it
+    let Pending {
+        verifier,
+        redirect,
+        who,
+        binding,
+    } = pending()
         .lock()
         .expect("pending")
         .remove(crate::project_apps::state_nonce(&state))
         .ok_or_else(|| ApiError::bad_request("unknown or expired sign-in state; start again"))?;
+    crate::accounts::check_login("tidal", &who, binding.as_deref(), &finish)?;
     let c = creds(s);
     let form = [
         ("grant_type", "authorization_code"),
@@ -2256,7 +2300,10 @@ pub(crate) async fn stream(
     }
     // With the caller's own account; what one person fetched is never served to another
     let who = Who::of(&caller);
-    let key = format!("{}/{id}", who.by().unwrap_or_else(|| "owner".into()));
+    if who == Who::Nobody {
+        return Err(ApiError::new(StatusCode::FORBIDDEN, not_connected(&who)));
+    }
+    let key = format!("{}/{id}", who.tag());
     let cached = {
         let mut c = stream_cache().lock().expect("stream cache");
         c.retain(|(_, at, _, _)| at.elapsed() < STREAM_CACHE_TTL);
@@ -2478,12 +2525,22 @@ fn user_token_blocking(
         .map_err(|e| e.to_string())?;
     let fresh = session_from(&v, Some(&u)).map_err(|e| e.message)?;
     let lib = library.lock().map_err(|_| "library poisoned")?;
-    who.put(
-        &lib,
-        USER_KEY,
-        Some(&serde_json::to_string(&fresh).expect("session serializes")),
-    )
-    .map_err(|e| e.message)?;
+    // Only over the session this refresh started from: one signed out (or a person removed)
+    // meanwhile stays gone
+    let key = who.setting(USER_KEY).ok_or_else(|| not_connected(who))?;
+    let was = u.access_token.clone();
+    let still = |cur: &str| serde_json::from_str::<UserSession>(cur).is_ok_and(|c| c.access_token == was);
+    let raw = serde_json::to_string(&fresh).expect("session serializes");
+    if !crate::vault_cache::store_refreshed(&lib, &key, still, &raw) {
+        // Use what is there now, if anything
+        return lib
+            .get_setting(&key)
+            .ok()
+            .flatten()
+            .and_then(|v| serde_json::from_str::<UserSession>(&v).ok())
+            .map(|c| c.access_token)
+            .ok_or_else(|| not_connected(who));
+    }
     Ok(fresh.access_token)
 }
 

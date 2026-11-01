@@ -21,12 +21,10 @@ pub fn backup(cfg: &NodeConfig, file: &Path, force: bool) -> anyhow::Result<()> 
     lib.backup_to(file)
         .with_context(|| format!("writing backup {}", file.display()))?;
     {
-        // Sign-ins never go into a plain database copy (Settings › Backup locks them with a
-        // passphrase instead)
+        // Sign-ins, the owner's and each listener's own, never go into a plain database copy
+        // (Settings › Backup locks them with a passphrase instead)
         let copy = Library::open(file)?;
-        for (key, _) in pm_api::backup::SECRET_SETTINGS {
-            copy.delete_setting(key)?;
-        }
+        pm_api::backup::strip_signins(&copy)?;
         copy.vacuum_into_place()?;
     }
     for ext in ["-wal", "-shm"] {
@@ -264,4 +262,48 @@ pub fn import_playlist(cfg: &NodeConfig, file: &Path, name: Option<&str>) -> any
     })?;
     println!("stored playlist {id} (private; `pm-node serve` syncs it to the homeserver when signed in)");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `pm-node backup` leaves every sign-in out of its plain copy: the owner's and each
+    /// listener's own (`person.<key>.*`); other settings stay.
+    #[test]
+    fn the_backup_command_leaves_out_every_sign_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = NodeConfig {
+            data_dir: dir.path().join("data"),
+            ..Default::default()
+        };
+        {
+            let lib = open(&cfg).unwrap();
+            lib.set_setting("tidal.user", "OWNER-SECRET").unwrap();
+            lib.set_setting("person.abc.tidal.user", "LISTENER-SECRET")
+                .unwrap();
+            lib.set_setting("person.abc.qobuz.unofficial", "LISTENER-QOBUZ")
+                .unwrap();
+            lib.set_setting("person.abc.tidal.signin_way", "app").unwrap();
+            lib.set_setting("home.layout", "kept").unwrap();
+        }
+        let file = dir.path().join("copy.sqlite");
+        backup(&cfg, &file, false).unwrap();
+        let copy = Library::open(&file).unwrap();
+        for k in [
+            "tidal.user",
+            "person.abc.tidal.user",
+            "person.abc.qobuz.unofficial",
+        ] {
+            assert!(copy.get_setting(k).unwrap().is_none(), "{k} in the plain copy");
+        }
+        assert_eq!(copy.get_setting("home.layout").unwrap().as_deref(), Some("kept"));
+        assert_eq!(
+            copy.get_setting("person.abc.tidal.signin_way")
+                .unwrap()
+                .as_deref(),
+            Some("app"),
+            "not a sign-in"
+        );
+    }
 }

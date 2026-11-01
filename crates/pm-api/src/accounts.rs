@@ -71,10 +71,76 @@ tokio::task_local! {
 }
 
 /// Who is asking, for catalogue reads that use a streaming sign-in (search, item pages): the
-/// request's person; outside a request (background work) the owner. Plays and sign-ins never use
-/// this: they take their person explicitly.
+/// request's person. Outside a request it fails closed: nobody's account (the services' own app
+/// tokens at most), so a task that lost its request never borrows the owner's; work done for the
+/// owner in the background says so ([`as_owner`]). Plays and sign-ins never use this: they take
+/// their person explicitly.
 pub fn asking() -> Who {
-    ASKING.try_with(Who::clone).unwrap_or(Who::Owner)
+    ASKING.try_with(Who::clone).unwrap_or(Who::Nobody)
+}
+
+/// Runs `f` for the person asking now, in a task of its own: `tokio::spawn` alone would leave
+/// the request's person behind.
+pub fn spawn_asking<F>(f: F) -> tokio::task::JoinHandle<F::Output>
+where
+    F: std::future::Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    tokio::spawn(ASKING.scope(asking(), f))
+}
+
+/// A sign-in at a streaming service that a listener started finishes only in the browser that
+/// started it (or by that listener pasting the address): otherwise a listener could start one and
+/// have the owner (or another listener) approve it, binding that person's account to their own.
+/// The owner's need no binding: theirs can only become the owner's own sign-in.
+pub fn login_binding(service: &str, who: &Who) -> Option<(String, String)> {
+    if who.is_owner() {
+        return None;
+    }
+    let value = crate::tidal::random_urlsafe(24);
+    let header = format!("pm_login_{service}={value}; Path=/; HttpOnly; SameSite=Lax; Max-Age=900");
+    Some((value, header))
+}
+
+/// How a streaming sign-in arrives back at the node.
+pub enum LoginFinish {
+    /// The service sent the browser to the callback: its cookies.
+    Browser(axum::http::HeaderMap),
+    /// Someone pasted the address the service sent them to.
+    Pasted(Who),
+}
+
+/// Whether a sign-in may finish this way (see [`login_binding`]).
+pub fn check_login(
+    service: &str,
+    started_by: &Who,
+    binding: Option<&str>,
+    finish: &LoginFinish,
+) -> Result<(), ApiError> {
+    if started_by.is_owner() {
+        return Ok(());
+    }
+    let ok = match finish {
+        LoginFinish::Pasted(w) => w == started_by,
+        LoginFinish::Browser(h) => {
+            let want = format!("pm_login_{service}=");
+            let cookie = h
+                .get_all(axum::http::header::COOKIE)
+                .iter()
+                .filter_map(|v| v.to_str().ok())
+                .flat_map(|v| v.split(';'))
+                .find_map(|c| c.trim().strip_prefix(&want).map(str::to_string));
+            binding.is_some() && cookie.as_deref() == binding
+        }
+    };
+    ok.then_some(()).ok_or_else(|| {
+        ApiError::bad_request("This sign-in was started in another browser: start it again here")
+    })
+}
+
+/// Runs `f` as the owner: the node's own background work that uses the owner's sign-ins.
+pub async fn as_owner<F: std::future::Future>(f: F) -> F::Output {
+    ASKING.scope(Who::Owner, f).await
 }
 
 /// Deletes every person's copy of a setting (the owner's and each listener's): a node-wide app
@@ -109,6 +175,15 @@ impl Who {
         }
     }
 
+    /// [`Who::of_item`], checked against People: a listener whose music access was taken away
+    /// plays nothing with their sign-ins any more, items queued before included.
+    pub fn of_item_in(it: &pm_zones::QueueItem, lib: &pm_library::Library) -> Who {
+        match Who::of_item(it) {
+            Who::Listener(k) if !crate::people::listed_for_music(lib, &k) => Who::Nobody,
+            w => w,
+        }
+    }
+
     /// What a queue item records about who queued it.
     pub fn by(&self) -> Option<String> {
         match self {
@@ -119,6 +194,15 @@ impl Who {
 
     pub fn is_owner(&self) -> bool {
         *self == Who::Owner
+    }
+
+    /// A name for this person in cache keys: `owner`, a listener's key, or `nobody`.
+    pub fn tag(&self) -> &str {
+        match self {
+            Who::Owner => "owner",
+            Who::Listener(k) => k,
+            Who::Nobody => "nobody",
+        }
     }
 
     /// This person's copy of a setting: the owner's is `base` itself, a listener's
@@ -651,6 +735,16 @@ pub fn sign_out_everywhere(s: &NodeState, key: &str) -> Result<(), ApiError> {
 /// devices.
 pub fn forget_person(s: &NodeState, key: &str) -> Result<(), ApiError> {
     sign_out_everywhere(s, key)?;
+    // Their sign-ins still on the way: they would land again when the service answers
+    let theirs = Who::Listener(key.to_string());
+    crate::tidal::pending()
+        .lock()
+        .expect("pending")
+        .retain(|_, p| p.who != theirs);
+    crate::spotify::pending()
+        .lock()
+        .expect("pending")
+        .retain(|_, p| p.who != theirs);
     {
         let lib = s.library.lock().expect("library poisoned");
         for (k, _) in lib.settings_with_prefix(&format!("{PERSON_PREFIX}{key}."))? {
