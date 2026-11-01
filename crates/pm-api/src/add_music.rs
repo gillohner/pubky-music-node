@@ -145,13 +145,14 @@ pub(crate) enum Stored {
 }
 
 /// Stores one file's bytes on the homeserver (unless the same content is there), and for an
-/// external homeserver also in the node's "From homeserver" folder.
+/// external homeserver also in the node's "From homeserver" folder. What it sends is added to
+/// `have`: the same content later in the job isn't sent again.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn store(
     s: &Arc<NodeState>,
     target: &dyn crate::copy_guard::Target,
     room: &dyn crate::copy_guard::Room,
-    have: &HashMap<String, Option<u64>>,
+    have: &mut HashMap<String, Option<u64>>,
     name: &str,
     relative: Option<&str>,
     bytes: Vec<u8>,
@@ -183,9 +184,18 @@ pub(crate) async fn store(
     // To the node's own homeserver there is no uplink to spare; to another one, pace the copy.
     let rate = if bundled { 0 } else { crate::files::copy_rate(s) };
     let keep_local = (!bundled).then(|| bytes.clone());
+    // Listed at another size: what is there now decides (it may be under another name)
+    let existed = match have.get(&hash[..16]) {
+        None => false,
+        Some(sz) => match crate::copy_guard::there(target, &remote, len, *sz).await {
+            Ok(crate::copy_guard::There::Gone) => false,
+            Ok(crate::copy_guard::There::Same) => return Ok(Stored::Already(remote)),
+            Ok(crate::copy_guard::There::Differs) => true,
+            Err(e) => return Err(format!("{name}: couldn't check the copy there ({e})")),
+        },
+    };
     // Guarded: the reserve of the disk it lands on (the bundled homeserver's, else this node's
     // mirror), and nothing half written left there (a file the homeserver had before untouched)
-    let existed = have.contains_key(&hash[..16]);
     let rate = (rate > 0).then_some(rate);
     match crate::copy_guard::upload_guarded(s, target, room, &remote, bytes, rate, existed).await {
         Ok(()) => {}
@@ -201,6 +211,7 @@ pub(crate) async fn store(
         }
         Err(crate::copy_guard::Refused::Other(e)) => return Err(format!("{name}: {e}")),
     }
+    have.insert(hash[..16].to_string(), Some(len));
     crate::storage::note_full(s, false);
     if let Some(bytes) = keep_local {
         // Into the "From homeserver" folder, under the dropped folder's own path when given
@@ -495,13 +506,13 @@ async fn finish(s: &Arc<NodeState>, id: &str) {
                 up.size
             ));
         }
-        let have = present(sync.as_ref()).await?;
+        let mut have = present(sync.as_ref()).await?;
         let room = crate::copy_guard::room_for_store(s);
         store(
             s,
             sync.as_ref(),
             room.as_ref(),
-            &have,
+            &mut have,
             &up.name,
             up.relative_path.as_deref(),
             bytes,
@@ -615,6 +626,7 @@ pub(crate) async fn import(
     let listed = raw.map(have_of);
     let needed = files
         .iter()
+        .filter(|(p, _)| !crate::copy_guard::is_apple_double(p))
         .filter(|(p, n)| {
             !listed
                 .as_ref()
@@ -654,7 +666,7 @@ pub(crate) async fn import(
             Some(h) => Ok(h),
             None => present(target.as_ref()).await,
         };
-        let have = match have {
+        let mut have = match have {
             Ok(h) => h,
             Err(e) => {
                 set(&|j| {
@@ -696,7 +708,7 @@ pub(crate) async fn import(
                         &s2,
                         target.as_ref(),
                         room.as_ref(),
-                        &have,
+                        &mut have,
                         &name,
                         rel.as_deref(),
                         bytes,

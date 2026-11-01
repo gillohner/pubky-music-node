@@ -209,6 +209,7 @@ pub(crate) async fn upload_many(
     };
     let needed = files
         .iter()
+        .filter(|(p, _)| !crate::copy_guard::is_apple_double(p))
         .filter(|(p, n)| {
             !listed.as_ref().is_some_and(|present| {
                 known_hash(&s, p).is_some_and(|h| {
@@ -247,7 +248,7 @@ pub(crate) async fn upload_many(
                 .await
                 .map(|l| l.into_iter().map(|f| (f.path, f.size)).collect()),
         };
-        let present: std::collections::HashMap<String, Option<u64>> = match listed {
+        let mut present: std::collections::HashMap<String, Option<u64>> = match listed {
             Ok(l) => l,
             Err(msg) => {
                 set(&|j| {
@@ -273,7 +274,7 @@ pub(crate) async fn upload_many(
                 continue;
             }
             // Never into the disk's reserve: checked right before each real upload (copy_one)
-            match copy_one(&s2, target.as_ref(), room.as_ref(), &present, &path, &name).await {
+            match copy_one(&s2, target.as_ref(), room.as_ref(), &mut present, &path, &name).await {
                 Ok(sent) => {
                     streak.ok();
                     set(&|j| {
@@ -323,12 +324,13 @@ pub(crate) async fn upload_many(
 }
 
 /// One library file to the homeserver: Ok(true) sent, Ok(false) already there (same content and
-/// size). A failed or short upload is deleted there, never left looking like a song.
+/// size). A failed or short upload is deleted there, never left looking like a song. What it
+/// sends is added to `present`: a second file of the job with the same name isn't sent again.
 async fn copy_one(
     s: &Arc<NodeState>,
     target: &dyn crate::copy_guard::Target,
     room: &dyn crate::copy_guard::Room,
-    present: &std::collections::HashMap<String, Option<u64>>,
+    present: &mut std::collections::HashMap<String, Option<u64>>,
     path: &std::path::Path,
     name: &str,
 ) -> Result<bool, String> {
@@ -350,17 +352,25 @@ async fn copy_one(
     .await
     .map_err(|e| format!("{name}: {e}"))?;
     remember_hash(s, path, &hash);
-    if present.get(&remote).is_some_and(|sz| *sz == Some(len)) {
-        return Ok(false);
-    }
+    let existed = match present.get(&remote) {
+        None => false,
+        Some(sz) if *sz == Some(len) => return Ok(false),
+        // Listed with its size unknown or another: what is there now decides
+        Some(sz) => match crate::copy_guard::there(target, &remote, len, *sz).await {
+            Ok(crate::copy_guard::There::Gone) => false,
+            Ok(crate::copy_guard::There::Same) => return Ok(false),
+            Ok(crate::copy_guard::There::Differs) => true,
+            Err(e) => return Err(format!("{name}: couldn't check the copy there ({e})")),
+        },
+    };
     let rate = copy_rate(s);
     // Guarded: the reserve with what is really sent, recorded while in flight, checked after, and
-    // nothing half written left there (a file the homeserver listed before is never deleted)
-    let existed = present.contains_key(&remote);
+    // nothing half written left there (a file the homeserver had before is never deleted)
     let rate = (rate > 0).then_some(rate);
     match crate::copy_guard::upload_guarded(s, target, room, &remote, bytes, rate, existed).await {
         Ok(()) => {
             crate::storage::note_full(s, false);
+            present.insert(remote, Some(len));
             Ok(true)
         }
         Err(crate::copy_guard::Refused::Space(why)) => Err(format!("{name}: {why}")),

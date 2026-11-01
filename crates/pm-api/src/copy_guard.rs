@@ -212,13 +212,16 @@ impl Streak {
     }
 }
 
+/// macOS's `._*` AppleDouble files: never audio, never copied nor counted in the space needed.
+pub fn is_apple_double(path: &Path) -> bool {
+    path.file_name()
+        .is_some_and(|n| n.to_string_lossy().starts_with("._"))
+}
+
 /// Whether a file is audio the library plays: macOS's `._*` AppleDouble files are not, and the
 /// format is probed, not taken from the extension (a truncated or mislabelled file fails it).
 pub async fn is_audio(path: &Path) -> bool {
-    if path
-        .file_name()
-        .is_some_and(|n| n.to_string_lossy().starts_with("._"))
-    {
+    if is_apple_double(path) {
         return false;
     }
     let p = path.to_path_buf();
@@ -324,6 +327,34 @@ pub async fn settle_in_flight(s: &Arc<NodeState>, tries: u32, every: std::time::
     }
 }
 
+/// What the homeserver has at a path it listed, right before a copy would send over it.
+#[derive(Debug, PartialEq)]
+pub enum There {
+    /// Nothing any more: sent as a new file.
+    Gone,
+    /// The same size as the source (or a size it doesn't say): kept, not sent.
+    Same,
+    /// Known to be another size: sent over it.
+    Differs,
+}
+
+/// The homeserver has no rename, so an upload over a file writes into it, and a failed one leaves
+/// a truncated copy where a good one was: a file is only sent over when its size is known to
+/// differ. `listed`: the size the listing gave (an empty file listed as 0 is known to differ;
+/// a 0 from the check alone is a size the homeserver didn't say).
+pub async fn there(
+    target: &dyn Target,
+    remote: &str,
+    len: u64,
+    listed: Option<u64>,
+) -> Result<There, String> {
+    Ok(match target.stat(remote).await? {
+        None => There::Gone,
+        Some(n) if n == len || (n == 0 && listed != Some(0)) => There::Same,
+        Some(_) => There::Differs,
+    })
+}
+
 /// Why an upload didn't go through.
 #[derive(Debug)]
 pub enum Refused {
@@ -355,11 +386,16 @@ pub async fn upload_guarded(
     note_in_flight(s, remote, Some(InFlight { size: len, existed }));
     let failed = match target.upload(remote, bytes, rate).await {
         Ok(()) => match target.stat(remote).await {
-            // 0: the homeserver didn't say how big it is; like a failed check, counted as sent
+            // 0: the homeserver didn't say how big it is; counted as sent
             Ok(Some(kept)) if kept != len && kept != 0 => Some(Refused::Short(kept)),
             Ok(None) => Some(Refused::Short(0)),
-            // Kept whole, or couldn't check: counted as sent
-            _ => None,
+            Ok(Some(_)) => None,
+            // Not known whole: failed, and its record kept for the next start to settle
+            Err(e) => {
+                return Err(Refused::Other(format!(
+                    "couldn't check what the homeserver kept ({e}); run the copy again"
+                )))
+            }
         },
         Err(UploadError::Full(_)) => Some(Refused::Full),
         Err(UploadError::Other(e)) => Some(Refused::Other(e)),

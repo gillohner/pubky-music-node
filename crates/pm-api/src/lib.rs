@@ -16044,6 +16044,10 @@ exec sleep 300
         extra: u64,
         /// What the homeserver lists before the copy.
         listed: std::sync::Mutex<Vec<pm_pubky::homeserver::RemoteFile>>,
+        /// Uploads after this many fail, as while `fails` is set.
+        fail_after: Option<usize>,
+        /// Checking a file's size fails (the homeserver went away after an upload).
+        stat_fails: std::sync::atomic::AtomicBool,
     }
 
     #[async_trait::async_trait]
@@ -16057,8 +16061,13 @@ exec sleep 300
             bytes: Vec<u8>,
             _rate: Option<u64>,
         ) -> Result<(), copy_guard::UploadError> {
-            self.uploads.lock().unwrap().push(remote.to_string());
-            if self.fails.load(std::sync::atomic::Ordering::SeqCst) {
+            let n = {
+                let mut u = self.uploads.lock().unwrap();
+                u.push(remote.to_string());
+                u.len()
+            };
+            if self.fails.load(std::sync::atomic::Ordering::SeqCst) || self.fail_after.is_some_and(|k| n > k)
+            {
                 // As a homeserver failing mid-write: half the file left there
                 self.sizes
                     .lock()
@@ -16076,6 +16085,9 @@ exec sleep 300
             Ok(())
         }
         async fn stat(&self, remote: &str) -> Result<Option<u64>, String> {
+            if self.stat_fails.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err("connection reset".into());
+            }
             Ok(self.sizes.lock().unwrap().get(remote).copied())
         }
         async fn delete(&self, remote: &str) -> Result<(), String> {
@@ -16157,18 +16169,22 @@ exec sleep 300
     /// reserve, and says why.
     #[tokio::test]
     async fn a_copy_stops_before_the_disk_reaches_its_reserve() {
-        // Room for the three songs (about 176 KB each) at the start; each upload also uses
-        // 300 KB more on the disk, so after the first the second would eat into the reserve
+        // Room for the three songs (176, 352 and 529 KB) at the start; each upload also uses
+        // 800 KB more on the disk, so after the first the second would eat into the reserve
         let disk = Arc::new(FakeDisk(std::sync::Mutex::new(copy_guard::Space {
-            free: 5 * GB + 600_000,
+            free: 5 * GB + 1_100_000,
             total: 98 * GB,
         })));
         let hs = Arc::new(FakeHomeserver {
             disk: Some(disk.clone()),
-            extra: 300_000,
+            extra: 800_000,
             ..Default::default()
         });
-        let (_dir, _s, app, src) = copy_setup(hs.clone(), disk, 3).await;
+        let (_dir, _s, app, src) = copy_setup(hs.clone(), disk, 0).await;
+        // Songs that differ: the same content twice in one job is sent once
+        for i in 1..=3 {
+            tone_wav(&src.join(format!("{i:02} song.wav")), i);
+        }
         let (st, job) = call(
             &app,
             "POST",
@@ -16237,6 +16253,16 @@ exec sleep 300
         let (_dir, _s, app, src) = copy_setup(hs.clone(), disk, 1).await;
         std::fs::write(src.join("._01 song.wav"), vec![0u8; 4096]).unwrap();
         std::fs::write(src.join("02 notes.flac"), b"not audio at all").unwrap();
+        // The `._` file isn't counted in the space needed either
+        let song = std::fs::metadata(src.join("01 song.wav")).unwrap().len();
+        let (_, dry) = call(
+            &app,
+            "POST",
+            "/v1/library/imports",
+            Some(serde_json::json!({"path": src, "dry_run": true})),
+        )
+        .await;
+        assert_eq!(dry["needed_bytes"], song + 16, "{dry}");
         let (_, job) = call(
             &app,
             "POST",
@@ -16347,9 +16373,9 @@ exec sleep 300
         )
     }
 
-    /// A re-send of a file the homeserver already lists (its size unknown or stale) that fails
-    /// never deletes it: that may be the good copy (#224 review). Only what an attempt itself made
-    /// half is removed.
+    /// A re-send of a file the homeserver already has at another size that fails never deletes
+    /// it: that may be the better copy (#224 review). Only what an attempt itself made half is
+    /// removed.
     #[tokio::test]
     async fn a_failed_upload_never_deletes_a_file_that_was_there() {
         let hs = Arc::new(FakeHomeserver::default());
@@ -16360,11 +16386,12 @@ exec sleep 300
         })));
         let (_dir, s, app, src) = copy_setup(hs.clone(), disk, 1).await;
         let path = src.join("01 song.wav");
-        let (remote, _) = copied_name(&s, &path);
+        let (remote, len) = copied_name(&s, &path);
         hs.listed.lock().unwrap().push(pm_pubky::homeserver::RemoteFile {
             path: remote.clone(),
             size: None,
         });
+        hs.sizes.lock().unwrap().insert(remote.clone(), len / 3);
         let t = untagged_track(path, "Song 1", "Band");
         s.library.lock().unwrap().upsert_track(&t).unwrap();
         let (_, job) = call(
@@ -16590,5 +16617,132 @@ exec sleep 300
         )
         .await;
         assert_eq!(st, StatusCode::INSUFFICIENT_STORAGE, "{e}");
+    }
+
+    /// A file the homeserver lists without its size is checked before a copy sends over it: the
+    /// homeserver has no rename, so a failed upload over the good copy would leave it truncated
+    /// (#224 review). Kept when its size is the source's, sent over only when known to differ.
+    #[tokio::test]
+    async fn a_copy_never_sends_over_a_whole_file_it_could_not_size() {
+        let hs = Arc::new(FakeHomeserver::default());
+        hs.fails.store(true, std::sync::atomic::Ordering::SeqCst);
+        let disk = Arc::new(FakeDisk(std::sync::Mutex::new(copy_guard::Space {
+            free: 500 * GB,
+            total: 1000 * GB,
+        })));
+        let (_dir, s, app, src) = copy_setup(hs.clone(), disk, 1).await;
+        let path = src.join("01 song.wav");
+        let (remote, len) = copied_name(&s, &path);
+        hs.listed.lock().unwrap().push(pm_pubky::homeserver::RemoteFile {
+            path: remote.clone(),
+            size: None,
+        });
+        hs.sizes.lock().unwrap().insert(remote.clone(), len);
+        let mut t = untagged_track(path, "Song 1", "Band");
+        t.file.size_bytes = len;
+        s.library.lock().unwrap().upsert_track(&t).unwrap();
+        let (_, job) = call(
+            &app,
+            "POST",
+            "/v1/pubky/files/upload",
+            Some(serde_json::json!({"all": true})),
+        )
+        .await;
+        let done = copy_finished(&app, job["id"].as_str().unwrap()).await;
+        assert_eq!(done["skipped"], 1, "{done}");
+        assert!(hs.uploads.lock().unwrap().is_empty(), "sent over the good copy");
+        assert_eq!(hs.sizes.lock().unwrap()[&remote], len);
+    }
+
+    /// Two files of one job under the same homeserver name: the second isn't sent again, so its
+    /// failure can never delete the first's good copy (#224 review). The library copy and an
+    /// import both.
+    #[tokio::test]
+    async fn a_second_file_of_a_job_with_the_same_name_leaves_the_first_alone() {
+        let hs = Arc::new(FakeHomeserver {
+            fail_after: Some(1),
+            ..Default::default()
+        });
+        let disk = Arc::new(FakeDisk(std::sync::Mutex::new(copy_guard::Space {
+            free: 500 * GB,
+            total: 1000 * GB,
+        })));
+        let (_dir, s, app, src) = copy_setup(hs.clone(), disk, 0).await;
+        for d in ["a", "b"] {
+            std::fs::create_dir_all(src.join(d)).unwrap();
+            tone_wav(&src.join(d).join("01 song.wav"), 1);
+            let t = untagged_track(src.join(d).join("01 song.wav"), "Song 1", "Band");
+            s.library.lock().unwrap().upsert_track(&t).unwrap();
+        }
+        let (_, job) = call(
+            &app,
+            "POST",
+            "/v1/pubky/files/upload",
+            Some(serde_json::json!({"all": true})),
+        )
+        .await;
+        let done = copy_finished(&app, job["id"].as_str().unwrap()).await;
+        assert_eq!(
+            (done["done"].clone(), done["skipped"].clone()),
+            (1.into(), 1.into()),
+            "{done}"
+        );
+        assert_eq!(hs.uploads.lock().unwrap().len(), 1);
+        assert!(hs.deletes.lock().unwrap().is_empty());
+
+        hs.uploads.lock().unwrap().clear();
+        hs.sizes.lock().unwrap().clear();
+        let (_, job) = call(
+            &app,
+            "POST",
+            "/v1/library/imports",
+            Some(serde_json::json!({"path": src})),
+        )
+        .await;
+        let done = copy_finished(&app, job["id"].as_str().unwrap()).await;
+        assert_eq!(
+            (done["done"].clone(), done["skipped"].clone()),
+            (1.into(), 1.into()),
+            "{done}"
+        );
+        assert!(hs.deletes.lock().unwrap().is_empty());
+    }
+
+    /// When the homeserver can't be asked what it kept after an upload, the file counts as failed
+    /// and its in-flight record stays for the next start to settle (#224 review).
+    #[tokio::test]
+    async fn an_upload_whose_size_cant_be_checked_is_failed_and_kept_in_flight() {
+        let hs = Arc::new(FakeHomeserver::default());
+        hs.stat_fails.store(true, std::sync::atomic::Ordering::SeqCst);
+        let disk = Arc::new(FakeDisk(std::sync::Mutex::new(copy_guard::Space {
+            free: 500 * GB,
+            total: 1000 * GB,
+        })));
+        let (_dir, s, app, src) = copy_setup(hs.clone(), disk, 1).await;
+        let path = src.join("01 song.wav");
+        let (remote, _) = copied_name(&s, &path);
+        let t = untagged_track(path, "Song 1", "Band");
+        s.library.lock().unwrap().upsert_track(&t).unwrap();
+        let (_, job) = call(
+            &app,
+            "POST",
+            "/v1/pubky/files/upload",
+            Some(serde_json::json!({"all": true})),
+        )
+        .await;
+        let done = copy_finished(&app, job["id"].as_str().unwrap()).await;
+        assert_eq!(
+            (done["done"].clone(), done["failed"].clone()),
+            (0.into(), 1.into()),
+            "{done}"
+        );
+        let flight = s
+            .library
+            .lock()
+            .unwrap()
+            .get_setting(copy_guard::IN_FLIGHT_KEY)
+            .unwrap()
+            .unwrap_or_default();
+        assert!(flight.contains(&remote), "{flight}");
     }
 }
