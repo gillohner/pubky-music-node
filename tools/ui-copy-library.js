@@ -206,6 +206,11 @@ const homeFiles = Array.from({ length: 20000 }, (_, i) => ({ path: `/priv/pubky.
       check(asks - before <= 1, `a failed page is asked for once, not again and again (${asks - before})`);
       check(await p.getAttribute('.ctrow[data-cpath="/big"]', 'aria-checked') === 'true' && await p.getAttribute('.ctrow[data-cpath="/big/f1"]', 'aria-checked') === 'true', 'the untick is not done: the folder stays ticked');
       check(/Couldn’t load every folder/.test(await p.textContent('#toast')), 'and it says why');
+      // The album picker pages through a library with 2 500 albums (the node answers 1 000 at most)
+      const albumAsks = [];
+      await ctx.route(/\/v1\/library\/albums(\?.*)?$/, (r) => { const u = new URL(r.request().url()); albumAsks.push(u.search); const after = Number(u.searchParams.get('after') || 0); const lim = Math.min(1000, Number(u.searchParams.get('limit') || 100)); return r.fulfill({ json: Array.from({ length: Math.max(0, Math.min(lim, 2500 - after)) }, (_, i) => ({ id: after + i + 1, title: `Album ${after + i + 1}`, album_artist: 'Someone' })) }); });
+      await p.click('[data-cpick="album"]'); await p.fill('#cpq', 'Album 2400');
+      check(await until(async () => /Album 2400/.test(await p.textContent('#cplist'))) && albumAsks.length === 3 && albumAsks.every((q) => /limit=1000/.test(q)), `the album picker pages to the 2 500th album (${albumAsks.length} requests)`);
       check(errors.length === 0, `no page errors${errors.length ? ': ' + errors.join(' | ') : ''}`);
       await ctx.close();
     }

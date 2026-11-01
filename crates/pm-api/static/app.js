@@ -573,6 +573,8 @@
   const fmtLeft = (s) => (s >= 3600 ? `${Math.floor(s / 3600)} h ${Math.round((s % 3600) / 60)} min left` : s >= 60 ? `${Math.round(s / 60)} min left` : 'less than a minute left');
   // A call whose answer is read whatever its status (a 507's numbers, a node without the route)
   const call = async (method, path, body) => {
+    // A change made while the connection is down waits for it, as with api()
+    if (method !== 'GET') await whenConnected();
     const sent = state.token;
     let r; try { r = await fetch('/v1' + path, { method, headers: { 'content-type': 'application/json', ...(sent ? { authorization: 'Bearer ' + sent } : {}) }, body: body === undefined ? undefined : JSON.stringify(body) }); } catch { return { status: 0, ok: false, json: { error: 'Can’t reach the node.' } }; }
     let json = null; try { json = await r.json(); } catch { json = null; }
@@ -706,7 +708,20 @@
     };
     const loadList = async (kind) => {
       const box = $('#cplist', d); box.innerHTML = skelRows(4) + SLOW; const gen = ++loadGen; slowNote(box, () => gen === loadGen);
-      try { lists[kind] = kind === 'artists' ? await api('GET', '/library/artists') : await api('GET', '/library/albums?limit=5000'); } catch (e) { if (gen === loadGen && box.isConnected) box.innerHTML = `<div class="notice warn small">${esc(e.message)} <button class="btn sm" type="button" id="cplretry">Try again</button></div>`; const b = $('#cplretry', d); if (b) b.onclick = () => loadList(kind); return; }
+      try {
+        if (kind === 'artists') lists.artists = await api('GET', '/library/artists');
+        else {
+          // The node gives at most 1 000 albums an answer: page on with `after`, the list growing
+          let after = null; lists.albums = [];
+          for (;;) {
+            const page = await api('GET', `/library/albums?limit=1000${after != null ? `&after=${after}` : ''}`);
+            if (gen !== loadGen) return;
+            lists.albums = lists.albums.concat(page); pickList(kind);
+            if (page.length < 1000 || !page.length) break;
+            after = page[page.length - 1].id;
+          }
+        }
+      } catch (e) { if (gen === loadGen && box.isConnected) box.innerHTML = `<div class="notice warn small">${esc(e.message)} <button class="btn sm" type="button" id="cplretry">Try again</button></div>`; const b = $('#cplretry', d); if (b) b.onclick = () => loadList(kind); return; }
       if (gen === loadGen) pickList(kind);
     };
     let loadGen = 0;
