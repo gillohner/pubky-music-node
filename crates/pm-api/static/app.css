@@ -914,7 +914,9 @@ a.btn { text-decoration: none; }
 }
 /* The narrowest phones keep the zone's name, shortened: the sound pill doesn't name it there */
 @media (max-width: 420px) {
+  html[data-shell="phone"] .player .player-right .zone-btn { gap: 4px; padding: 6px 8px; }
   html[data-shell="phone"] .player .player-right .zone-btn span { max-width: 64px; }
+  html[data-shell="phone"] .player .player-right .zone-btn .chev { display: none; }
 }
 
 /* Settings: side tabs, one topic per tab, settings as rows (STEWARD-UX-SETTINGS.md) */

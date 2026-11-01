@@ -680,7 +680,7 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
       if (w < 600) {
         const dup = await pp.evaluate(() => { const q = document.querySelector('#quality'); const dev = q && q.querySelector('.qdev'); return !!(dev && getComputedStyle(dev).display !== 'none'); });
         check(!dup, `${w}: the zone's name is not in the sound pill too`);
-        const zn = await pp.$eval('.player .zone-btn span', (e) => ({ shown: getComputedStyle(e).display !== 'none' && e.getBoundingClientRect().width > 20, text: e.textContent })).catch(() => null);
+        const zn = await pp.$eval('.player .zone-btn span', (e) => ({ shown: getComputedStyle(e).display !== 'none' && e.getBoundingClientRect().width >= 40, width: Math.round(e.getBoundingClientRect().width), text: e.textContent })).catch(() => null);
         check(zn && zn.shown && zn.text, `${w}: the zone button names the zone (${JSON.stringify(zn)})`);
         await pp.click('#np .np-title'); const opened = await visible(pp, '#nowplaying', 8000);
         check(opened && await pp.evaluate(() => /^\/(song|item)/.test(location.pathname) === false), `${w}: tapping the bar's title opens Now playing, not the song page`);
