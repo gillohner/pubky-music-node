@@ -422,6 +422,13 @@ pub(crate) async fn check_client(
         if d.to_ascii_lowercase().contains("limited input device") {
             return answer(false, NOT_A_DEVICE_CLIENT.into());
         }
+        // Busy or down is not a verdict on the client
+        if status.as_u16() == 429 || status.is_server_error() {
+            return answer(
+                false,
+                format!("TIDAL couldn't answer right now ({status}). Try again in a moment."),
+            );
+        }
         return answer(
             false,
             format!(

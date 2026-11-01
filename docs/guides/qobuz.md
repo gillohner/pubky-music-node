@@ -26,7 +26,7 @@ two. **Show** reveals a secret while you type it.
 
 | It says | It means |
 | :-- | :-- |
-| OK: Qobuz accepts this app ID and the secret's signature | go on to step 2 (the first stream after the sign-in proves the secret once more; a wrong one then shows as a Problem) |
+| OK: Qobuz accepts this app ID; the secret is checked at the first play | go on to step 2. Qobuz only checks the secret once it plays something for your account: a wrong one then shows as a Problem saying so |
 | Qobuz doesn't know this app ID | a typo, or the app was withdrawn; ask Qobuz |
 | Qobuz knows this app ID, but the secret doesn't go with it | the secret is wrong |
 | Couldn't reach Qobuz | the node has no way to Qobuz right now; try again later |

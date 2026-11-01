@@ -38,7 +38,7 @@ const qobuzMocks = async (p, log) => {
     const out = !/^\d+$/.test(b.app_id) ? { ok: false, detail: 'A Qobuz app ID is digits only' }
       : b.app_id !== '100000000' ? { ok: false, detail: "Qobuz doesn't know this app ID. Check it, or ask Qobuz for API access." }
       : b.app_secret !== SECRET ? { ok: false, detail: "Qobuz knows this app ID, but the secret doesn't go with it. Check the secret." }
-      : { ok: true, detail: 'OK: Qobuz accepts this app ID and secret. Your Qobuz account is next.' };
+      : { ok: true, detail: 'OK: Qobuz accepts this app ID; the secret is checked at the first play. Your Qobuz account is next.' };
     return r.fulfill({ json: out });
   });
   await p.route(/\/v1\/sources\/qobuz\/unofficial\/login$/, (r) => {
@@ -206,6 +206,10 @@ const tidalMocks = async (p, log, si0) => {
         check(await until(async () => (await pillOf(p, root)) === 'Working', 8000), `${w} TIDAL: signed in by itself, Working`);
         check(/up to 24-bit\/192 kHz/.test(await p.textContent(`${root} .set-row`)) && await p.isVisible('#tfout'), `${w} TIDAL: the quality and Sign out`);
         await shot('tidal-working');
+        // A session imported from another app's file needs no device client here: Working
+        delete T.U.client_from; await p.reload(); await p.waitForSelector(`${root} .set-name .pill`, { timeout: 20000 });
+        check(await pillOf(p, root) === 'Working', `${w} TIDAL: an imported session without a client is Working, not Needs client`);
+        T.U.client_from = 'settings';
         // Off, a problem, sign out, then a code that runs out
         // (signed in, the chooser shows its status rows, not the ways)
         T.U.enabled = false; await p.reload(); await p.waitForSelector(`${root} .set-name .pill`, { timeout: 20000 });

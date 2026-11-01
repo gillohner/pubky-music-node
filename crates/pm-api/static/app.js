@@ -1143,12 +1143,15 @@
     // The full-tracks status at the top: Off / Needs a device client / Needs sign-in / Working
     before: (si) => {
       const u = si.details.unofficial || {}; const broke = u.health && !u.health.ok;
-      const st = !u.client_from ? { cls: '', label: 'Needs client', text: 'Needs a TIDAL device client (pick the code sign-in below).' }
+      // A session first (also one imported or pasted, which needs no device client here), then
+      // a code waiting, then what is missing
+      const st = u.signed_in
+        ? (broke ? { cls: 'bad', label: 'Problem', text: `Switched itself off: ${u.health.detail}.` }
+          : !u.enabled ? { cls: '', label: 'Off', text: 'Signed in, switched off here (pick the code sign-in below to use it).' }
+          : { cls: 'ok', label: 'Working', text: `Full tracks ${u.quality === 'high' ? 'up to 16-bit/44.1 kHz' : 'up to 24-bit/192 kHz'}.` })
         : u.pending ? { cls: 'warn', label: 'Waiting', text: 'Waiting for the code to be entered at link.tidal.com.' }
-        : !u.signed_in ? { cls: '', label: 'Needs sign-in', text: 'Needs your TIDAL sign-in with a code (pick it below).' }
-        : broke ? { cls: 'bad', label: 'Problem', text: `Switched itself off: ${u.health.detail}.` }
-        : !u.enabled ? { cls: '', label: 'Off', text: 'Signed in, switched off here (pick the code sign-in below to use it).' }
-        : { cls: 'ok', label: 'Working', text: `Full tracks ${u.quality === 'high' ? 'up to 16-bit/44.1 kHz' : 'up to 24-bit/192 kHz'}.` };
+        : !u.client_from ? { cls: '', label: 'Needs client', text: 'Needs a TIDAL device client (pick the code sign-in below).' }
+        : { cls: '', label: 'Needs sign-in', text: 'Needs your TIDAL sign-in with a code (pick it below).' };
       return [sgRow(`Full tracks <span class="pill ${st.cls}">${esc(st.label)}</span>`, `${esc(st.text)} Unofficial: can stop working, uses your TIDAL account. ${guideLink('tidal-full-tracks.md')}`, u.signed_in ? '<button class="btn ghost sm" id="tfout">Sign out</button>' : '')];
     },
     extra: (si) => {

@@ -2,7 +2,7 @@
 
 TIDAL has two sign-ins on this node, side by side in **Sources › TIDAL › Sign in**:
 
-- **The official app** (the project's, or your own from developer.tidal.com): search, albums, your
+- **The official app** (the project's, or your own from TIDAL's developer site): search, albums, your
   collection and playlist imports. TIDAL plays **30-second previews** to apps on its third-party
   developer tier, so this one doesn't give you full tracks.
 - **The device sign-in** (full tracks, unofficial): the way TIDAL's own devices and programs like
@@ -19,7 +19,7 @@ The device sign-in needs a TIDAL **device client** ID and secret. Some builds of
 one; when yours doesn't, the page shows a step card for it. Enter a device client you are allowed
 to use. The node never takes one from another program and never ships one it isn't allowed to.
 
-An app from developer.tidal.com is **not** a device client: TIDAL refuses it for the code sign-in.
+An app from TIDAL's developer site is **not** a device client: TIDAL refuses it for the code sign-in.
 That one goes in **Settings › This node › Service apps** and becomes your official app above.
 
 You can paste a whole `client_id=… client_secret=…` block or JSON into either field: it is split.
