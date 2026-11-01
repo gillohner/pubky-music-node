@@ -4966,6 +4966,7 @@
             + (kind === 'song' && pg.versions.length ? `<section class="section" id="iversions"><div class="section-head"><h3>Versions</h3><span class="muted small">other recordings: live, remastered, edits</span></div><div class="list compact">${pg.versions.map((v, k) => `<div class="list-row">${svcBadge(v.source === 'library' ? 'library' : v.source)}<div class="grow"><div class="name">${v.page ? `<a class="lnk" data-vpage="${k}">${esc(v.label.split(' · ')[0])}</a>` : esc(v.label.split(' · ')[0])}</div><div class="sub">${esc(v.label.split(' · ').slice(1).join(' · '))}</div></div><button class="icon-btn" data-vplay="${k}" title="Play this version" aria-label="Play this version">${icon('play')}</button></div>`).join('')}</div></section>` : '')
             + '<div id="isimilar-slot"></div>'
             + `<section class="section" id="itags"><div class="section-head"><h3>Tags</h3>${pg.on_pubky && pg.on_pubky.taggers ? `<button class="faces muted small" data-taggers="${pg.on_pubky.taggers}">${pg.on_pubky.taggers} ${pg.on_pubky.taggers === 1 ? 'person' : 'people'} tagged this on Pubky</button>` : ''}</div>${myTags ? scopedTagRow(myTags, linkTags, linkRef ? pg.source : null, kind, (pg.on_pubky && pg.on_pubky.tags) || []) : `${pg.on_pubky && pg.on_pubky.tags.length ? `<div class="chips">${pg.on_pubky.tags.map(([l, c]) => `<button class="chip" data-tag-open="${esc(l)}">#${esc(l)} <span class="muted">${c}</span></button>`).join('')}</div>` : ''}${empty(`Tagging works once this ${kind} is matched to MusicBrainz, the open music database, so other apps know what it is.`)}`}${myReview !== undefined ? reviewRow(myReview) : ''}</section>`
+            + '<div id="icollections-slot"></div>'
             + (commentUri ? `<section class="section" id="icomments" data-curi="${esc(commentUri)}"><div class="section-head"><h3>Comments</h3></div><div class="comments-body"><div class="skeleton" style="height:48px"></div></div></section>` : '')
             + (aboutTop ? '' : aboutHtml(pg));
           $('[data-back]', main).onclick = () => goBack(pg.section);
@@ -5013,6 +5014,19 @@
               $$('[data-simq]', main).forEach((b) => b.onclick = () => { search.value = b.dataset.simq; runSearch(); });
               if (pg.related.length) bindHome($('#irelated', main), { items: pg.related, tags: [] });
             })();
+            // In collections (TASK-in-collections-client): the public collections on Pubky holding this
+            // item, from Pinakes; the count, the first few (yours first, marked), each opening the
+            // collection. No row while Pinakes doesn't list them, or nothing holds it. Bookmarks stay
+            // private: the heart above is only your own, never a count of other people's
+            const cl = $('#icollections-slot'); if (cl) {
+              const ic = ex.collections;
+              if (!ic || !ic.count || !ic.items.length) cl.remove();
+              else {
+                const nameOf = (c) => c.name || `Collection by ${shortKey(c.author)}`;
+                cl.outerHTML = `<section class="section" id="icollections"><div class="section-head"><h3>In collections</h3><span class="muted small">${ic.count} public ${ic.count === 1 ? 'collection' : 'collections'} on Pubky</span></div><div class="list compact">${ic.items.map((c, k) => `<div class="list-row clickable" data-icoll="${k}" tabindex="0" role="link"><div class="avatar" style="background:hsl(${hue(nameOf(c))} 35% 28%)">${icon('playlist')}</div><div class="grow"><div class="name">${esc(nameOf(c))}${c.mine && isOwner() ? ' <span class="pill ok">Yours</span>' : ''}</div><div class="sub">${c.mine && isOwner() ? 'your collection' : 'by ' + esc(shortKey(c.author))}</div></div>${icon('chevron')}</div>`).join('')}</div>${ic.count > ic.items.length ? `<p class="muted small">and ${ic.count - ic.items.length} more</p>` : ''}</section>`;
+                $$('[data-icoll]', main).forEach((r) => r.onclick = () => { const c = ic.items[Number(r.dataset.icoll)]; setView('shared', { user: c.author, id: c.id }); });
+              }
+            }
             const cs = $('#iconcerts-slot'); if (cs) { cs.outerHTML = (pg.concerts && pg.concerts.length ? `<section class="section" id="iconcerts"><div class="section-head"><h3>Upcoming concerts</h3></div><div class="list">${pg.concerts.map((c, k) => `<div class="list-row clickable" data-iconcert="${k}"><div class="grow"><div class="name">${esc(itemName(c))}</div><div class="sub">${esc([c.description, c.site].filter(Boolean).join(' · '))}</div></div>${icon('external')}</div>`).join('')}</div></section>` : ''); }
             $$('[data-iconcert]', main).forEach((r) => r.onclick = () => { const c = pg.concerts[Number(r.dataset.iconcert)]; openWeb(c.page || c.uri); });
           }).catch(() => { /* extras are a bonus */ });

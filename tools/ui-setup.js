@@ -458,10 +458,24 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
           await p.unroute(new RegExp(`/v1/item/song/lib-${curId}$`)); await p.unroute(/\/v1\/zones\/[^/]+\/load$/);
           await p.keyboard.press('Escape');
           // Similar: the library's own (playable rows), then what people tagged alike on Pubky
-          await p.route(new RegExp(`/v1/item/song/lib-${curId}/extras$`), (r) => r.fulfill({ json: { related: [{ uri: 'https://musicbrainz.org/release/b1a9c0e9-d987-4042-ae91-78d6a3267d69', title: 'Tagged Alike', kind: 'album', also_on: [] }], concerts: [], similar: [{ kind: 'song', title: other.title, subtitle: (other.artists[0] || {}).name || '', id: `lib-${other.id}`, track_id: other.id, duration_ms: other.duration_ms, keys: [] }] } }));
+          const COLL_A = 'zswn37ir9t8ge4r4posn4r7ow3eh384c8ud4kkxm585igt38x31o'; const COLL_B = 'o3ftkuxjd9k6zgnc4hhbhbg5jusubr4zqyb1dtzi8hhm3hf5wbmy';
+          const inColl = { count: 4, items: [{ uri: `pubky://${COLL_A}/pub/social/v1/posts/0035WKVKQDHSM`, author: COLL_A, id: '0035WKVKQDHSM', name: 'Night drives', mine: true }, { uri: `pubky://${COLL_B}/pub/social/v1/posts/00351MT54YS9G`, author: COLL_B, id: '00351MT54YS9G', mine: false }] };
+          await p.route(new RegExp(`/v1/item/song/lib-${curId}/extras$`), (r) => r.fulfill({ json: { collections: inColl, related: [{ uri: 'https://musicbrainz.org/release/b1a9c0e9-d987-4042-ae91-78d6a3267d69', title: 'Tagged Alike', kind: 'album', also_on: [] }], concerts: [], similar: [{ kind: 'song', title: other.title, subtitle: (other.artists[0] || {}).name || '', id: `lib-${other.id}`, track_id: other.id, duration_ms: other.duration_ms, keys: [] }] } }));
           await p.goto(BASE + `/song/lib-${curId}`); await p.waitForSelector('#isimilar', { timeout: 15000 }).catch(() => {});
           const sim = await p.evaluate(() => { const s = document.querySelector('#isimilar'); return s && { head: s.querySelector('h3').textContent, parts: [...s.querySelectorAll('.simhead')].map((h) => h.textContent), rows: s.querySelectorAll('#isimlib .srow, #isimlib .track').length, play: !!s.querySelector('#isimlib [data-splay]'), tiles: s.querySelectorAll('#irelated .tile').length }; });
           check(sim && sim.head === 'Similar' && sim.parts.join('|') === 'In your library|Tagged alike on Pubky' && sim.rows === 1 && sim.play && sim.tiles === 1, `one Similar section: your library's songs with Play, then Pubky's (${JSON.stringify(sim)})`);
+          // In collections (TASK-in-collections-client): the count, the first few with yours first and
+          // marked, a nameless one by its author; a row opens the shared collection
+          const ic = await p.evaluate(() => { const s = document.querySelector('#icollections'); return s && { head: s.querySelector('h3').textContent, note: s.querySelector('.section-head .muted').textContent, rows: [...s.querySelectorAll('[data-icoll] .name')].map((n) => n.textContent.trim()), more: (s.querySelector('p.muted') || {}).textContent }; });
+          check(ic && ic.head === 'In collections' && ic.note === '4 public collections on Pubky' && ic.rows.length === 2 && /^Night drives\s*Yours$/.test(ic.rows[0]) && /^Collection by /.test(ic.rows[1]) && /and 2 more/.test(ic.more || ''), `In collections: the count and the first few, yours first (${JSON.stringify(ic)})`);
+          await p.click('[data-icoll="0"]');
+          check(await (async () => { const end = Date.now() + 5000; for (;;) { if (new URL(p.url()).pathname === `/shared/${COLL_A}/0035WKVKQDHSM`) return true; if (Date.now() > end) return false; await p.waitForTimeout(100); } })(), 'a collection row opens the shared collection');
+          check(!(await p.evaluate(() => document.body.innerText)).match(/\d+ (people|person) bookmarked/), 'never a count of other people’s bookmarks');
+          await p.goto(BASE + `/song/lib-${curId}`); await p.waitForSelector('#isimilar', { timeout: 15000 }).catch(() => {});
+          await p.unroute(new RegExp(`/v1/item/song/lib-${curId}/extras$`));
+          await p.route(new RegExp(`/v1/item/song/lib-${curId}/extras$`), (r) => r.fulfill({ json: { related: [], concerts: [], similar: [] } }));
+          await p.goto(BASE + `/song/lib-${curId}`); await p.waitForSelector('#itags', { timeout: 15000 }).catch(() => {}); await p.waitForTimeout(800);
+          check(!(await p.$('#icollections')) && !(await p.$('#icollections-slot')), 'no In collections row while Pinakes doesn’t list them');
           await p.unroute(new RegExp(`/v1/item/song/lib-${curId}/extras$`));
         } else check(false, `Play from here needs a playing library song and another one (${curUri})`);
         await api('PUT', `/zones/${encodeURIComponent(nz.id)}/repeat`, { repeat: 'off' }).catch(() => {});

@@ -131,6 +131,13 @@ async fn read_one(s: &NodeState, key: &str, owner: &v1::PubkyId, id: &str) -> Re
     })
 }
 
+/// A public collection's name, for "In collections" on item pages: one read of the author's
+/// homeserver; `None` when it can't be read (the row then names the author).
+pub(crate) async fn collection_name(s: &NodeState, key: &str, id: &str) -> Option<String> {
+    let (key, owner) = user_of(key).ok()?;
+    read_one(s, &key, &owner, id).await.ok().map(|p| p.name)
+}
+
 fn summary(key: &str, id: &str, p: &Playlist) -> SharedPlaylistSummary {
     SharedPlaylistSummary {
         user: key.to_string(),
