@@ -13,6 +13,9 @@ Newest first. Dates are when the change landed on `main`.
   - SoundCloud plays only what is public for anyone but the owner. Jamendo, Bandcamp, Spotify's librespot, Last.fm and YouTube stay the owner's for now.
   - People › Remove deletes everything the node keeps for that person, their sign-ins included, and one still on the way. Listeners' sign-ins go into a backup only sealed under its passphrase, as the owner's do, also from `pm-node backup`.
   - A listener's sign-in at TIDAL or Spotify counts only in the browser they started it in, so nobody can tie someone else's account to theirs. Someone whose music access is switched off plays nothing with their sign-ins. Only the owner's YouTube plays use the saved YouTube cookies.
+  - A sign-in that TIDAL, Spotify or Qobuz answers after its person signed out or was removed is not kept, and People › Remove also drops what was fetched with their sign-ins (TIDAL tracks kept for their browser, search answers, item pages).
+  - Restoring a sealed backup keeps a listener's sign-in made here that the backup doesn't have, as for the owner's.
+  - First steps, Health and Home are each right for whoever looks: the owner's own streaming sign-in counts as music in First steps, Health is the owner's view whoever asks first, and Home's cards say what plays in full for the person looking.
 - **A copy to the homeserver can no longer fill the machine's disk.** A folder copy to the bundled homeserver filled the NUC's disk. Its database then stopped for hours, and the copy went on failing file after file, starting again as soon as some space came back. Now:
   - A copy that wouldn't fit while keeping 5 GB (or 5 %) of the disk free is refused before it starts: "not enough space on this machine: … needed, … free". The dry run shows both numbers.
   - A running copy stops before the file that would eat into that reserve.

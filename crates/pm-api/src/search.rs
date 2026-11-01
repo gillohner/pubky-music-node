@@ -161,6 +161,15 @@ pub(crate) fn forget_answers(s: &NodeState) {
     s.search_answers.lock().expect("search cache").clear();
 }
 
+/// Drops one person's cached answers (`Who::tag`): they were removed.
+pub(crate) fn forget_answers_of(s: &NodeState, tag: &str) {
+    let suffix = format!("|{tag}");
+    s.search_answers
+        .lock()
+        .expect("search cache")
+        .retain(|(_, src), _| !src.ends_with(&suffix));
+}
+
 /// `GET /v1/search?q=&in=`: NDJSON, one line per source as it answers.
 pub(crate) async fn search(
     State(s): State<Arc<NodeState>>,

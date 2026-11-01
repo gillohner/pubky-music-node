@@ -151,13 +151,29 @@ pub(crate) fn update(s: &NodeState, who: &Who, f: impl FnOnce(&mut ModeState)) -
 /// owner's only: the vault is theirs) are written under one library guard, so no vault pass sees
 /// one without the other.
 pub(crate) fn update_signed_in(s: &NodeState, who: &Who, service: &str, f: impl FnOnce(&mut ModeState)) {
+    update_signed_in_if(s, who, service, |_| true, f);
+}
+
+/// [`update_signed_in`] only while `still` holds for the state, checked under the same guard;
+/// whether it was written.
+pub(crate) fn update_signed_in_if(
+    s: &NodeState,
+    who: &Who,
+    service: &str,
+    still: impl FnOnce(&ModeState) -> bool,
+    f: impl FnOnce(&mut ModeState),
+) -> bool {
     let lib = s.library.lock().expect("library poisoned");
     let mut st = load(&lib, who);
+    if !still(&st) {
+        return false;
+    }
     f(&mut st);
     save(&lib, who, &st);
     if who.is_owner() {
         crate::vault_cache::new_sign_in(&lib, service);
     }
+    true
 }
 
 fn config_client() -> &'static std::sync::OnceLock<Client> {
@@ -591,7 +607,11 @@ async fn wait_for_approval(s: &Arc<NodeState>, who: &Who, c: Client, p: Pending)
         if ok {
             if let Some(sess) = session_from(&v, None) {
                 let sess = fill_session(s, sess).await;
-                update_signed_in(s, who, "tidal-full", |st| {
+                // Only while this code is still the sign-in on the way: signed out, replaced or
+                // removed (People) while TIDAL was asked, it isn't kept
+                let still =
+                    |st: &ModeState| st.login.as_ref().map(|x| &x.device_code) == Some(&p.device_code);
+                let kept = update_signed_in_if(s, who, "tidal-full", still, |st| {
                     st.session = Some(sess);
                     st.login = None;
                     st.enabled = true;
@@ -601,7 +621,9 @@ async fn wait_for_approval(s: &Arc<NodeState>, who: &Who, c: Client, p: Pending)
                         at: now(),
                     });
                 });
-                tracing::info!("TIDAL full tracks (unofficial): signed in");
+                if kept {
+                    tracing::info!("TIDAL full tracks (unofficial): signed in");
+                }
             }
             return;
         }

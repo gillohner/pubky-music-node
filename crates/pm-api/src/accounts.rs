@@ -221,7 +221,10 @@ impl Who {
     }
 
     /// Writes (or with `None` removes) this person's copy of a setting; refused for
-    /// [`Who::Nobody`].
+    /// [`Who::Nobody`], and a write for a listener no longer in People with music access: a
+    /// sign-in still on the way when they were removed (the service answering later, a token
+    /// refresh) never lands again. Checked under the caller's library guard, the one People and
+    /// [`forget_person`] write under.
     pub fn put(&self, lib: &pm_library::Library, base: &str, value: Option<&str>) -> Result<(), ApiError> {
         let Some(key) = self.setting(base) else {
             return Err(ApiError::new(
@@ -229,6 +232,14 @@ impl Who {
                 "sign in to the node first: sign-ins are kept per person",
             ));
         };
+        if let (Who::Listener(k), Some(_)) = (self, value) {
+            if !crate::people::listed_for_music(lib, k) {
+                return Err(ApiError::new(
+                    StatusCode::FORBIDDEN,
+                    "you no longer have music access on this node",
+                ));
+            }
+        }
         match value {
             Some(v) => lib.set_setting(&key, v)?,
             None => {
@@ -732,7 +743,7 @@ pub fn sign_out_everywhere(s: &NodeState, key: &str) -> Result<(), ApiError> {
 
 /// Everything the node keeps for one listener goes (People › Remove): their own streaming
 /// sign-ins and settings (`person.<key>.*`), their tokens, preferences, presence setting and
-/// devices.
+/// devices, and what was fetched with their sign-ins (TIDAL tracks, search answers, item pages).
 pub fn forget_person(s: &NodeState, key: &str) -> Result<(), ApiError> {
     sign_out_everywhere(s, key)?;
     // Their sign-ins still on the way: they would land again when the service answers
@@ -752,7 +763,12 @@ pub fn forget_person(s: &NodeState, key: &str) -> Result<(), ApiError> {
         }
         lib.delete_setting(&crate::prefs::storage_key_of(key))?;
         lib.delete_setting(&crate::presence::visible_key(key))?;
+        for (k, _) in lib.settings_with_prefix(&crate::discover::contents_prefix_of(key))? {
+            lib.delete_setting(&k)?;
+        }
     }
+    crate::tidal::forget_streams_of(key);
+    crate::search::forget_answers_of(s, key);
     crate::devices::forget_all_of(s, key);
     Ok(())
 }

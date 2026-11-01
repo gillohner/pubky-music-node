@@ -163,7 +163,8 @@ pub(crate) async fn health(State(s): State<Arc<NodeState>>) -> ApiResult<Vec<Hea
         }
         return Ok(Json(parts));
     }
-    let parts = probe_all(&s).await;
+    // The node's health, as its owner's sign-ins see it (who asks first doesn't change it)
+    let parts = crate::accounts::as_owner(probe_all(&s)).await;
     cache()
         .lock()
         .expect("health cache")
