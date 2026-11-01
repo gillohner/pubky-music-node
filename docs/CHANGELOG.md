@@ -4,6 +4,10 @@ Newest first. Dates are when the change landed on `main`.
 
 ## Unreleased
 
+### 2026-11-01
+
+- **A Linn DS over UPnP pauses and resumes at once.** A Linn (OpenHome) plays on through Pause on a stream without a length, so the node stopped it for a pause and started the stream again on resume, which took about 3.4 s (and the first pause after a start about 7 s while the node found out). Now the stream is offered to it as a WAV file of fixed size (up to 4 GB, with its length), which a Linn pauses at once and holds, buffer and connection, until Play: pause and resume each take well under a second, also after a long pause. A track that doesn't fit what is left of the stream starts on a fresh one (a short gap, at most every hour at 192 kHz and every 6 hours at CD quality); a track of unknown length (radio) gets the live stream as before, and a pause then stops the Linn at once instead of first waiting to see whether it paused.
+
 ### 2026-10-31
 
 - **Follow-ups from the reviews of Log in and the tablet rail.** A token changed in the config (`PM_TOKEN`, `[api] token`) logs the owner's browsers out at the next start, as Make a new token does. Only the owner's own page can start a log in that asks for the node's new folders: it gets a code from the node as it logs out, good until the renewal succeeds (`renewal` on `/v1/auth/pubky/start` replaces the `renew` flag). The hash of the API token kept for this never goes into a backup. On a tablet, Library no longer opens Sources when Sources was last opened while the window was phone-sized. The volume button is gone in the offline app, where the Sound panel isn't, and only the button that opened the Sound panel says it is open.

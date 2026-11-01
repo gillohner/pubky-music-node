@@ -477,6 +477,27 @@ impl Engine {
         self.ensure_sink(fmt, false)
     }
 
+    /// The sink's fixed-size stream is full (its track ran longer than it said): play it out and
+    /// go on on a fresh one from here. False when that could not open (the zone stopped).
+    fn renew_full_sink(&mut self, fmt: AudioFormat) -> bool {
+        tracing::info!(zone = %self.id, "the output's stream is full; going on on a fresh one");
+        let at = self.position_ms();
+        if let Some(mut s) = self.sink.take() {
+            if let Err(e) = s.drain() {
+                tracing::warn!(zone = %self.id, "closing a full sink: {e}");
+            }
+        }
+        if !self.ensure_sink(fmt, false) {
+            return false;
+        }
+        let written = self.sink.as_ref().map(|s| s.frames_written()).unwrap_or(0);
+        if let Some(c) = self.current.as_mut() {
+            c.base_ms = at;
+            c.start_frame = written;
+        }
+        true
+    }
+
     /// A sink paused on its device holds audio from before: a new track or a seek while
     /// paused closes it (the device stops and drops that audio), and the next play opens a
     /// fresh one.
@@ -610,6 +631,21 @@ impl Engine {
         // A track started while paused (next, a queue item) starts on a fresh sink: the paused
         // device's buffer is the old track's
         self.close_paused_sink();
+        // A sink of fixed size (a renderer's stream offered as a file) that can't take the whole
+        // track is played out first: the track starts on a fresh stream instead of running past
+        // the end of this one
+        let duration = source.duration_ms().or(item.duration_ms);
+        if self
+            .sink
+            .as_ref()
+            .is_some_and(|s| s.format() == fmt && !crate::outputs::fits_in(s.room_frames(), fmt, duration))
+        {
+            if let Some(mut s) = self.sink.take() {
+                if let Err(e) = s.drain() {
+                    tracing::warn!(zone = %self.id, "closing a full sink: {e}");
+                }
+            }
+        }
         let gapless = self.sink.as_ref().is_some_and(|s| s.format() == fmt) && self.current.is_some();
         self.output.now_playing(Some(&item));
         if !self.ensure_sink(fmt, true) {
@@ -666,6 +702,14 @@ impl Engine {
                     out
                 };
                 if !out.is_empty() {
+                    if self
+                        .sink
+                        .as_ref()
+                        .is_some_and(|s| s.room_frames().is_some_and(|r| r < out.frames() as u64))
+                        && !self.renew_full_sink(out.format)
+                    {
+                        return;
+                    }
                     let Some(sink) = self.sink.as_mut() else {
                         return self.fail("sink closed while playing".into());
                     };

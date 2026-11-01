@@ -1234,6 +1234,11 @@ async fn pull_stream(
         "live.wav" => pm_out_upnp::dlna::StreamKind::Wav {
             mime: "audio/wav".into(),
         },
+        // OpenHome renderers when the track fits: the same WAV as a file of fixed size, with its
+        // Content-Length, so their own Pause holds (see `wav_header_sized_stream`).
+        "sized.wav" => pm_out_upnp::dlna::StreamKind::Wav {
+            mime: "audio/wav".into(),
+        },
         "stream.l16" => pm_out_upnp::dlna::StreamKind::L16,
         // Slimproto players: the PCM without a header (squeezelite would play the header).
         "stream.pcm" => pm_out_upnp::dlna::StreamKind::Wav {
@@ -1318,10 +1323,14 @@ async fn pull_stream(
     let mime = kind.mime(fmt.rate_hz, fmt.channels);
     // Each listener gets its own header: one that leaves and comes back (OpenHome renderers do,
     // after reading the start) decodes the stream from the top again.
-    let header = match file.as_str() {
-        "stream.wav" => Some(pm_zones::outputs::wav_header(fmt)),
-        "live.wav" => Some(pm_zones::outputs::wav_header_continuous(fmt)),
-        _ => None,
+    let (wav, length) = match file.as_str() {
+        "stream.wav" => (Some(pm_zones::outputs::wav_header(fmt)), None),
+        "live.wav" => (Some(pm_zones::outputs::wav_header_continuous(fmt)), None),
+        "sized.wav" => {
+            let (h, len) = pm_zones::outputs::wav_header_sized_stream(fmt);
+            (Some(h), Some(len))
+        }
+        _ => (None, None),
     };
     let to_l16 = kind == pm_out_upnp::dlna::StreamKind::L16;
     // The live stream moves into the body; when the listener goes, it is given back
@@ -1329,10 +1338,25 @@ async fn pull_stream(
         live.next_chunk().await.map(|c| (c, live))
     });
     let mut l16 = L16::default();
-    let body = futures_util::stream::iter(header)
+    // A sized stream never goes past its length (the zone starts a fresh one before; this only
+    // keeps the answer true to its Content-Length)
+    let body = futures_util::stream::iter(wav)
         .chain(chunks.map(move |c| if to_l16 { l16.convert(&c) } else { c }))
+        .scan(length.unwrap_or(u64::MAX), |left, mut c| {
+            if *left == 0 {
+                return futures_util::future::ready(None);
+            }
+            c.truncate(c.len().min(usize::try_from(*left).unwrap_or(usize::MAX)));
+            *left -= c.len() as u64;
+            futures_util::future::ready(Some(c))
+        })
         .map(Ok::<_, std::convert::Infallible>);
-    Ok(with_headers(mime, axum::body::Body::from_stream(body)))
+    let mut r = with_headers(mime, axum::body::Body::from_stream(body));
+    if let Some(len) = length {
+        r.headers_mut()
+            .insert(header::CONTENT_LENGTH, axum::http::HeaderValue::from(len));
+    }
+    Ok(r)
 }
 
 /// Little-endian 16-bit PCM to DLNA LPCM (big-endian), across chunk boundaries.

@@ -502,6 +502,100 @@ async fn a_linn_that_reconnects_after_reading_the_start_plays_every_sample() {
     assert_eq!(st.error, None, "{st:?}");
 }
 
+/// The stream an OpenHome renderer gets when the track fits (`sized.wav`): a WAV file of fixed
+/// size, so a Linn's own Pause holds it (on a live stream it plays on). The answer is HTTP/1.0,
+/// unchunked, with a Content-Length equal to the RIFF header's sizes plus the header; it ends
+/// early when the zone stops, with every sample from the first.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_sized_stream_says_its_length_and_carries_every_sample() {
+    use std::io::Read;
+    let dir = tempfile::tempdir().unwrap();
+    let wav = dir.path().join("a.wav");
+    let pcm = write_wav(&wav, 40_000);
+    let db = dir.path().join("lib.sqlite");
+    let s = NodeState::new(
+        NodeSettings {
+            name: "t".into(),
+            version: "0".into(),
+            db_path: db.clone(),
+            scan_folders: vec![],
+            art_dir: dir.path().join("art"),
+            mirror_dir: dir.path().join("homeserver"),
+            pipeline: PipelineConfig::default(),
+            token: None,
+            subsonic_user: "pubky".into(),
+            pubky: Default::default(),
+            public_url: "http://127.0.0.1:7788".into(),
+            upnp: false,
+            cast: false,
+            slimproto_port: 0,
+            session_secret_path: None,
+            tidal: Default::default(),
+            spotify: Default::default(),
+            acoustid_key: String::new(),
+            jamendo: Default::default(),
+        },
+        Library::open(&db).unwrap(),
+        OutputRegistry::new(),
+    );
+    let app = router(s.clone());
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/outputs/pull")
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"name":"linn"}"#))
+        .unwrap();
+    assert_eq!(app.clone().oneshot(req).await.unwrap().status(), StatusCode::OK);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(pm_api::serve_listener(s.clone(), listener));
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/zones/stream-linn/queue")
+        .header("content-type", "application/json")
+        .body(Body::from(format!(
+            r#"{{"items":[{{"uri":"{}"}}],"replace":true,"play":true}}"#,
+            wav.display()
+        )))
+        .unwrap();
+    assert_eq!(app.clone().oneshot(req).await.unwrap().status(), StatusCode::OK);
+
+    let heard = tokio::task::spawn_blocking(move || {
+        let (status, headers, mut body) = linn_get(addr, "/v1/outputs/pull/linn/sized.wav", true);
+        assert!(status.starts_with("HTTP/1.0 200"), "{status}");
+        assert!(
+            !headers.iter().any(|h| h.starts_with("transfer-encoding")),
+            "{headers:?}"
+        );
+        let fmt = pm_model::AudioFormat::pcm(48_000, 24, 2);
+        let (_, len) = pm_zones::outputs::wav_header_sized_stream(fmt);
+        assert!(
+            headers.iter().any(|h| *h == format!("content-length: {len}")),
+            "the length of the file: {headers:?}"
+        );
+        let mut all = Vec::new();
+        let mut buf = [0u8; 65536];
+        loop {
+            match body.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => all.extend_from_slice(&buf[..n]),
+            }
+        }
+        let (at, plays) = openhome_wav(&all).unwrap();
+        assert_eq!(at, 44);
+        assert_eq!(plays.map(u64::from), Some(len - 44), "a file of that size");
+        (all.split_off(at), pcm)
+    })
+    .await
+    .unwrap();
+    let (got, pcm) = heard;
+    assert_eq!(got.len(), pcm.len(), "every byte, from the first");
+    assert!(got == pcm, "the PCM differs from the source");
+    let zone = s.zones.get(&ZoneId::new("stream-linn")).unwrap();
+    let st = zone.wait_stopped().await;
+    assert_eq!(st.error, None, "{st:?}");
+}
+
 /// A stopped Linn polls its old URI every 15 s, and the node held each request for a stream: one
 /// that was waiting when the next stream opened took it, and the Linn dropped it ("listener went
 /// away", NUC 2026-10-30). Now that request is answered 410 at once, and the fetch the Linn makes

@@ -191,6 +191,8 @@ struct Recorder {
     fail_resume: std::sync::atomic::AtomicBool,
     pauses: Mutex<u64>,
     resumes: Mutex<u64>,
+    /// Each sink's stream carries this many frames at most (a renderer's stream of fixed size).
+    room: Mutex<Option<u64>>,
 }
 
 struct RecOutput {
@@ -270,6 +272,13 @@ impl AudioSink for RecSink {
     }
     fn frames_written(&self) -> u64 {
         self.written
+    }
+    fn room_frames(&self) -> Option<u64> {
+        self.rec
+            .room
+            .lock()
+            .unwrap()
+            .map(|r| r.saturating_sub(self.written))
     }
 }
 
@@ -368,6 +377,59 @@ async fn gapless_join_keeps_one_sink_open() {
     assert_eq!(
         kinds(&drain_events(&mut r.events)),
         ["start:a:false", "end:a", "start:b:true", "end:b", "stopped"]
+    );
+}
+
+/// A sink of fixed size (a Linn's stream offered as a file) takes the next track gaplessly only
+/// when the whole track fits in what is left (with a margin of 2% and 10 s); else the track
+/// starts on a fresh sink after the old one played out. Every sample still plays, in order.
+#[tokio::test]
+async fn a_track_that_does_not_fit_the_sized_stream_starts_on_a_fresh_one() {
+    // 150 frames + 3 (2%) + 10 s at RATE
+    let need = 150 + 3 + 10 * RATE as u64;
+    for (room, gapless, opens) in [(250 + need, true, 1), (250 + need - 1, false, 2)] {
+        let mut r = rig(&[("a", RATE, 250), ("b", RATE, 150)]);
+        *r.rec.room.lock().unwrap() = Some(room);
+        r.gate.allow(1000);
+        r.zone
+            .enqueue(vec![QueueItem::new("a"), QueueItem::new("b")], Insert::End);
+        r.zone.play();
+        let st = r.zone.wait_stopped().await;
+        assert_eq!(st.error, None);
+        assert_eq!(*r.rec.opens.lock().unwrap(), opens, "room {room}");
+        let mut want = frames(0, 250);
+        want.extend(frames(0, 150));
+        assert_eq!(*r.rec.samples.lock().unwrap(), want);
+        assert_eq!(
+            kinds(&drain_events(&mut r.events)),
+            [
+                "start:a:false".to_string(),
+                "end:a".into(),
+                format!("start:b:{gapless}"),
+                "end:b".into(),
+                "stopped".into()
+            ]
+        );
+    }
+}
+
+/// A track longer than it said fills its sized stream: the zone plays it out and goes on on a
+/// fresh one from the same place, without an error or a lost or repeated sample.
+#[tokio::test]
+async fn a_full_sized_stream_goes_on_on_a_fresh_sink() {
+    let mut r = rig(&[("a", RATE, 250)]);
+    *r.rec.room.lock().unwrap() = Some(120);
+    r.gate.allow(1000);
+    r.zone.enqueue(vec![QueueItem::new("a")], Insert::End);
+    r.zone.play();
+    let st = r.zone.wait_stopped().await;
+    assert_eq!(st.error, None);
+    // 100 + 100 does not fit 120, nor 100 + 50: three streams
+    assert_eq!(*r.rec.opens.lock().unwrap(), 3);
+    assert_eq!(*r.rec.samples.lock().unwrap(), frames(0, 250));
+    assert_eq!(
+        kinds(&drain_events(&mut r.events)),
+        ["start:a:false", "end:a", "stopped"]
     );
 }
 
