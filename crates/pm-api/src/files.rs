@@ -134,20 +134,36 @@ pub(crate) async fn upload(
     {
         return Err(ApiError::new(StatusCode::INSUFFICIENT_STORAGE, why));
     }
-    let sync = needs_session(&s)?;
+    let target = crate::copy_guard::target_of(&s)?;
     let remote = format!("{PRIVATE_FILES_DIR}{}", remote_name(&bytes, &local));
-    if let Err(e) = sync.upload_private(&remote, bytes).await {
-        if e.is_full() {
+    // The same guarded way as a copy: a good file there is never sent over, a failed upload
+    // leaves nothing half written
+    let mut present = std::collections::HashMap::new();
+    match target.stat(&remote).await {
+        Ok(Some(sz)) => {
+            present.insert(remote.clone(), sz);
+        }
+        Ok(None) => {}
+        Err(e) => return Err(ApiError::new(StatusCode::BAD_GATEWAY, e)),
+    }
+    let room = crate::copy_guard::room_of(&s);
+    use crate::copy_guard::Refused;
+    match send_one(&s, target.as_ref(), room.as_ref(), &mut present, &remote, bytes).await {
+        Ok(_) => Ok(Json(UploadedFile { path: remote, size })),
+        Err(Refused::Space(why)) => Err(ApiError::new(StatusCode::INSUFFICIENT_STORAGE, why)),
+        Err(Refused::Full) => {
             crate::storage::note_full(&s, true);
-            return Err(ApiError::new(
+            Err(ApiError::new(
                 StatusCode::INSUFFICIENT_STORAGE,
                 crate::add_music::FULL,
-            ));
+            ))
         }
-        return Err(ApiError::new(StatusCode::BAD_GATEWAY, e.to_string()));
+        Err(Refused::Short(kept)) => Err(ApiError::new(
+            StatusCode::BAD_GATEWAY,
+            format!("the homeserver kept {kept} of {size} bytes; try again"),
+        )),
+        Err(Refused::Other(e)) => Err(ApiError::new(StatusCode::BAD_GATEWAY, e)),
     }
-    crate::storage::note_full(&s, false);
-    Ok(Json(UploadedFile { path: remote, size }))
 }
 
 /// `POST /v1/pubky/files/upload`: copy an album, some tracks or the whole library to the
@@ -352,27 +368,8 @@ async fn copy_one(
     .await
     .map_err(|e| format!("{name}: {e}"))?;
     remember_hash(s, path, &hash);
-    let existed = match present.get(&remote) {
-        None => false,
-        Some(sz) if *sz == Some(len) => return Ok(false),
-        // Listed with its size unknown or another: what is there now decides
-        Some(sz) => match crate::copy_guard::there(target, &remote, len, *sz).await {
-            Ok(crate::copy_guard::There::Gone) => false,
-            Ok(crate::copy_guard::There::Same) => return Ok(false),
-            Ok(crate::copy_guard::There::Differs) => true,
-            Err(e) => return Err(format!("{name}: couldn't check the copy there ({e})")),
-        },
-    };
-    let rate = copy_rate(s);
-    // Guarded: the reserve with what is really sent, recorded while in flight, checked after, and
-    // nothing half written left there (a file the homeserver had before is never deleted)
-    let rate = (rate > 0).then_some(rate);
-    match crate::copy_guard::upload_guarded(s, target, room, &remote, bytes, rate, existed).await {
-        Ok(()) => {
-            crate::storage::note_full(s, false);
-            present.insert(remote, Some(len));
-            Ok(true)
-        }
+    match send_one(s, target, room, present, &remote, bytes).await {
+        Ok(sent) => Ok(sent),
         Err(crate::copy_guard::Refused::Space(why)) => Err(format!("{name}: {why}")),
         Err(crate::copy_guard::Refused::Full) => Err(format!("{name}: {}", crate::add_music::FULL)),
         Err(crate::copy_guard::Refused::Short(kept)) => Err(format!(
@@ -380,6 +377,41 @@ async fn copy_one(
         )),
         Err(crate::copy_guard::Refused::Other(e)) => Err(format!("{name}: {e}")),
     }
+}
+
+/// One file's bytes to `remote`: Ok(false) when a good copy is there already. Sent only where
+/// nothing good is (a path in `present` is checked first), guarded (the reserve with what is
+/// really sent, recorded while in flight, checked after, nothing half written left there), and
+/// added to `present` once there.
+async fn send_one(
+    s: &NodeState,
+    target: &dyn crate::copy_guard::Target,
+    room: &dyn crate::copy_guard::Room,
+    present: &mut std::collections::HashMap<String, Option<u64>>,
+    remote: &str,
+    bytes: Vec<u8>,
+) -> Result<bool, crate::copy_guard::Refused> {
+    let len = bytes.len() as u64;
+    match present.get(remote) {
+        None => {}
+        Some(sz) if *sz == Some(len) => return Ok(false),
+        // Listed with its size unknown or another: what is there now decides
+        Some(_) => match crate::copy_guard::needs_sending(target, remote, len).await {
+            Ok(true) => {}
+            Ok(false) => return Ok(false),
+            Err(e) => {
+                return Err(crate::copy_guard::Refused::Other(format!(
+                    "couldn't check the copy there ({e})"
+                )))
+            }
+        },
+    }
+    let rate = copy_rate(s);
+    let rate = (rate > 0).then_some(rate);
+    crate::copy_guard::upload_guarded(s, target, room, remote, bytes, rate).await?;
+    crate::storage::note_full(s, false);
+    present.insert(remote.to_string(), Some(len));
+    Ok(true)
 }
 
 /// `GET /v1/pubky/files/upload/{id}`.

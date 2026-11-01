@@ -136,6 +136,34 @@ fn have_of(list: Vec<pm_pubky::homeserver::RemoteFile>) -> HashMap<String, Optio
         .collect()
 }
 
+/// Where a song with content `hash` goes at `dest` without replacing anything: `dest` itself when
+/// free, `None` when the same song is there already, else `name (2).ext`, `name (3).ext`, ….
+fn free_name(dest: &std::path::Path, hash: &str) -> Option<std::path::PathBuf> {
+    let same = |p: &std::path::Path| std::fs::read(p).is_ok_and(|b| blake3_hex(&b) == hash);
+    let stem = dest
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let ext = dest
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_default();
+    for n in 1.. {
+        let p = if n == 1 {
+            dest.to_path_buf()
+        } else {
+            dest.with_file_name(format!("{stem} ({n}){ext}"))
+        };
+        if !p.exists() {
+            return Some(p);
+        }
+        if same(&p) {
+            return None;
+        }
+    }
+    unreachable!("an endless range")
+}
+
 /// What happened to one file.
 pub(crate) enum Stored {
     /// Sent to the homeserver, at this path.
@@ -185,19 +213,17 @@ pub(crate) async fn store(
     let rate = if bundled { 0 } else { crate::files::copy_rate(s) };
     let keep_local = (!bundled).then(|| bytes.clone());
     // Listed at another size: what is there now decides (it may be under another name)
-    let existed = match have.get(&hash[..16]) {
-        None => false,
-        Some(sz) => match crate::copy_guard::there(target, &remote, len, *sz).await {
-            Ok(crate::copy_guard::There::Gone) => false,
-            Ok(crate::copy_guard::There::Same) => return Ok(Stored::Already(remote)),
-            Ok(crate::copy_guard::There::Differs) => true,
+    if have.contains_key(&hash[..16]) {
+        match crate::copy_guard::needs_sending(target, &remote, len).await {
+            Ok(true) => {}
+            Ok(false) => return Ok(Stored::Already(remote)),
             Err(e) => return Err(format!("{name}: couldn't check the copy there ({e})")),
-        },
-    };
+        }
+    }
     // Guarded: the reserve of the disk it lands on (the bundled homeserver's, else this node's
-    // mirror), and nothing half written left there (a file the homeserver had before untouched)
+    // mirror), and nothing half written left there
     let rate = (rate > 0).then_some(rate);
-    match crate::copy_guard::upload_guarded(s, target, room, &remote, bytes, rate, existed).await {
+    match crate::copy_guard::upload_guarded(s, target, room, &remote, bytes, rate).await {
         Ok(()) => {}
         Err(crate::copy_guard::Refused::Space(why)) => return Err(format!("{name}: {why}")),
         Err(crate::copy_guard::Refused::Full) => {
@@ -233,16 +259,26 @@ pub(crate) async fn store(
                 .await
                 .map_err(|e| e.to_string())?;
         }
-        // Written beside it and moved into place: a failed write leaves no half a song
-        let part = dest.with_file_name(format!(
-            ".{}.part",
-            dest.file_name().map(|n| n.to_string_lossy()).unwrap_or_default()
-        ));
-        if let Err(e) = tokio::fs::write(&part, bytes).await {
-            let _ = tokio::fs::remove_file(&part).await;
-            return Err(e.to_string());
+        // Never over another file: the same song there already is kept, anything else gets the
+        // next free name
+        let free = {
+            let (dest, hash) = (dest.clone(), hash.clone());
+            tokio::task::spawn_blocking(move || free_name(&dest, &hash))
+                .await
+                .map_err(|e| e.to_string())?
+        };
+        if let Some(dest) = free {
+            // Written beside it and moved into place: a failed write leaves no half a song
+            let part = dest.with_file_name(format!(
+                ".{}.part",
+                dest.file_name().map(|n| n.to_string_lossy()).unwrap_or_default()
+            ));
+            if let Err(e) = tokio::fs::write(&part, bytes).await {
+                let _ = tokio::fs::remove_file(&part).await;
+                return Err(e.to_string());
+            }
+            tokio::fs::rename(&part, &dest).await.map_err(|e| e.to_string())?;
         }
-        tokio::fs::rename(&part, &dest).await.map_err(|e| e.to_string())?;
         let root = s.mirror_dir.clone();
         let known = s
             .library
@@ -340,6 +376,21 @@ pub(crate) async fn start(
     if let Some(why) = crate::copy_guard::room_for_store(&s)
         .space()
         .and_then(|sp| sp.too_little(b.size))
+    {
+        return Err(ApiError::new(StatusCode::INSUFFICIENT_STORAGE, why));
+    }
+    // And the disk it waits on until whole, with what the other uploads still have to send
+    let coming: u64 = s
+        .music_uploads
+        .lock()
+        .expect("uploads")
+        .values()
+        .filter(|u| u.state == "receiving")
+        .map(|u| u.size - u.offset)
+        .sum();
+    if let Some(why) = crate::copy_guard::room_for_staging(&s, &parts_dir(&s))
+        .space()
+        .and_then(|sp| sp.too_little(coming + b.size))
     {
         return Err(ApiError::new(StatusCode::INSUFFICIENT_STORAGE, why));
     }
@@ -446,6 +497,16 @@ pub(crate) async fn put_chunk(
         up.writing = true;
         (up.size, up.offset)
     };
+    // The disk it waits on keeps its reserve while it arrives (other things write there too)
+    if let Some(why) = crate::copy_guard::room_for_staging(&s, &parts_dir(&s))
+        .space()
+        .and_then(|sp| sp.too_little(body.len() as u64))
+    {
+        if let Some(up) = s.music_uploads.lock().expect("uploads").get_mut(&id) {
+            up.writing = false;
+        }
+        return Err(ApiError::new(StatusCode::INSUFFICIENT_STORAGE, why));
+    }
     let write = async {
         use tokio::io::AsyncWriteExt;
         let mut f = tokio::fs::OpenOptions::new()
