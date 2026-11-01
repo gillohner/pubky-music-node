@@ -14820,10 +14820,13 @@ exec sleep 300
             lib.save_lookup(&key, r#"{"status":"ok","results":[]}"#).unwrap();
             ids.push(lib.upsert_track(&t).unwrap().0);
         }
-        // A scan's connection takes the write lock and keeps it past the busy timeout; the scan
-        // ends a while after it lets go (its last batch is done, the rest is reading)
+        // A scan's connection takes the write lock and keeps it until the job's first write has
+        // been turned away; the scan ends a while after it lets go (its last batch is done, the
+        // rest is reading). Let go on that event, not after a fixed time: SQLite's busy wait
+        // counts tries, so on a loaded machine it outlasted a fixed hold and the write went
+        // through without waiting for the scan (flaky under a full test run). The job holds the
+        // library through its busy wait and lets go when it is refused.
         let (locked_tx, locked_rx) = std::sync::mpsc::channel();
-        let held = pm_library::db::BUSY_TIMEOUT + std::time::Duration::from_secs(1);
         let after = std::time::Duration::from_millis(1500);
         assert!(s.begin_scan());
         let other = {
@@ -14833,7 +14836,28 @@ exec sleep 300
                 let other = Library::open(&db).unwrap();
                 other.begin_batch().unwrap();
                 locked_tx.send(()).unwrap();
-                std::thread::sleep(held);
+                // Held for half the busy timeout without a break: only a busy wait does that
+                let tick = std::time::Duration::from_millis(10);
+                let give_up = std::time::Instant::now() + 6 * pm_library::db::BUSY_TIMEOUT;
+                let mut held_since = None;
+                loop {
+                    assert!(
+                        std::time::Instant::now() < give_up,
+                        "the job never waited for the lock"
+                    );
+                    let now = std::time::Instant::now();
+                    if s.library.try_lock().is_ok() {
+                        if held_since
+                            .is_some_and(|t: std::time::Instant| now - t >= pm_library::db::BUSY_TIMEOUT / 2)
+                        {
+                            break;
+                        }
+                        held_since = None;
+                    } else {
+                        held_since.get_or_insert(now);
+                    }
+                    std::thread::sleep(tick);
+                }
                 other.commit_batch().unwrap();
                 std::thread::sleep(after);
                 s.end_scan();
