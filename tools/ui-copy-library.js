@@ -151,7 +151,7 @@ const homeFiles = Array.from({ length: 20000 }, (_, i) => ({ path: `/priv/pubky.
       check(await until(async () => /Not connected/.test(await p.textContent('#copytotals')), 14000) && await p.isDisabled('#copygo') && await p.isVisible('#copyretot'), `${W} with the connection down the totals say so, Copy off`);
       wsDown = false;
       // ("Everything" doesn't fit this mocked homeserver, so Copy stays off: the count is what's back)
-      check(await until(async () => { const b = await p.$('#copyretot'); if (b) await b.click().catch(() => {}); return /20\D?040 files/.test(await p.textContent('#copytotals')); }, 40000), `${W} back again, Try again counts`);
+      check(await until(async () => { if (await p.$('#copyretot')) { await p.click('#copyretot', { timeout: 2000 }).catch(() => {}); await until(async () => !(await p.$('#copyretot')), 3000); } return /20\D?040 files/.test(await p.textContent('#copytotals')); }, 40000), `${W} back again, Try again counts`);
       await p.click('[data-cpick="folders"]'); await p.waitForSelector(`.ctrow[data-cpath="/music/${artist(1)}"]`, { timeout: 5000 });
       // Copy: exactly the ticked folders; the dialog closes at once
       log.length = 0; await p.click('#copygo');
@@ -192,7 +192,7 @@ const homeFiles = Array.from({ length: 20000 }, (_, i) => ({ path: `/priv/pubky.
       await p.click('#jobpop [data-jact="retry"]');
       check(await until(async () => log.some((l) => l.act === 'retry')), `${W} Retry failed`);
       await p.click('#jobpop [data-jact="dismiss"]').catch(() => {});
-      check(await until(async () => log.some((l) => l.dismiss)), `${W} Dismiss`);
+      check(await until(async () => log.some((l) => l.dismiss) && await p.isHidden('#jobpop') && await p.isHidden('#scrim')), `${W} Dismiss, and the card closes`);
       // Stopped before its last file (#224's stopped_reason): never "Done", with the reason in the chip, card and summary
       const stops = [
         [{ stopped_reason: 'Not enough space on this machine: 2.0 GB stay free for the homeserver.' }, 'Stopped: full', /space on this machine/],
@@ -205,8 +205,8 @@ const homeFiles = Array.from({ length: 20000 }, (_, i) => ({ path: `/priv/pubky.
         check(await until(async () => (await p.textContent('#jobchip')).includes(chipText), 5000) && await p.$eval('#jobchip', (c) => c.classList.contains('stopped') && !c.classList.contains('done')) && why.test(await p.getAttribute('#jobchip', 'aria-label')), `${W} the chip says "${chipText}", not Done, and why in its name`);
         await p.click('#jobchip');
         const card = await p.textContent('#jobpop');
-        check(/Copy stopped/.test(card) && /Stopped after 9 of 25 files/.test(card) && why.test(card) && !/Copied to your homeserver/.test(card), `${W} the summary says it stopped and why (${card.replace(/\s+/g, ' ').slice(0, 140)})`);
-        await p.keyboard.press('Escape'); await sleep(200);
+        check(/Copy stopped/.test(card) && new RegExp(`Stopped after ${9 + (extra.failed || 0)} of 25 files`).test(card) && why.test(card) && !/Copied to your homeserver/.test(card), `${W} the summary says it stopped and why (${card.replace(/\s+/g, ' ').slice(0, 140)})`);
+        await p.click('#jobpop [data-jobclose]'); await sleep(200);
       }
       job.last = null;
       // Downloads shows the job too

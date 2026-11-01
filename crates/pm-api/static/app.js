@@ -778,7 +778,7 @@
       totals.innerHTML = '<span class="muted"><span class="spin" aria-hidden="true"></span> Counting…</span>';
       const r = await call('POST', '/pubky/files/upload', { ...body, dry_run: true });
       if (gen !== tot.gen) return;
-      if (r.status === 0) { totals.innerHTML = `<span class="warn-text">${esc(r.json.error)}</span> <button class="btn sm" type="button" id="copyretot">Try again</button>`; $('#copyretot', d).onclick = () => totalsSoon(); go.disabled = true; return; }
+      if (r.status === 0) { totals.innerHTML = `<span class="warn-text">${esc(r.json.error)}</span> <button class="btn sm" type="button" id="copyretot">Try again</button>`; $('#copyretot', d).onclick = () => { clearTimeout(tot.timer); tot.body = null; showTotals(); }; go.disabled = true; return; }
       const j = r.json;
       if (!r.ok && r.status !== 507) { totals.innerHTML = `<span class="warn-text">${esc(j.error || `HTTP ${r.status}`)}</span>`; go.disabled = true; return; }
       const files = j.total ?? 0; const bytes = j.bytes_total ?? 0; const skip = j.skipped ?? 0;
@@ -974,7 +974,8 @@
   };
   const drawJobs = () => {
     drawJobChip();
-    if (!jobPop().hidden) drawJobPop();
+    // Dismissed, or the job is gone: the popover has nothing left to show
+    if (!jobPop().hidden) { if (fjob.p) drawJobPop(); else closeJobPop(); }
     // On Downloads the card is part of the page: no Hide or Close (they belong to the popover)
     const dj = $('#dljob'); if (dj) { const p = fjob.p; dj.innerHTML = p ? `<div class="card jobcard">${jobCard(p)}</div>` : ''; $$('[data-jobclose]', dj).forEach((b) => b.remove()); bindJobCard(dj); }
   };
