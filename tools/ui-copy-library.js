@@ -33,7 +33,7 @@ const homeFiles = Array.from({ length: 20000 }, (_, i) => ({ path: `/priv/pubky.
     for (const [w, h] of [[1280, 900], [390, 844]]) {
       const ctx = await browser.newContext({ viewport: { width: w, height: h }, reducedMotion: 'reduce' });
       await ctx.addInitScript((t) => { localStorage.setItem('pm.token', t); localStorage.setItem('pm.zone', 'browser'); }, TOKEN);
-      const log = []; const slow = { tree: 0, music: 0 }; let paged = true;
+      const log = []; const slow = { tree: 0, music: 0 }; let paged = true; const musicAsks = [];
       const job = { current: null, queued: [], last: null };
       let sock = null;
       await ctx.routeWebSocket(/\/v1\/events/, (ws) => { ws.connectToServer(); sock = ws; });
@@ -63,7 +63,7 @@ const homeFiles = Array.from({ length: 20000 }, (_, i) => ({ path: `/priv/pubky.
         return r.fulfill({ json: {} });
       });
       await ctx.route(/\/v1\/me\/music(\?.*)?$/, async (r) => {
-        const u = new URL(r.request().url()); const q = (u.searchParams.get('q') || '').toLowerCase();
+        const u = new URL(r.request().url()); const q = (u.searchParams.get('q') || '').toLowerCase(); musicAsks.push(u.search);
         if (slow.music) await sleep(slow.music);
         const all = q ? homeFiles.filter((f) => f.song.title.toLowerCase().includes(q)) : homeFiles;
         if (!paged) return r.fulfill({ json: { files: all, count: all.length, bytes: all.length * 30e6 } });
@@ -86,7 +86,7 @@ const homeFiles = Array.from({ length: 20000 }, (_, i) => ({ path: `/priv/pubky.
       check(await p.$$eval('#mmlist .mrow', (r) => r.length) === 200 && /19800 more/.test(await p.textContent('#mmlist [data-mmmore]')), `${W} 200 of 20 000, with Show more`);
       await p.click('#mmlist [data-mmmore]');
       check(await until(async () => (await p.$$eval('#mmlist .mrow', (r) => r.length)) === 400), `${W} Show more adds the next 200`);
-      await p.fill('#mmq', 'Song 1999'); check(await until(async () => (await p.$$eval('#mmlist .mrow', (r) => r.length)) >= 1 && (await p.$$eval('#mmlist .mrow', (r) => r.length)) <= 11), `${W} the search goes to the node`);
+      await p.fill('#mmq', 'Song 1999'); check(await until(async () => (await p.$$eval('#mmlist .mrow', (r) => r.length)) >= 1 && (await p.$$eval('#mmlist .mrow', (r) => r.length)) <= 11) && musicAsks.some((q) => /[?&]q=Song\+1999/.test(q)), `${W} the search goes to the node (q=…)`);
       // A node that sends every file at once: still 200 rows drawn
       paged = false; await p.reload(); await p.waitForSelector('#mmlist .mrow', { timeout: 15000 });
       check(await p.$$eval('#mmlist .mrow', (r) => r.length) === 200, `${W} a node that sends all 20 000 still draws 200`);
@@ -166,7 +166,7 @@ const homeFiles = Array.from({ length: 20000 }, (_, i) => ({ path: `/priv/pubky.
       // Finished with failures: the summary, Retry failed, Dismiss
       job.last = { ...job.current, state: 'finished', finished: true, done: 23, failed: 2, failed_retryable: 2, skipped: 6, not_audio: 1 }; job.current = null;
       sock && sock.send(JSON.stringify({ type: 'jobs', ...job }));
-      await until(async () => /failed/.test(await p.textContent('#jobchip')), 5000);
+      check(await until(async () => /failed/.test(await p.textContent('#jobchip')), 5000), `${W} the chip says how many failed`);
       await p.click('#jobchip');
       const sum = await p.textContent('#jobpop');
       check(/23 files copied/.test(sum) && /6 already there/.test(sum) && /1 not audio/.test(sum) && /2 failed/.test(sum), `${W} the summary (${sum.replace(/\s+/g, ' ').slice(0, 120)})`);
@@ -180,6 +180,73 @@ const homeFiles = Array.from({ length: 20000 }, (_, i) => ({ path: `/priv/pubky.
       check(await until(async () => /Copying to your homeserver/.test(await p.textContent('#dljob'))), `${W} Downloads shows the job`);
       check(await p.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), `${W} no horizontal overflow`);
       check(errors.length === 0, `${W} no page errors${errors.length ? ': ' + errors.join(' | ') : ''}`);
+      await ctx.close();
+    }
+    // ---- A level whose second page fails: an untick inside it asks once, says so, keeps the tick ----
+    {
+      const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 }, reducedMotion: 'reduce' });
+      await ctx.addInitScript((t) => { localStorage.setItem('pm.token', t); localStorage.setItem('pm.zone', 'browser'); }, TOKEN);
+      await ctx.route(/\/v1\/pubky$/, (r) => r.fulfill({ json: { user: 'pubky' + KEY, unsynced: 0, needs_resign: false, sync: null } }));
+      await ctx.route(/\/v1\/storage$/, (r) => r.fulfill({ json: { homeserver: { mode: 'external', user: KEY, quota_mb: 'unlimited' }, saving: { state: 'saved', pending: 0 } } }));
+      await ctx.route(/\/v1\/me\/music(\?.*)?$/, (r) => r.fulfill({ json: { files: [], count: 0, bytes: 0 } }));
+      await ctx.route(/\/v1\/pubky\/files\/upload$/, (r) => r.fulfill({ json: { total: 1, bytes_total: 1e6, skipped: 0 } }));
+      let asks = 0;
+      await ctx.route(/\/v1\/library\/tree(\?.*)?$/, (r) => {
+        const u = new URL(r.request().url()); const path = u.searchParams.get('path');
+        if (!path) return r.fulfill({ json: { children: [{ path: '/big', name: '/big', files: 300, bytes: 3e9, leaf: false }], next: null } });
+        asks++;
+        if (u.searchParams.get('after')) return r.fulfill({ status: 500, json: { error: 'the share went away' } });
+        return r.fulfill({ json: { children: Array.from({ length: 200 }, (_, i) => ({ path: `/big/f${i}`, name: `f${i}`, files: 1, bytes: 1e7, leaf: true })), next: 'f199' } });
+      });
+      const p = await ctx.newPage(); const errors = []; p.on('pageerror', (e) => errors.push(e.message));
+      await p.goto(BASE + '/library'); await p.waitForSelector('#pkcopyall', { timeout: 15000 }); await p.click('#pkcopyall');
+      await p.waitForSelector('.ctrow[data-cpath="/big"]'); await p.click('.ctrow[data-cpath="/big"]');
+      await p.click('.ctrow[data-cpath="/big"] [data-ccaret]'); await p.waitForSelector('.ctrow[data-cpath="/big/f1"]');
+      const before = asks; await p.click('.ctrow[data-cpath="/big/f1"]'); await sleep(1500);
+      check(asks - before <= 1, `a failed page is asked for once, not again and again (${asks - before})`);
+      check(await p.getAttribute('.ctrow[data-cpath="/big"]', 'aria-checked') === 'true' && await p.getAttribute('.ctrow[data-cpath="/big/f1"]', 'aria-checked') === 'true', 'the untick is not done: the folder stays ticked');
+      check(/Couldn’t load every folder/.test(await p.textContent('#toast')), 'and it says why');
+      check(errors.length === 0, `no page errors${errors.length ? ': ' + errors.join(' | ') : ''}`);
+      await ctx.close();
+    }
+    // ---- Today's node: no folder list, /jobs only lists running jobs, an unpaged file list ----
+    {
+      const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 }, reducedMotion: 'reduce' });
+      await ctx.addInitScript((t) => { localStorage.setItem('pm.token', t); localStorage.setItem('pm.zone', 'browser'); }, TOKEN);
+      await ctx.route(/\/v1\/pubky$/, (r) => r.fulfill({ json: { user: 'pubky' + KEY, unsynced: 0, needs_resign: false, sync: null } }));
+      await ctx.route(/\/v1\/storage$/, (r) => r.fulfill({ json: { homeserver: { mode: 'external', user: KEY, quota_mb: 'unlimited' }, saving: { state: 'saved', pending: 0 } } }));
+      let files = Array.from({ length: 150 }, (_, i) => ({ path: `/priv/pubky.music/files/${i}.flac`, name: `${i}.flac`, size: 30e6, song: { id: i + 1, title: `Song ${i}`, artist: 'Old Node', album: 'Album' } }));
+      await ctx.route(/\/v1\/me\/music(\?.*)?$/, (r) => r.fulfill({ json: { files, count: files.length, bytes: files.length * 30e6 } }));
+      await ctx.route(/\/v1\/pubky\/files$/, (r) => { if (r.request().method() !== 'DELETE') return r.continue(); const gone = r.request().postDataJSON().paths; files = files.filter((f) => !gone.includes(f.path)); return r.fulfill({ json: [] }); });
+      let old = null; const sent = [];
+      await ctx.route(/\/v1\/pubky\/files\/upload$/, (r) => { const b = r.request().postDataJSON(); sent.push(b); if (b.dry_run) return r.fulfill({ json: { total: 4, bytes_total: 1.2e8, skipped: 0 } }); old = { id: 'o1', kind: 'copy', total: 4, done: 0, failed: 0, skipped: 0, bytes_total: 1.2e8, bytes_done: 0, finished: false, errors: [] }; return r.fulfill({ json: old }); });
+      await ctx.route(/\/v1\/pubky\/files\/jobs$/, (r) => r.fulfill({ json: old && !old.finished ? old : null }));
+      await ctx.route(/\/v1\/pubky\/files\/jobs\/o1$/, (r) => r.fulfill({ json: old }));
+      const p = await ctx.newPage(); const errors = []; p.on('pageerror', (e) => errors.push(e.message));
+      await p.goto(BASE + '/library'); await p.waitForSelector('#mmlist .mrow', { timeout: 15000 });
+      // The search works in the page when the node sent every file
+      await p.fill('#mmq', 'Song 14');
+      check(await until(async () => (await p.$$eval('#mmlist .mrow', (r) => r.length)) === 11), "today's node: the search filters in the page (150 files)");
+      await p.fill('#mmq', '');
+      await until(async () => (await p.$$eval('#mmlist .mrow', (r) => r.length)) === 150);
+      // Delete while paging in the page: the file goes from the list
+      await p.click('#mmlist [data-mmore="0"]'); await p.locator('.popover.menu:not([hidden]) .pop-item', { hasText: 'Delete from my homeserver' }).click();
+      await p.locator('dialog .choice', { hasText: 'Delete' }).click();
+      check(await until(async () => (await p.$$eval('#mmlist .mrow', (r) => r.length)) === 149 && !/^Song 0$/m.test(await p.textContent('#mmlist'))), "today's node: a deleted file leaves the list");
+      // No folder list: Folders goes, Everything is chosen and has the focus
+      await p.click('#pkcopyall'); await p.waitForSelector('.copydlg');
+      check(await until(async () => p.evaluate(() => { const f = document.querySelector('[data-cpick="folders"]'); const on = document.querySelector('[data-cpick].on'); return f.hidden && on && on.dataset.cpick === 'all' && on.tabIndex === 0 && document.activeElement === on; })), "today's node: no Folders; Everything is chosen, reachable and focused");
+      await until(async () => !(await p.isDisabled('#copygo')));
+      await p.click('#copygo');
+      check(sent.some((b) => b.all && !b.dry_run), "today's node: Copy everything");
+      check(await until(async () => p.isVisible('#jobchip')), "today's node: the chip shows the job");
+      // It finishes with failures; /jobs then forgets it: the result stays, from the job's own answer
+      old = { ...old, done: 2, failed: 2, finished: true, errors: ['x.flac: cannot read', 'y.flac: refused'] };
+      check(await until(async () => /2 failed/.test(await p.textContent('#jobchip')), 6000), "today's node: the finished job's result stays on the chip");
+      await p.click('#jobchip');
+      check(/cannot read/.test(await p.textContent('#jobpop')) || /2 errors/.test(await p.textContent('#jobpop')), "today's node: with its errors");
+      check(!(await p.$('#jobpop [data-jact="pause"]')) && !(await p.$('#jobpop [data-jact="dismiss"]')), "today's node: no Pause or Dismiss it can't do");
+      check(errors.length === 0, `today's node: no page errors${errors.length ? ': ' + errors.join(' | ') : ''}`);
       await ctx.close();
     }
   } finally { await browser.close(); }

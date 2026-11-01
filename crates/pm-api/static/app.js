@@ -612,7 +612,8 @@
     const boxState = (p) => (mixed(p) ? 'mixed' : effOn(p) ? 'true' : 'false');
     const level = (p) => { let n = 0; for (let q = p; q != null && q !== ROOT; q = node(q).parent) n++; return n; };
     const loadLevel = async (p, more) => {
-      const n = node(p); const qs = new URLSearchParams({ limit: '200' }); if (p !== ROOT) qs.set('path', p); if (more && n.next) qs.set('after', n.next);
+      const n = node(p); if (n.loading) return;
+      const qs = new URLSearchParams({ limit: '200' }); if (p !== ROOT) qs.set('path', p); if (more && n.next) qs.set('after', n.next);
       n.loading = true; n.error = null; drawTree();
       const r = await call('GET', `/library/tree?${qs}`);
       n.loading = false;
@@ -651,8 +652,14 @@
     };
     // Only the boxes change on a tick: no redraw of the whole tree
     const refreshBoxes = () => $$('#ctree .ctrow', d).forEach((r) => r.setAttribute('aria-checked', boxState(r.dataset.cpath)));
-    const loadAll = async (p) => { while (node(p).next) await loadLevel(p, true); };
+    // Every child of a level (for an untick inside a ticked folder); false when one page failed
+    const loadAll = async (p) => { while (node(p).next && !node(p).error && !t.missing) await loadLevel(p, true); return !node(p).next && !node(p).error; };
     const tick = async (p) => {
+      if (t.busy) return;
+      t.busy = true; go.disabled = true;
+      try { await tickNow(p); } finally { t.busy = false; totalsSoon(); }
+    };
+    const tickNow = async (p) => {
       const want = boxState(p) !== 'true';
       if (!want) {
         // Unticking under a ticked folder: that folder is unticked and the others beside the way
@@ -661,14 +668,16 @@
         if (top != null) {
           const chain = []; for (let q = p; q !== top; q = node(q).parent) chain.unshift(q);
           let at = top;
-          for (const step of chain) { await loadAll(at); t.sel.set(at, false); for (const k of node(at).kids || []) if (k !== step) t.sel.set(k, true); at = step; }
+          // All of each level first: a child that didn't load would silently be left out
+          for (let q = top, k = 0; k < chain.length; q = chain[k], k++) if (!(await loadAll(q))) { toast('Couldn’t load every folder there; nothing was unticked. Try again.', 'error'); return; }
+          for (const step of chain) { t.sel.set(at, false); for (const k of node(at).kids || []) if (k !== step) t.sel.set(k, true); at = step; }
         }
       }
       for (const q of [...t.sel.keys()]) if (under(q, p)) t.sel.delete(q);
       t.sel.set(p, want);
       // A choice its parent already makes is not stored
       const par = node(p).parent; if (par != null && par !== ROOT && effOn(par) === want) t.sel.delete(p); else if ((par == null || par === ROOT) && !want) t.sel.delete(p);
-      refreshBoxes(); totalsSoon();
+      refreshBoxes();
     };
     const toggleOpen = async (p) => { const n = node(p); if (n.leaf) return; n.open = !n.open; if (n.open && !n.kids) { await loadLevel(p); return; } drawTree(); };
     const visibleRows = () => $$('#ctree .ctrow', d);
@@ -682,7 +691,7 @@
       else if (e.key === 'End') { e.preventDefault(); moveFocus(rows[rows.length - 1]); }
       else if (e.key === 'ArrowRight') { e.preventDefault(); if (!n.leaf && !n.open) toggleOpen(p); else if (n.open) moveFocus(rows[i + 1]); }
       else if (e.key === 'ArrowLeft') { e.preventDefault(); if (n.open) toggleOpen(p); else if (n.parent && n.parent !== ROOT) moveFocus(rows.find((x) => x.dataset.cpath === n.parent)); }
-      else if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); tick(p); }
+      else if ((e.key === ' ' || e.key === 'Enter') && !t.busy) { e.preventDefault(); tick(p); }
     };
     // ---- artists and albums: a search over the library's lists ----
     const lists = { artists: null, albums: null };
@@ -703,15 +712,18 @@
     let loadGen = 0;
     // ---- the panel for each choice ----
     const drawPanel = () => {
+      // A node without the folder list: Folders goes, and the choice (and the focus) moves on
+      const fell = pick.mode === 'folders' && t.missing;
+      if (fell) pick.mode = preset ? 'preset' : 'all';
       $$('[data-cpick]', d).forEach((b) => { const on = b.dataset.cpick === pick.mode; b.classList.toggle('on', on); b.setAttribute('aria-checked', String(on)); b.tabIndex = on ? 0 : -1; b.hidden = b.dataset.cpick === 'folders' && t.missing; });
-      if (pick.mode === 'folders' && t.missing) pick.mode = preset ? 'preset' : 'all';
+      if (fell && (!d.contains(document.activeElement) || document.activeElement === document.body)) { const on = $('[data-cpick].on', d); if (on) on.focus(); }
       if (pick.mode === 'folders') {
         panel.innerHTML = '<p class="muted small">Tick folders: a folder copies everything inside it. Open one to pick inside it.</p><div class="ctree" id="ctree" role="tree" aria-label="Music folders" aria-multiselectable="true"></div>';
         const box = $('#ctree', d);
         box.addEventListener('click', (e) => {
           const more = e.target.closest('[data-cmore]'); if (more) { more.disabled = true; loadLevel(more.dataset.cmore, true); return; }
           const retry = e.target.closest('[data-cretry]'); if (retry) { loadLevel(retry.dataset.cretry); return; }
-          const r = e.target.closest('.ctrow'); if (!r) return; t.focus = r.dataset.cpath;
+          const r = e.target.closest('.ctrow'); if (!r || t.busy) return; moveFocus(r);
           if (e.target.closest('[data-ccaret]')) toggleOpen(r.dataset.cpath); else tick(r.dataset.cpath);
         });
         box.addEventListener('keydown', treeKeys);
@@ -762,7 +774,7 @@
       if (!r.ok) { totals.innerHTML = `<span class="warn-text">${esc(r.json.error || `HTTP ${r.status}`)}</span>`; go.disabled = false; return; }
       done(true);
       toast(r.json.state === 'queued' ? 'Queued: it starts when the copy before it is done' : 'Copying in the background: the chip in the player bar shows how far it is');
-      refreshJobs();
+      watchJob(r.json.id);
     };
     if (d.showModal) d.showModal(); else d.setAttribute('open', '');
     drawPanel();
@@ -796,7 +808,10 @@
   const MINE_PAGE = 200;
   const mineList = (box, ctx) => {
     if (!box) return;
-    const st = { q: '', files: [], count: 0, bytes: 0, gen: 0, local: null };
+    // Kept over a re-render of the page (the save status redraws it every 3 s while saving)
+    const kept = state.mineSt && Date.now() - state.mineSt.at < 15000 ? state.mineSt : null;
+    const st = kept || { q: '', files: [], count: 0, bytes: 0, gen: 0, local: null, at: 0, loaded: false };
+    state.mineSt = st;
     box.innerHTML = `<div class="toolbar mmsearch" hidden><label class="sr-only" for="mmq">Find in your files</label><input class="input" id="mmq" type="search" placeholder="Find in your files" autocomplete="off"></div><div id="mmlist"></div>`;
     const list = $('#mmlist', box);
     const match = (f) => { const q = st.q.toLowerCase(); return [f.name, f.song && f.song.title, f.song && f.song.artist, f.song && f.song.album].some((x) => x && String(x).toLowerCase().includes(q)); };
@@ -806,9 +821,10 @@
     const delFile = async (f) => {
       const ok = await choiceDialog({ title: 'Delete from your homeserver?', text: `“${f.song ? f.song.title : f.name}” is deleted from your homeserver${ctx.bundled ? ' and leaves the library' : ''}. This can’t be undone.`, choices: [{ label: 'Delete', value: true, primary: true }] });
       if (!ok) return;
-      try { await api('DELETE', '/pubky/files', { paths: [f.path] }); toast('Deleted'); load(); } catch (er) { toast(er.message, 'error'); }
+      try { await api('DELETE', '/pubky/files', { paths: [f.path] }); toast('Deleted'); st.local = null; load(); } catch (er) { toast(er.message, 'error'); }
     };
     const draw = () => {
+      st.at = Date.now(); st.loaded = true;
       box.removeAttribute('aria-busy');
       const used = $('#mmused'); if (used) used.textContent = st.q ? '' : ` · ${countOf(st.count, 'files')} · ${fileSize(st.bytes)}${ctx.room || ''} used`;
       $('.mmsearch', box).hidden = !(st.q || st.count > 20);
@@ -836,13 +852,15 @@
         box.removeAttribute('aria-busy'); list.innerHTML = `<div class="notice warn">${esc(e.message)} <button class="btn sm" data-mmretry>Try again</button></div>`; $('[data-mmretry]', list).onclick = () => load(more); return;
       }
       if (gen !== st.gen || !box.isConnected) return;
-      if (!more && !st.q && r.files.length > MINE_PAGE) { st.local = r.files; load(); return; }
+      // Every file came (a node before paging, or one page holds them all): search and page here
+      if (!more && !st.q && r.files.length >= (r.count ?? r.files.length)) { st.local = r.files; load(); return; }
       st.files = more ? st.files.concat(r.files) : r.files; st.count = r.count ?? st.files.length; st.bytes = r.bytes ?? st.files.reduce((n, f) => n + (f.size || 0), 0);
       draw();
     };
     let qt = null;
+    $('#mmq', box).value = st.q;
     $('#mmq', box).oninput = (e) => { clearTimeout(qt); qt = setTimeout(() => { st.q = e.target.value.trim(); load(); }, 300); };
-    load();
+    if (kept && st.loaded) draw(); else load();
   };
   // "Bring files here": how much first (and what is here already), where to, then a job.
   const bringFiles = async () => {
@@ -864,7 +882,7 @@
   // details with Pause, Cancel and the errors. It follows the node's `jobs` events, and asks
   // `/pubky/files/jobs` every 2 s while a job runs and no event came (a node before the events).
   // After a reload or a restart the chip finds the job, or the last one's summary, by itself.
-  const jobs = { cur: null, queued: [], last: null, eventAt: 0, timer: null, showErrors: false };
+  const jobs = { cur: null, queued: [], last: null, eventAt: 0, timer: null, showErrors: false, watch: null, hideAt: null };
   const fjob = { get p() { return jobs.cur || jobs.last; } };
   const jobDone = (p) => !!(p && (p.finished || ['finished', 'cancelled', 'failed'].includes(p.state)));
   const jobTitle = (p) => (p.kind === 'import' ? (jobDone(p) ? (p.cancelled || p.state === 'cancelled' ? 'Copy stopped' : 'Copied into your library') : 'Copying into your library') : p.kind === 'bring'
@@ -932,11 +950,22 @@
     const dj = $('#dljob'); if (dj) { const p = fjob.p; dj.innerHTML = p ? `<div class="card jobcard">${jobCard(p)}</div>` : ''; bindJobCard(dj); }
   };
   // What `/jobs` (or an event) says, in either shape: `{current, queued, last}`, or one job
-  const onJobs = (j) => {
-    if (j && ('current' in j || 'queued' in j || 'last' in j)) { jobs.cur = j.current || null; jobs.queued = j.queued || []; jobs.last = j.last || null; }
+  const onJobs = async (j) => {
+    if (j && ('current' in j || 'queued' in j || 'last' in j)) { jobs.cur = j.current || null; jobs.queued = j.queued || []; if ('last' in j) jobs.last = j.last || null; }
     else if (j && j.id) { if (jobDone(j)) { jobs.last = j; jobs.cur = null; } else jobs.cur = j; }
-    else { jobs.cur = null; }
+    else jobs.cur = null;
+    if (jobs.cur) jobs.watch = jobs.cur.id;
+    // The job this page followed is gone from the list (a node that lists running jobs only, or
+    // one that finished before the first look): its own answer is the result
+    if (!jobs.cur && jobs.watch && !(jobs.last && jobs.last.id === jobs.watch)) {
+      const id = jobs.watch; jobs.watch = null;
+      try { const p = await api('GET', `/pubky/files/jobs/${id}`); if (p && p.id) { jobs.last = p; if (p.kind === 'bring' && p.done) toast(`Brought ${countOf(p.done, 'files')} here; they are being added to your library.`); } } catch { /* gone */ }
+    }
+    if (jobs.cur == null && jobs.last && jobs.last.id === jobs.watch) jobs.watch = null;
     drawJobs(); pollJobs();
+    // A node without a kept summary (old jobs have no `state`): the chip goes after 8 s, as before
+    clearTimeout(jobs.hideAt);
+    if (!jobs.cur && jobs.last && !jobs.last.state) jobs.hideAt = setTimeout(() => { if (jobPop().hidden && !jobs.cur) { jobs.last = null; drawJobs(); } }, 8000);
   };
   const pollJobs = () => {
     clearTimeout(jobs.timer);
@@ -944,7 +973,7 @@
     if (jobs.cur && !jobDone(jobs.cur)) jobs.timer = setTimeout(() => { if (Date.now() - jobs.eventAt > 5000) refreshJobs(); else pollJobs(); }, 2000);
   };
   const refreshJobs = async () => { try { onJobs(await api('GET', '/pubky/files/jobs')); } catch { /* not signed in */ } };
-  const watchJob = () => refreshJobs();
+  const watchJob = (id) => { if (id) jobs.watch = id; refreshJobs(); };
   // A job already running (another tab started it, or the node carried on after a restart)
   const findJob = refreshJobs;
   // Outside parts that do not answer (Pinakes, the homeserver, a service): one quiet line under
