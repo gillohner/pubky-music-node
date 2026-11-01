@@ -515,6 +515,10 @@ mod tests {
         let mut sink = sink(session, "cast-gone").await;
         let mut sink = std::thread::spawn(move || {
             assert!(sink.pause().unwrap());
+            // The pause's outcome first: a link dropped before the session read the pause would
+            // end it unanswered ("the session ended during the pause"), another way to the same
+            // reopen, not the one this test is about
+            assert_eq!(sink.pause_outcome(), Some(Paused::Refused));
             sink
         })
         .join()
