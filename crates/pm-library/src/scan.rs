@@ -557,8 +557,15 @@ fn begin_waiting(lib: &Library) -> Result<()> {
 /// `cover.jpg`, `Folder.png`, … next to `audio_path`, case-insensitive.
 /// A title for a file without tags (owner: "Most played shows test-fixture file names"): its
 /// name without the leading track number, with spaces for underscores, first letter capital.
-/// `14_wasted_bits` → `Wasted bits`, `03 - Untagged Song` → `Untagged Song`.
+/// `14_wasted_bits` → `Wasted bits`, `03 - Untagged Song` → `Untagged Song`. A file stored on the
+/// homeserver keeps its content hash in front of its name (`f80da35cdf86-14_wasted_bits`): that
+/// prefix is not part of the title (UX sweep 11-01, A12).
 pub fn title_from_file_name(stem: &str) -> String {
+    tidy_stem(strip_hash_prefix(stem))
+}
+
+/// [`title_from_file_name`] without dropping a hash prefix: the title an older scan stored.
+pub(crate) fn tidy_stem(stem: &str) -> String {
     let spaced: String = stem.replace('_', " ");
     let trimmed = spaced.trim();
     // A leading track number: "03 - ", "14 ", "1. "
@@ -578,6 +585,22 @@ pub fn title_from_file_name(stem: &str) -> String {
     match c.next() {
         Some(f) => f.to_uppercase().chain(c).collect(),
         None => String::new(),
+    }
+}
+
+/// A content-hash prefix (12 to 16 lowercase hex digits and a dash) in front of a stored name.
+pub(crate) fn strip_hash_prefix(stem: &str) -> &str {
+    match stem.split_once('-') {
+        Some((h, rest))
+            if (12..=16).contains(&h.len())
+                && h.bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                && h.bytes().any(|b| b.is_ascii_alphabetic())
+                && !rest.is_empty() =>
+        {
+            rest
+        }
+        _ => stem,
     }
 }
 
@@ -1105,6 +1128,12 @@ mod tests {
         );
         assert_eq!(title_from_file_name("1999"), "1999", "a year is a title");
         assert_eq!(title_from_file_name("01"), "01");
+        // A homeserver file's stored name: its content hash is not part of the title
+        assert_eq!(title_from_file_name("f80da35cdf86-14_wasted_bits"), "Wasted bits");
+        assert_eq!(title_from_file_name("0d4c7c38c2e2e811-Donna"), "Donna");
+        // Not a hash: a word, digits only, too short
+        assert_eq!(title_from_file_name("deadbeef-Song"), "Deadbeef-Song");
+        assert_eq!(title_from_file_name("123456789012-Song"), "123456789012-Song");
         assert!(t.album.is_none());
     }
 }

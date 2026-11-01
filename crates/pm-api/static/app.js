@@ -601,6 +601,9 @@
   const shellMode = () => document.documentElement.dataset.shell || 'desktop';
   const densePref = () => { try { return localStorage.getItem('pm.dense') === '1'; } catch { return false; } };
   const setTheme = (v) => { try { if (v === 'system') localStorage.removeItem('pm.theme'); else localStorage.setItem('pm.theme', v); } catch { /* no storage */ } if (v === 'system') delete document.documentElement.dataset.theme; else document.documentElement.dataset.theme = v; };
+  // A slow first load says so after 2 s (UX sweep 11-01, A7): `el` gets the line while `still()`
+  // is true and `el` is on the page
+  const stillLoading = (el, text, still = () => true) => setTimeout(() => { if (el && el.isConnected && still() && !el.querySelector('.still-loading')) el.insertAdjacentHTML('beforeend', `<p class="muted small still-loading" role="status">${esc(text)}</p>`); }, 2000);
   // A button that needs text in a field: disabled (with the reason) until there is some.
   const needsText = (input, btn) => { if (!input || !btn) return; const sync = () => { const empty = !input.value.trim(); btn.disabled = empty; btn.title = empty ? `Type in “${input.placeholder || 'the field'}” first` : ''; }; input.addEventListener('input', sync); sync(); };
   // ---- Copy to your homeserver (TASK-copy-library-folders; the job is mn-infra's) ----
@@ -1450,7 +1453,7 @@
     const choosing = !si.in_use || !!m.change;
     const rows = [];
     if (cfg.before) rows.push(...[].concat(cfg.before(si) || []));
-    if (si.in_use) rows.push(sgRow('Signed in', `${esc(si.in_use.label)}${si.in_use.gives ? ' · ' + esc(si.in_use.gives) : ''}${si.in_use.user ? ' · ' + (/^\d+$/.test(si.in_use.user) ? 'user ' : '') + esc(si.in_use.user) : ''}.`, `<button class="btn ghost sm" data-sg="change">${choosing ? 'Keep this way' : 'Change way'}</button><button class="btn ghost sm" data-sg="out">Sign out</button>`));
+    if (si.in_use) rows.push(sgRow('Signed in', `${esc(si.in_use.label)}${si.in_use.gives ? ' · ' + esc(si.in_use.gives) : ''}${si.in_use.user && !/^\d+$/.test(si.in_use.user) ? ' · ' + esc(si.in_use.user) : ''}.`, `<button class="btn ghost sm" data-sg="change">${choosing ? 'Keep this way' : 'Change way'}</button><button class="btn ghost sm" data-sg="out">Sign out</button>`));
     if (choosing) {
       const ways = si.ways.map((w) => `<label class="way ${w.available ? '' : 'off'} ${w.id === pick ? 'on' : ''}"><input type="radio" name="way-${esc(cfg.source)}" value="${esc(w.id)}" ${w.id === pick ? 'checked' : ''} ${w.available ? '' : 'disabled'} aria-describedby="way-${esc(cfg.source)}-${esc(w.id)}"><span class="way-text"><span class="way-name">${esc(w.label)}${w.recommended ? '<span class="pill ok">Recommended</span>' : ''}${si.in_use && si.in_use.way === w.id ? '<span class="pill">In use</span>' : ''}</span><span class="way-note" id="way-${esc(cfg.source)}-${esc(w.id)}">${esc(w.available ? w.note : w.reason || w.note)}</span></span></label>`).join('');
       rows.push(sgBlock(si.in_use ? 'Another way' : 'Sign in', si.in_use ? '' : 'Pick how; the node remembers it.', `<div class="ways" role="radiogroup" aria-label="How to sign in to ${esc(cfg.name)}">${ways}</div><div class="way-action" data-sg="action"></div>`));
@@ -1557,6 +1560,10 @@
         if (u.health && u.health.ok) rows.push(sgRow('Health', `Working: ${esc(u.health.detail)}.`, '<span class="pill ok">OK</span>'));
         if (!st.signed_in) rows.push(sgRow('Your collection', `Collection and playlist imports go through ${esc((si.ways.find((w) => w.id === 'app') || {}).label || 'the official app')}; sign in with it too for those.`, st.configured ? '<button class="btn sm" id="tsiapp2">Sign in with it too</button>' : ''));
       } else if (si.in_use && st.playback_limit) rows.push(sgRow('Playback', `TIDAL plays 30-second previews to apps on its ${esc(st.access_tier || 'THIRD_PARTY')} developer tier; search, albums and the imports are unaffected. For full tracks, change way to the device sign-in.`, '<span class="pill warn">previews</span>'));
+      // The page has no general Status row (the full-tracks status leads): a problem with the
+      // sign-in in use still shows, as a phone has no source list beside it
+      const src = (state.sources || []).find((x) => x.id === 'tidal'); const ss = src && srcState({ ...src, enabled: true });
+      if (ss && ss.cls === 'bad') rows.push(sgRow(`Status <span class="pill bad">${esc(ss.label)}</span>`, esc(ss.long), ''));
       return rows;
     },
     after: (si, h) => {
@@ -2158,7 +2165,11 @@
   $('#me').onclick = async () => {
     const me = state.me || {}; const [who] = me.key ? await loadProfiles([me.key]) : [];
     const name = (who && who.name) || (isListener() ? 'Listener' : 'Owner');
-    showMenu($('#me'), [{ title: `${name} · ${isListener() ? 'listening here' : 'this node’s owner'}` }, { label: 'Settings', icon: 'settings', run: () => setView('settings') }, ...(state.token ? [{ label: 'Log out', icon: 'logout', run: logOut }] : [])], { all: true });
+    // What you are here, in words (UX sweep 11-01, A8): how this browser is logged in, and whether
+    // the node has a Pubky identity at all; unlinked, the way to link one
+    const how = !state.token ? 'no token needed on this node' : /^pmo_|^pml_/.test(state.token) ? 'logged in with Pubky Ring' : 'logged in with the node’s API token';
+    const unlinked = !isListener() && !me.key;
+    showMenu($('#me'), [{ title: `${name} · ${isListener() ? 'listening here' : 'this node’s owner'}` }, { label: how + (unlinked ? ' · not linked to Pubky' : ''), disabled: true }, ...(unlinked ? [{ label: 'Link a Pubky identity', icon: 'zone', run: () => setView('settings', 'accounts') }] : []), { label: 'Settings', icon: 'settings', run: () => setView('settings') }, ...(state.token ? [{ label: 'Log out', icon: 'logout', run: logOut }] : [])], { all: true });
   };
   // The account button shows your picture once the node knows who you are
   const drawMe = async () => {
@@ -2194,6 +2205,14 @@
     if (up) { if (now === 'desktop') { if (up.parentElement !== $('#sidebar')) $('#sidebar').appendChild(up); } else if (up.parentElement !== $('.topbar')) $('.topbar').insertBefore(up, $('#me')); }
   };
   window.addEventListener('resize', () => { if (shellFor(window.innerWidth, layoutPref()) !== shellMode()) applyShell(); });
+  // A scrolling chip row fades at its end only while more chips are off to the right (touch layouts)
+  const CHIP_ROWS = '.libnav, .scopechips, .np-sheet-tabs';
+  const fadeRow = (el) => el.classList.toggle('more-right', el.scrollLeft + el.clientWidth < el.scrollWidth - 1);
+  let fadeQueued = false;
+  const fadeRows = () => { if (fadeQueued) return; fadeQueued = true; requestAnimationFrame(() => { fadeQueued = false; $$(CHIP_ROWS).forEach(fadeRow); }); };
+  document.addEventListener('scroll', (e) => { if (e.target instanceof Element && e.target.matches(CHIP_ROWS)) fadeRow(e.target); }, true);
+  window.addEventListener('resize', fadeRows);
+  new MutationObserver(fadeRows).observe(document.body, { childList: true, subtree: true });
   applyShell();
   const mq = (q) => !!(window.matchMedia && window.matchMedia(q).matches);
   const tablet = () => mq('(max-width: 1100px)');
@@ -2272,8 +2291,23 @@
   const albumIdOf = (it) => { const t = state.trackCache.get(it.uri); return t && t.album ? t.album.id : null; };
   // The artists a credit names ("Sefa, Dr. Peacock" → two links), like the node splits them
   const creditNames = (credit) => String(credit || '').split(/\s*(?:,|;|\/| & | feat\.? | ft\.? | featuring | x | vs\.? )\s*/i).map((x) => x.trim()).filter(Boolean);
-  // Title, artists and album of what plays, each a link to its page (player bar and Now Playing)
-  const npLinksHtml = (it, live) => {
+  // A zone's volume slider: the output's hardware range and the zone's level, or this browser's
+  // own volume; null when the device sets it
+  const zoneVolRange = (z) => {
+    if (!z) return null;
+    if (z.id === BROWSER) return { min: -60, max: 0, step: 1, value: Math.max(-60, Math.round(20 * Math.log10(audio.volume || 0.001))) };
+    const out = (state.outputs || []).find((o) => o.id === z.output); const hv = out && out.caps && out.caps.hw_volume && out.caps.hw_volume.kind === 'db' ? out.caps.hw_volume : null;
+    return hv ? { min: hv.min, max: hv.max, step: hv.step || 1, value: z.volume_db != null ? Math.min(hv.max, Math.max(hv.min, z.volume_db)) : hv.max } : null;
+  };
+  const setZoneVol = (z, db) => {
+    const bar = $('#vol'); if (bar && z.id === state.zone) { bar.value = db; setFill(bar); }
+    if (z.id === BROWSER) { audio.volume = Math.pow(10, db / 20); return; }
+    api('POST', `/zones/${encodeURIComponent(z.id)}/volume`, { volume: { db: Number(db) } }).catch((e) => toast(e.message, 'error'));
+  };
+  // Title, artists and album of what plays, each a link to its page (player bar and Now Playing);
+  // `plain` is text only, for a bar that opens Now playing as a whole
+  const npLinksHtml = (it, live, plain) => {
+    if (plain) return { title: esc(live || it.title || it.uri), artistsHtml: esc(live ? [it.title, it.album].filter(Boolean).join(' · ') : [it.artist, it.album].filter(Boolean).join(' · ')) };
     const songPage = npPageId(it.uri);
     const title = !live && songPage ? `<button class="lnk" data-np-song="${esc(songPage)}" title="Open this song's page">${esc(it.title || it.uri)}</button>` : esc(live || it.title || it.uri);
     const artistsHtml = live ? esc([it.title, it.album].filter(Boolean).join(' · ')) : [creditNames(it.artist).map((a) => `<button class="lnk" data-np-artist="${esc(a)}" title="Open ${esc(a)}">${esc(a)}</button>`).join(', '), it.album ? (albumIdOf(it) ? `<button class="lnk" data-np-album="${albumIdOf(it)}" title="Open the album">${esc(it.album)}</button>` : esc(it.album)) : ''].filter(Boolean).join(' · ');
@@ -2400,16 +2434,18 @@
       const err = z && z.transport === 'stopped' && z.error;
       $('#np').innerHTML = waitHtml || errHtml || `<div class="np-art placeholder"></div><div class="np-text"><div class="np-title muted">${err ? 'Stopped' : 'Nothing playing'}</div><div class="np-sub">${err ? `<span class="warn-text" role="alert" title="${esc(z.error)}">Couldn’t play on ${esc(z.name)}: ${esc(z.error)}</span>` : esc(z ? z.name : '')}</div></div>`;
       $('#pos').textContent = '0:00'; $('#dur').textContent = '0:00'; seek.value = 0; setFill(seek);
-      q.className = 'quality'; $('.qtext', q).textContent = '—'; $('.qsrc', q).innerHTML = ''; $('.qdsp', q).hidden = true; $('.qshort', q).innerHTML = `<span class="qdev">${esc(z ? z.name : '')}</span>`; q.title = 'Sound: where it plays from, how it gets to you, DSP and volume';
+      q.className = 'quality idle'; $('.qtext', q).textContent = '—'; $('.qsrc', q).innerHTML = ''; $('.qdsp', q).hidden = true; $('.qshort', q).innerHTML = `<span class="qdev">${esc(z ? z.name : '')}</span>`; q.title = 'Sound: where it plays from, how it gets to you, DSP and volume';
       q.setAttribute('aria-label', `Sound. Nothing playing on ${z ? z.name : 'this zone'}. Open the sound panel`);
       syncQPanel();
       return;
     }
     const it = np.item;
     const live = np.stream_title;
-    const links = npLinksHtml(it, live);
+    const links = npLinksHtml(it, live, shellMode() !== 'desktop');
     $('#np').innerHTML = waitHtml || errHtml || `<button class="np-art np-artbtn" id="npart" title="Now playing" aria-label="Open Now playing">${itemArt(it, 'sm', npSvc(np), true)}</button><div class="np-text"><div class="np-title">${links.title}</div><div class="np-sub">${links.artistsHtml}</div></div>`;
-    if (!waitHtml && !errHtml) bindNpLinks($('#np'), it, () => { if (!overlay.hidden) toggleNowPlaying(); });
+    // On phones and tablets the whole bar opens Now playing (the song page is one tap further, from
+    // its title there); with a mouse the bar's title and artist are links of their own
+    if (!waitHtml && !errHtml && shellMode() === 'desktop') bindNpLinks($('#np'), it, () => { if (!overlay.hidden) toggleNowPlaying(); });
     $('#pos').textContent = fmt(np.position_ms); $('#dur').textContent = fmt(np.duration_ms);
     if (!seek.dataset.dragging) { seek.value = np.duration_ms ? Math.round((np.position_ms / np.duration_ms) * 1000) : 0; setFill(seek); }
     // The pill (owner, 2026-10-29): where it plays from (the provider's mark), the path in short
@@ -2703,7 +2739,7 @@
             <div class="np-titlerow"><div class="np-titles">${np.stream_title ? `<div class="eyebrow">Live · ${esc(it.title || '')}</div>` : ''}<h1>${title}</h1><div class="artist">${artist}</div></div><span id="npheart"></span></div>
             <button class="quality np-quality" id="npquality" title="How the sound gets to you"><span class="qdot" style="background:${h ? colour[h] : 'var(--muted)'}"></span><span>${streamLabel(np) ? esc(streamLabel(np)) : `${h ? LABEL[h] : 'This browser'}${fmtLine ? ` · ${esc(fmtFormat(np.source_format))}` : ''}`}</span></button>
             <div class="np-progress"><input type="range" id="npseek" min="0" max="1000" value="${np.duration_ms ? Math.round((np.position_ms / np.duration_ms) * 1000) : 0}" aria-label="Seek"><div class="muted small np-times"><span id="nppos">${fmt(np.position_ms)}</span><span>${fmt(np.duration_ms)}</span></div></div>
-            <div class="np-transport" role="group" aria-label="Playback"><button class="icon-btn" data-npt="shuffle" aria-label="Shuffle what comes next">${icon('shuffle')}</button><button class="icon-btn" data-npt="prev" aria-label="Previous">${icon('prev')}</button><button class="icon-btn play" data-npt="toggle" aria-label="${z.transport === 'playing' ? 'Pause' : 'Play'}">${icon(z.transport === 'playing' ? 'pause' : 'play')}</button><button class="icon-btn" data-npt="next" aria-label="Next">${icon('next')}</button><button class="icon-btn" data-npt="repeat" aria-label="Repeat">${icon(zoneRepeat() === 'one' ? 'repeat-one' : 'repeat')}</button></div>
+            <div class="np-transport" role="group" aria-label="Playback"><button class="icon-btn" data-npt="shuffle" aria-label="Shuffle what comes next">${icon('shuffle')}</button><button class="icon-btn" data-npt="prev" aria-label="Previous">${icon('prev')}</button><button class="icon-btn play" data-npt="toggle" aria-label="${z.transport === 'playing' ? 'Pause' : 'Play'}">${icon(z.transport === 'playing' ? 'pause' : 'play')}</button><button class="icon-btn" data-npt="next" aria-label="Next">${icon('next')}</button><button class="icon-btn" data-npt="repeat" aria-label="Repeat">${icon(zoneRepeat() === 'one' ? 'repeat-one' : 'repeat')}</button></div>${(() => { const r = zoneVolRange(z); return r ? `<div class="np-vol">${icon('volume')}<input type="range" id="npvol" min="${r.min}" max="${r.max}" step="${r.step}" value="${r.value}" aria-label="Volume of ${esc(z.name)}"></div>` : ''; })()}
             <nav class="np-tabs" aria-label="More about this song">${npSheets().map((t) => tab(t, 'np-tab')).join('')}</nav>
           </section>
           <section class="np-sheet" ${sheet ? '' : 'hidden'} aria-label="${sheet ? esc(NP_SHEETS_ALL.find(([k]) => k === sheet)[1]) : ''}">
@@ -2715,6 +2751,10 @@
       </div>`;
     const sk = $('#npseek'); setFill(sk);
     // Now playing's own transport (phones: the mini player hides behind it)
+    // Volume in Now playing (phones and narrow tablets have none in the bar; UX sweep 11-01, A6):
+    // it moves the bar's own slider, which sets the zone's volume
+    const nv = $('#npvol', overlay); if (nv) { setFill(nv); nv.oninput = () => setFill(nv); nv.onchange = () => setZoneVol(z, nv.value); }
+    else if (z && z.id !== BROWSER && isOwner() && !state.outputs && !state.outputsP) state.outputsP = api('GET', '/outputs').then((o) => { state.outputs = o; if (!overlay.hidden) renderNowPlaying(); }).catch(() => {}).finally(() => { state.outputsP = null; });
     $$('[data-npt]', overlay).forEach((b) => b.onclick = () => { const id = { shuffle: '#shufflebtn', prev: '#prev', toggle: '#toggle', next: '#next', repeat: '#repeatbtn' }[b.dataset.npt]; $(id).click(); setTimeout(renderNowPlaying, 400); });
     sk.addEventListener('input', () => { sk.dataset.dragging = '1'; setFill(sk); $('#nppos').textContent = fmt((sk.value / 1000) * (np.duration_ms || 0)); });
     sk.addEventListener('change', () => { delete sk.dataset.dragging; transport({ action: 'seek', position_ms: Math.round((sk.value / 1000) * (np.duration_ms || 0)) }); });
@@ -4079,7 +4119,10 @@
     const facetCounts = facetsOf(allKinds);
     const byKind = Object.fromEntries(Object.entries(allKinds).map(([k, list]) => [k, list.filter((h) => passesFacets(h, run.facets))]));
     const facetChips = SEARCH_FACETS.map(([f, label]) => { const vals = [...facetCounts[f].entries()].sort((a, b) => b[1] - a[1]); if (vals.length < 2 && !run.facets[f]) return ''; return `<span class="facet" data-facet-group="${f}"><span class="muted small">${label}</span>${vals.slice(0, 6).map(([v, n]) => `<button class="chip sm ${run.facets[f] === v ? 'on' : ''}" data-facet="${f}:${esc(v)}" aria-pressed="${run.facets[f] === v}">${esc(facetWord(f, v))} <span class="muted">${n}</span></button>`).join('')}</span>`; }).filter(Boolean).join('');
-    const facetBar = facetChips ? `<div class="chips facets" role="group" aria-label="Narrow the results">${facetChips}${Object.values(run.facets).some(Boolean) ? '<button class="chip sm ghost" data-facet="">Clear</button>' : ''}</div>` : '';
+    // On phones the facets fold behind Filters (the results come first; UX sweep 11-01, A9)
+    const nOn = Object.values(run.facets).filter(Boolean).length;
+    const facetRow = facetChips ? `<div class="chips facets" role="group" aria-label="Narrow the results">${facetChips}${nOn ? '<button class="chip sm ghost" data-facet="">Clear</button>' : ''}</div>` : '';
+    const facetBar = facetRow && shellMode() === 'phone' ? `<details class="sfilters" ${run.filtersOpen ? 'open' : ''}><summary class="chip">Filters${nOn ? ` · ${nOn}` : ''}</summary>${facetRow}</details>` : facetRow;
     const problems = run.sources.filter((src) => (run.answers[src] && run.answers[src].status !== 'ok') || (!run.answers[src] && run.slow.has(src)));
     const pendingAny = run.pending && run.sources.some((src) => !run.answers[src]);
     const skel = (n, tiles) => (tiles ? `<div class="sk-grid">${'<div class="skeleton"></div>'.repeat(n)}</div>` : `<div class="skeleton" style="height:${n * 54}px"></div>`);
@@ -4106,10 +4149,13 @@
       sections.push(`<section class="section ${items.length ? 'fadein' : ''}" data-skind="${kind}">${head}${body}${more}</section>`);
     }
     const short = (e, src) => { const m = humanError(String(e || ''), `/sources/${src}`).replace(/^[a-z]+: /, '').split(/(?<=\.)\s/)[0]; return m.length > 110 ? m.slice(0, 107) + '…' : m; };
-    const notes = problems.length ? `<div class="snotes">${problems.map((src) => `<span class="snote" title="${esc((run.answers[src] && run.answers[src].error) || 'still waiting')}">${svcBadge(src)} ${esc(srcName(src))} didn't answer${run.answers[src] && run.answers[src].error ? `: ${esc(short(run.answers[src].error, src))}` : ''} · <a data-sretry="${src}">Retry</a></span>`).join('')}</div>` : '';
+    // One line per source: its reason when it gave one ("Spotify needs a Premium plan for this ·
+    // Sources"), else that it didn't answer; Retry only where trying again can help
+    const notes = problems.length ? `<div class="snotes">${problems.map((src) => { const err = run.answers[src] && run.answers[src].error; const said = err ? short(err, src).replace(/[.\s·]+$/, '') : ''; const why = said && !said.toLowerCase().includes(srcName(src).toLowerCase()) ? `${srcName(src)}: ${said}` : said; const again = !err || /answered 5\d\d|timed? ?out|time-?out|took too long|reach|network|busy|later|didn.t answer|isn.t answering|sending request|refused|dns|connect(ion)? (error|reset|closed)/i.test(err); return `<span class="snote" title="${esc(err || 'still waiting')}">${svcBadge(src)} ${why ? esc(why) : `${esc(srcName(src))} didn’t answer`}${again ? ` · <a data-sretry="${src}">Retry</a>` : ''}</span>`; }).join('')}</div>` : '';
     const nothing = !pendingAny && !SEARCH_KINDS.some(([k]) => byKind[k].length);
     const nothingAtAll = nothing && !(tg && ((tg.mine || []).length || (tg.others || []).length));
     box.innerHTML = notes + facetBar + (nothingAtAll ? emptyState('search', 'Nothing matched', scope === 'everywhere' ? 'Not in your library, your services or on Pubky.' : `Nothing on ${srcName(scope)}. Try Everywhere.`) : sections.join(''));
+    const sf = $('.sfilters', box); if (sf) sf.addEventListener('toggle', () => { run.filtersOpen = sf.open; });
     // A facet chip keeps the focus across the re-render (or it moves to the first chip, after Clear)
     $$('[data-facet]', box).forEach((b) => b.onclick = () => {
       const key = b.dataset.facet; const [f, ...rest] = key.split(':'); const v = rest.join(':');
@@ -4729,7 +4775,9 @@
           // A castable now-playing screen (UX review, next tier): /now-playing?zone=<id>
           const zid = state.viewArg;
           if (zid && (zid === BROWSER || state.zones[zid])) state.zone = zid;
-          main.innerHTML = '<div class="dash" id="dash" aria-live="polite"></div>';
+          // A way back for whoever opened it from a link (a TV in kiosk use simply doesn't tap it)
+          main.innerHTML = '<a class="dash-home" href="/" id="dashhome">‹ Pubky Music</a><div class="dash" id="dash" aria-live="polite"></div>';
+          $('#dashhome').onclick = (e) => { e.preventDefault(); setView('home'); };
           state.dashKey = null; drawDashboard();
           break;
         }
@@ -4885,12 +4933,13 @@
           // Where songs play from can take a while the first time (each service asked by ISRC):
           // the songs show at once, the chips follow.
           const cachedPf = state.plPf && state.plPf.id === plId && Date.now() - state.plPf.at < 30000 ? state.plPf.data : null;
-          const pfP = cachedPf ? Promise.resolve(cachedPf) : api('GET', `/playlists/${encodeURIComponent(plId)}/play-from`).then((x) => { state.plPf = { id: plId, at: Date.now(), data: x }; return x; }).catch(() => null);
+          const pfFailed = !cachedPf && state.plPf && state.plPf.id === plId && state.plPf.failed && Date.now() - state.plPf.at < 30000;
+          const pfP = cachedPf ? Promise.resolve(cachedPf) : pfFailed ? Promise.resolve(null) : api('GET', `/playlists/${encodeURIComponent(plId)}/play-from`).then((x) => { state.plPf = { id: plId, at: Date.now(), data: x }; return x; }).catch(() => { state.plPf = { id: plId, at: Date.now(), data: null, failed: true }; return null; });
           const d = await api('GET', `/playlists/${encodeURIComponent(plId)}`);
           let pf = cachedPf || await Promise.race([pfP, new Promise((r) => setTimeout(() => r(undefined), 1200))]);
           if (state.view !== 'playlist') return;
           const pfPending = pf === undefined;
-          if (pfPending) { pf = null; pfP.then((x) => { if (x && state.view === 'playlist' && state.viewArg === plId) render(); }); }
+          if (pfPending) { pf = null; let pfDone = false; pfP.then(() => { pfDone = true; if (state.view === 'playlist' && state.viewArg === plId) render(); }); setTimeout(() => { const ps = $('#plsongs'); if (ps && state.view === 'playlist' && state.viewArg === plId) stillLoading(ps, 'Still finding where these songs play… services answer slowly the first time.', () => !pfDone); }, 0); }
           state.itemTitle = d.summary.name;
           // Each song as it plays here: the library file, a service, or unavailable (play_from.rs).
           const songs = d.playlist.items.map((it, k) => {
@@ -4915,12 +4964,13 @@
           const filt = state.plFilter && state.plFilter.id === plId ? state.plFilter.key : null;
           // While the play-from answer is on its way, its chip row keeps its place, so the songs don't jump (second review #20)
           const summaryBar = pfPending && songs.length ? '<div class="chips plsummary" aria-hidden="true"><span class="chip skeleton chip-sk"></span><span class="chip skeleton chip-sk"></span></div>' : pf && songs.length ? `<div class="chips plsummary" role="group" aria-label="Filter by source"><button class="chip ${filt ? '' : 'on'}" data-pfilter="" aria-pressed="${!filt}">${songCount} song${songCount === 1 ? '' : 's'}</button>${[...counts.entries()].sort((a, b) => (a[0] === 'none') - (b[0] === 'none') || b[1] - a[1]).map(([key, n]) => `<button class="chip ${filt === key ? 'on' : ''} ${key === 'none' ? 'warnchip' : ''}" data-pfilter="${esc(key)}" aria-pressed="${filt === key}">${key === 'none' ? '' : svcBadge(key)}${n} ${key === 'none' ? 'unavailable' : esc(srcName(key))}</button>`).join('')}</div>` : '';
+          const pfNote = !pf && !pfPending && songs.length ? '<p class="muted small pfnote" role="status">Couldn’t find where these songs play. <button class="link" id="pfretry">Try again</button></p>' : '';
           const ownOrder = pf && pf.own_order;
           // Only what can play here: services not connected aren't part of the answer (second review #16)
           const orderText = pf ? pf.order.order.filter((k) => { const sv = (pf.order.services || []).find((x) => x.id === k); return !sv || sv.connected; }).map(srcName).join(' › ') || 'Your library' : '';
           main.innerHTML = backBtn('playlists', 'Playlists') + `<div class="hero">${mosaic(d.summary.covers, d.summary.name)}<div><div class="eyebrow">Playlist · ${esc(d.summary.visibility)} · ${d.summary.synced ? 'synced to your homeserver' : 'on this node'}</div><h1>${esc(d.summary.name)}</h1><p class="sub">${countOf(songCount + localSongs.length, 'songs')}${cardCount ? ` · ${countOf(cardCount, 'links')}` : ''}${total ? ' · ' + mins(total) : ''}</p>
               <div class="actions" style="margin-top:12px"><button class="btn primary" id="plplay">${icon('play')} Play</button><button class="btn" id="plshuffle">${icon('shuffle')} Shuffle</button><button class="btn" id="plzone">${icon('zone')} Play on…</button><button class="btn ghost" id="plmore" title="More">${icon('more')}</button><button class="btn danger" id="pldel">${icon('trash')} Delete</button></div></div></div>`
-            + `<section class="section" id="plsongs"><div class="section-head"><h3>Songs</h3>${pf ? `<button class="link" id="plorderopen" title="Change where songs play from">Play from: ${esc(orderText)}</button>` : ''}</div>${summaryBar}${songs.length ? songRows(songs, { numbers: 'index', rowClass: (t) => `${t.unavailable ? 'unavail' : ''}${filt && (t.unavailable ? 'none' : t.plays && t.plays.service) !== filt ? ' filtered' : ''}`, extra: (t, k) => `${sourceChip(t, k)}<span class="row-actions q-actions"><button class="icon-btn" data-pup="${k}" title="Move up" ${k === 0 ? 'disabled' : ''}>${icon('chevron', 'ic up')}</button><button class="icon-btn" data-pdown="${k}" title="Move down" ${k === songs.length - 1 ? 'disabled' : ''}>${icon('chevron')}</button><button class="icon-btn" data-rm="${k}" title="Remove">${icon('close')}</button></span>` }) : emptyState('playlist', 'This playlist is empty', 'Add songs from any ⋯ menu, or import a file.')}</section>`
+            + `<section class="section" id="plsongs"><div class="section-head"><h3>Songs</h3>${pf ? `<button class="link" id="plorderopen" title="Change where songs play from">Play from: ${esc(orderText)}</button>` : ''}</div>${summaryBar}${pfNote}${songs.length ? songRows(songs, { numbers: 'index', rowClass: (t) => `${t.unavailable ? 'unavail' : ''}${filt && (t.unavailable ? 'none' : t.plays && t.plays.service) !== filt ? ' filtered' : ''}`, extra: (t, k) => `${sourceChip(t, k)}<span class="row-actions q-actions"><button class="icon-btn" data-pup="${k}" title="Move up" ${k === 0 ? 'disabled' : ''}>${icon('chevron', 'ic up')}</button><button class="icon-btn" data-pdown="${k}" title="Move down" ${k === songs.length - 1 ? 'disabled' : ''}>${icon('chevron')}</button><button class="icon-btn" data-rm="${k}" title="Remove">${icon('close')}</button></span>` }) : emptyState('playlist', 'This playlist is empty', 'Add songs from any ⋯ menu, or import a file.')}</section>`
             + (localSongs.length ? `<section class="section" id="pllocal"><div class="section-head"><h3>On this node only</h3><span class="muted small">${countOf(localSongs.length, 'songs')}</span></div><p class="muted small">Not identified yet, so they stay on this node and aren't synced. Pick which song each one is (the ? in its menu) and it joins the playlist on your homeserver.</p>${songRows(localSongs, { numbers: 'index', extra: (t, k) => `<button class="icon-btn" data-lrm="${k}" title="Remove from this playlist" aria-label="Remove ${esc(t.title)} from this playlist">${icon('close')}</button>` })}</section>` : '')
             + (pf ? `<section class="section" id="plorder"><div class="section-head"><h3>Play from</h3><span class="muted small">${ownOrder ? 'this playlist’s own order' : 'your node’s order (Settings)'}</span></div><p class="muted small">Each song plays from the first source here that has it. A pinned song keeps its own source.</p>${orderList(pf.order)}<label class="check small" style="margin-top:10px"><input type="checkbox" id="plownorder" ${ownOrder ? '' : 'checked'}> Use my node’s order</label></section>` : '')
             + `<section class="section" id="plpubky"><div class="section-head"><h3>On Pubky</h3>${d.summary.visibility === 'public' ? '<span class="pill ok">shared</span>' : ''}</div>${d.summary.visibility === 'public'
@@ -4933,6 +4983,7 @@
           // the row's ⋯ menu offers them and presses the same buttons
           const rowActs = (k, row) => (row && $('.q-actions', row) && getComputedStyle($('.q-actions', row)).display === 'none' ? [['pup', 'Move up', 'upload'], ['pdown', 'Move down', 'download'], ['rm', 'Remove from playlist', 'trash']].filter(([a]) => { const b = $(`[data-${a}]`, row); return b && !b.disabled; }).map(([a, label, ic]) => ({ label, icon: ic, run: () => $(`[data-${a}]`, row).click() })) : []);
           bindSongRows($('#plsongs'), songs, { rowExtra: rowActs });
+          const pfr = $('#pfretry'); if (pfr) pfr.onclick = () => { state.plPf = null; render(); };
           // Playlist rows can also be removed together (highest index first, so positions hold)
           enableSelect($('#plsongs'), songs, { remove: async (idx) => { for (const k of idx) await api('DELETE', `/playlists/${d.summary.id}/items/${k}`); state.plPf = null; toast(`Removed ${countOf(idx.length, 'songs')}`); render(); } });
           if (localSongs.length) bindSongRows($('#pllocal'), localSongs, {});
@@ -5036,7 +5087,7 @@
             ? group('', row('Music folders, scans and matches', 'Your own files. Folders, scans, tags and MusicBrainz matches are in Your library.', '<button class="btn" data-view-go="library" data-view-arg="node">Open Your library › Node library</button>')
               + row('Play from', 'Which source plays a song first when several have it.', '<button class="btn ghost" data-goto-settings="playback">Open Settings › Zones and outputs</button>'))
             : group('', row(cur.enabled ? 'On' : 'Turned off', cur.enabled ? `Shown in search, on Home, on song and album pages and in the play order.` : `Hidden from search, Home, song and album pages and the play order. Its sign-in and settings are kept.`, srcSwitch(cur, ' on'))
-                + (() => { const st = srcState({ ...cur, enabled: true }); return row('Status', esc(st.long), `<span class="pill ${st.cls === 'ok' ? 'ok' : st.cls === 'bad' ? 'bad' : ''}">${esc(st.label)}</span>`); })()
+                + (cur.id === 'tidal' || cur.id === 'qobuz' ? '' : (() => { const st = srcState({ ...cur, enabled: true }); return row('Status', esc(st.long), `<span class="pill ${st.cls === 'ok' ? 'ok' : st.cls === 'bad' ? 'bad' : ''}">${esc(st.label)}</span>`); })())
                 + (cur.features ? row('What it does', (cur.features.length ? cur.features.map((f) => FEATURE_WORDS[f] || f).join(' · ') : 'Nothing yet') + (cur.stage === 'unofficial' ? '. Unofficial: a private API the service has not approved; it can stop working at any time.' : cur.stage === 'beta' ? '. New here; tell us what breaks.' : '.'), cur.stage && cur.stage !== 'stable' ? `<span class="pill ${cur.stage === 'unofficial' ? 'warn' : ''}">${esc(cur.stage === 'unofficial' ? 'Unofficial' : 'Beta')}</span>` : '') : ''))
               + (account ? group('Account', block('', '', account)) : '')
               + (cur.id === 'tidal' ? '<div id="tidalsignin"></div>' : '')
@@ -5104,9 +5155,9 @@
             const bf = $('#bcfmt'); if (bf) bf.onchange = () => put({ format: bf.value }, 'Download format saved');
           };
           fillBandcamp();
-          if (cur.id === 'bandcamp' && cur.enabled && cur.status === 'signed in') {
+          if (cur && cur.id === 'bandcamp' && cur.enabled && cur.status === 'signed in') {
             // Your purchases, each downloadable into the library.
-            const box = document.createElement('div'); box.id = 'bcmine'; box.innerHTML = '<p class="muted small">Loading your Bandcamp collection…</p>'; ($('#srcmine') || main).appendChild(box);
+            const box = document.createElement('div'); box.id = 'bcmine'; stillLoading(box, 'Still loading from Bandcamp… the first time can take a while.', () => !!box.querySelector('[data-loading]')); box.innerHTML = '<p class="muted small" data-loading>Loading your Bandcamp collection…</p>'; ($('#srcmine') || main).appendChild(box);
             const draw = async () => {
               try {
                 const [items, jobs] = await Promise.all([api('GET', '/sources/bandcamp/collection'), api('GET', '/sources/bandcamp/downloads')]);
@@ -5213,9 +5264,9 @@
             const tg = $('#sctokenforget'); if (tg) tg.onclick = () => put({ token: '' }, 'Signed out of SoundCloud');
           };
           fillSoundCloud();
-          if (cur.id === 'soundcloud' && cur.enabled && cur.status === 'signed in') {
+          if (cur && cur.id === 'soundcloud' && cur.enabled && cur.status === 'signed in') {
             // Your likes and playlists, with imports into favourites and Pubky playlists.
-            const box = document.createElement('div'); box.id = 'scmine'; box.innerHTML = '<p class="muted small">Loading your SoundCloud likes…</p>'; ($('#srcmine') || main).appendChild(box);
+            const box = document.createElement('div'); box.id = 'scmine'; stillLoading(box, 'Still loading from SoundCloud… the first time can take a while.', () => !!box.querySelector('[data-loading]')); box.innerHTML = '<p class="muted small" data-loading>Loading your SoundCloud likes…</p>'; ($('#srcmine') || main).appendChild(box);
             (async () => {
               try {
                 const [likes, pls] = await Promise.all([api('GET', '/sources/soundcloud/likes'), api('GET', '/sources/soundcloud/playlists')]);
@@ -5245,7 +5296,7 @@
           const jo = $('#jamout'); if (jo) jo.onclick = async () => { try { await api('POST', '/sources/jamendo/logout'); toast('Jamendo signed out'); render(); } catch (e) { toast(e.message, 'error'); } };
           const jm = $('#jamimport'); if (jm) jm.onclick = async () => { jm.disabled = true; try { const r = await api('POST', '/sources/jamendo/collection/import'); toast(`${r.imported} Jamendo song${r.imported === 1 ? '' : 's'} added to Favourites`); } catch (e) { toast(e.message, 'error'); } jm.disabled = false; };
           if (spot && spot.signed_in && cur.enabled) {
-            const box = document.createElement('div'); box.innerHTML = '<p class="muted small">Loading your Spotify library…</p>'; ($('#srcmine') || main).appendChild(box);
+            const box = document.createElement('div'); stillLoading(box, 'Still loading from Spotify… the first time can take a while.', () => !!box.querySelector('[data-loading]')); box.innerHTML = '<p class="muted small" data-loading>Loading your Spotify library…</p>'; ($('#srcmine') || main).appendChild(box);
             (async () => {
               try {
                 const [col, pls, devs] = await Promise.all([api('GET', '/sources/spotify/collection'), api('GET', '/sources/spotify/playlists'), api('GET', '/sources/spotify/devices').catch(() => [])]);
@@ -5264,7 +5315,7 @@
           }
           if (tidal && tidal.signed_in && cur.enabled) {
             // Your collection and playlists, with imports into the node's favourites and Pubky playlists.
-            const box = document.createElement('div'); box.id = 'tidalmine'; box.innerHTML = '<p class="muted small">Loading your TIDAL collection…</p>'; ($('#srcmine') || main).appendChild(box);
+            const box = document.createElement('div'); box.id = 'tidalmine'; stillLoading(box, 'Still loading from TIDAL… the first time can take a while.', () => !!box.querySelector('[data-loading]')); box.innerHTML = '<p class="muted small" data-loading>Loading your TIDAL collection…</p>'; ($('#srcmine') || main).appendChild(box);
             (async () => {
               try {
                 const [col, pls] = await Promise.all([api('GET', '/sources/tidal/collection'), api('GET', '/sources/tidal/playlists')]);
@@ -5407,7 +5458,7 @@
           const iconAlso = kind === 'artist' || kind === 'album';
           const playsHereFrom = (v) => !!v.page && (rk ? rk.healthy.has(alsoSvc(v)) : alsoSvc(v) === 'library');
           const alsoIcon = ({ v, k }) => { const name = instName(v); return playsHereFrom(v) || (v.page && !webUrl(v.url)) ? `<button type="button" class="icon-btn also-ico" data-also="${k}" title="${esc(name)}" aria-label="Open on ${esc(name)}">${svcBadge(alsoSvc(v))}</button>` : webUrl(v.url) ? `<a class="icon-btn also-ico" href="${esc(webUrl(v.url))}" target="_blank" rel="noopener" title="${esc(name)}" aria-label="Open on ${esc(name)} (opens a new tab)">${svcBadge(alsoSvc(v))}</a>` : ''; };
-          const alsoIcons = iconAlso && alsoAll.length ? `<span class="also-icons" role="group" aria-label="Also on">${alsoAll.map(alsoIcon).join('')}</span>` : '';
+          const alsoIcons = iconAlso && alsoAll.length ? `<span class="also-icons" role="group" aria-labelledby="alsolabel"><span class="also-label muted small" id="alsolabel">Also on</span>${alsoAll.map(alsoIcon).join('')}</span>` : '';
           const [lineFirst, lineMore] = iconAlso ? [[], []] : [alsoFirst, alsoMore];
           const ownItem = `<span class="src own" title="This page is ${esc(ownName)}'s">${svcBadge(ownSvc === 'library' ? 'library' : ownSvc)}<span>${esc(ownName)}</span>${webUrl(pg.link) ? `<a class="chiplink" href="${esc(webUrl(pg.link))}" target="_blank" rel="noopener" title="Open on ${esc(ownName)}" aria-label="Open on ${esc(ownName)}">${icon('external')}</a>` : ''}</span>`;
           const alsoLine = (isGlobal && !lineFirst.length && !lineMore.length) ? '' : `<div class="srcline" id="ialso">${isGlobal ? '<span class="muted">On</span>' : `<span class="muted">From</span>${ownItem}`}${!isGlobal && lineFirst.length ? '<span class="muted">· also</span>' : ''}${lineFirst.map(alsoItem).join('')}${lineMore.length ? `${!isGlobal && !lineFirst.length ? '<span class="muted">·</span>' : ''}<button type="button" class="lnk srcmore" data-srcmore aria-label="Show ${lineMore.length} more source${lineMore.length === 1 ? '' : 's'}">${lineFirst.length || !isGlobal ? `${lineMore.length} more` : `${lineMore.length} services`}</button><span class="srcrest" hidden>${lineMore.map(alsoItem).join('')}</span>` : ''}</div>`
@@ -5415,7 +5466,7 @@
           const versionChip = (v, k) => `<span class="chip">${svcBadge(v.source === 'library' ? 'library' : v.source)} ${esc(v.label)}${v.uri || /^(tidal|deezer)$/.test(v.source) || v.source === 'library' || ytOf(v.url) ? ` <button class="chiplink" data-vplay="${k}" title="Play this version">${icon('play')}</button>` : ''}${webUrl(v.url) ? ` <a class="chiplink" href="${esc(webUrl(v.url))}" target="_blank" rel="noopener" title="Open">${icon('external')}</a>` : ''}</span>`;
           // Deep link with no history: back goes to the parent (song → album → artist → section).
           const parent = kind === 'song' && pg.album && pg.album.id ? { kind: 'album', ...pg.album } : kind !== 'artist' && pg.artist && pg.artist.id ? { kind: 'artist', ...pg.artist } : null;
-          const crumbs = kind === 'artist' ? [] : [pg.artist && pg.artist.id ? ['artist', pg.artist] : null, kind === 'song' && pg.album && pg.album.id ? ['album', pg.album] : null].filter(Boolean);
+          const crumbs = kind === 'artist' ? [] : [pg.artist && pg.artist.id ? ['artist', pg.artist] : null, kind === 'song' && pg.album && pg.album.id && pg.album.name !== state.itemTitle ? ['album', pg.album] : null].filter(Boolean);
           const crumbBar = crumbs.length ? `<nav class="crumbs" aria-label="Breadcrumb"><ol>${crumbs.map(([k, l]) => `<li><button class="lnk" data-crumb-kind="${k}" data-crumb-id="${esc(l.id)}">${esc(l.name)}</button></li>`).join('')}<li aria-current="page">${esc(state.itemTitle || '')}</li></ol></nav>` : '';
           if (isListener()) pg.about = pg.about.filter((f) => f.label !== 'File');
           // About (F6): the article's opening (Wikipedia in the reader's language, or TheAudioDB) with
@@ -5643,12 +5694,14 @@
           if (state.view !== 'zones') return;
           const capsOf = (z) => (outs.find((o) => o.id === z.output) || {}).caps || null;
           const zs = zoneList();
+          // Two zones with one name get their kind after it; an output id is never the text (UX sweep A14)
+          const named = (z) => zs.filter((y) => y.name === z.name).length > 1 ? `${esc(z.name)} <span class="muted small">· ${esc(PROTO_WORDS[String(z.output || z.id).split(':')[0]] || String(z.output || '').split(':')[0])}</span>` : esc(z.name);
           main.innerHTML = pageHead('Zones', `${zs.length} · multi-room overview`, `<button class="btn" id="zgroup">${icon('plus')} Group outputs…</button>`) + `<div class="cards">${zs.map((z) => {
             const np = z.now_playing; const it = np && np.item; const caps = capsOf(z); const hv = caps && caps.hw_volume && caps.hw_volume.kind === 'db' ? caps.hw_volume : null;
             const members = np && np.members && np.members.length ? `<span class="pill">${np.members.length} outputs</span>` : '';
             return `<div class="card zone-card ${z.id === state.zone ? 'on' : ''}" data-zcard="${esc(z.id)}">
-              <div class="zc-head">${icon('zone')}<h3>${esc(z.name)}</h3>${members}${z.transport === 'stopped' && z.error ? '<span class="pill bad">error</span>' : `<span class="pill ${z.transport === 'playing' ? 'ok' : ''}">${esc(z.transport)}</span>`}</div>
-              <div class="zc-now">${it ? itemArt(it, 'sm', npSvc(np)) : '<div class="np-art placeholder"></div>'}<div class="zc-text"><div class="name">${it ? esc(np.stream_title || it.title || it.uri) : '<span class="muted">Nothing playing</span>'}</div><div class="sub">${it ? esc([it.artist, it.album].filter(Boolean).join(' · ')) : esc(z.id === BROWSER ? 'Streams the files to this browser' : z.output)}</div>${!it && z.error && z.transport === 'stopped' ? `<div class="sub warn-text" role="alert">Couldn’t play: ${esc(z.error)}</div>` : ''}</div></div>
+              <div class="zc-head">${icon('zone')}<h3>${named(z)}</h3>${members}${z.transport === 'stopped' && z.error ? '<span class="pill bad">error</span>' : `<span class="pill ${z.transport === 'playing' ? 'ok' : ''}">${esc(z.transport)}</span>`}</div>
+              <div class="zc-now">${it ? itemArt(it, 'sm', npSvc(np)) : '<div class="np-art placeholder"></div>'}<div class="zc-text"><div class="name">${it ? esc(np.stream_title || it.title || it.uri) : '<span class="muted">Nothing playing</span>'}</div><div class="sub">${it ? esc([it.artist, it.album].filter(Boolean).join(' · ')) : `<span title="${esc(z.output || '')}">${esc(deviceWords(z))}</span>`}</div>${!it && z.error && z.transport === 'stopped' ? `<div class="sub warn-text" role="alert">Couldn’t play: ${esc(z.error)}</div>` : ''}</div></div>
               <div class="zc-controls">
                 <button class="icon-btn" data-zt="previous" title="Previous">${icon('prev')}</button>
                 <button class="icon-btn big" data-zt="toggle" title="${z.transport === 'playing' ? 'Pause' : 'Play'}">${icon(z.transport === 'playing' ? 'pause' : 'play')}</button>
@@ -5786,7 +5839,7 @@
         }
         case 'downloads': {
           // What this device keeps (STEWARD-DOWNLOADS.md): offline, from the app's local server
-          if (!isOffline()) { main.innerHTML = pageHead('Downloads', null) + '<div id="dljob"></div><p class="muted">Songs kept for offline listening live in the Pubky Music app on your phone or laptop.</p>'; drawJobs(); break; }
+          if (!isOffline()) { main.innerHTML = pageHead('Downloads', null) + '<div id="dljob"></div><p class="muted">Songs kept for offline listening live in the Pubky Music app on your phone or laptop: keep an album or a playlist there with its ⋯ menu, and it plays without the node.</p><p><a class="btn" href="https://github.com/gillohner/pubky-music-node/blob/main/docs/guides/desktop-app.md" target="_blank" rel="noopener">' + icon('external') + ' Get the app</a></p>'; drawJobs(); break; }
           let d; try { d = await api('GET', '/offline'); } catch (e) { main.innerHTML = pageHead('Downloads', null) + `<div class="notice">${esc(e.message)}</div>`; break; }
           if (state.view !== 'downloads') return;
           const byId = new Map(d.tracks.map((t) => [t.id, t]));

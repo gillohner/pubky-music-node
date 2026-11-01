@@ -193,7 +193,11 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
           check(off === 'none', `${w}×${h}: offline, no volume button into the Sound panel (${off})`);
         }
         if (!vol && shell === 'phone' && await shown('#quality')) { await p.click('#quality'); vol = await visible(p, '#qpanel #qpvol', 5000); }
-        check(vol, `${w}×${h}: volume (${(await shown('#vol')) ? 'slider in the bar' : 'in the Sound panel'})`);
+        // A phone with nothing playing has no sound pill (UX sweep A4): volume is on the zone's card
+        // (Zones, one tap), and in Now playing while something plays
+        let where = (await shown('#vol')) ? 'slider in the bar' : 'in the Sound panel';
+        if (!vol && shell === 'phone') { await p.click('[data-bnav="zones"]'); vol = await visible(p, '#main [data-zvol]', 8000); where = 'on the zone card'; }
+        check(vol, `${w}×${h}: volume (${where})`);
         if (shell === 'tablet') {
           const foot = p.locator('[data-bnav="settings"]'); await foot.scrollIntoViewIfNeeded().catch(() => {});
           const box = await foot.boundingBox();
@@ -654,6 +658,85 @@ const GROUPABLE = OUTS.filter((o) => o.group_by || o.caps.groupable).map((o) => 
         check(!n.crumbs && n.barMb === '14px' && n.backMb === '0px', `${w}: without a trail the bar keeps the same gap below (${JSON.stringify(n)})`);
         await cc.close();
       }
+    }
+    // ---- UX sweep 11-01: Sources on phones, and the player bar keeps room for what plays ----
+    for (const [w, h] of [[390, 844], [430, 932], [768, 1024], [834, 1194]]) {
+      const cc = await browser.newContext({ viewport: { width: w, height: h }, hasTouch: true, isMobile: w < 600 });
+      await cc.addInitScript((t) => { localStorage.setItem('pm.token', t); localStorage.setItem('pm.zone', 'browser'); HTMLMediaElement.prototype.play = async function () { this.dispatchEvent(new Event('playing')); }; }, TOKEN);
+      const pp = await cc.newPage(); const errs = []; pp.on('pageerror', (e) => errs.push(e.message));
+      if (w < 600) {
+        await pp.goto(BASE + '/sources'); await pp.waitForSelector('#main [data-srctab]', { timeout: 20000 }).catch(() => {});
+        check(await pp.$$eval('#main [data-srctab]', (x) => x.length) > 3 && !(await pp.evaluate(() => /Cannot read properties/.test(document.querySelector('#main').textContent))), `${w}: Sources lists the sources (no crash with none chosen)`);
+        await pp.goto(BASE + '/'); await pp.waitForSelector('#np', { timeout: 20000 });
+        check(await pp.evaluate(() => getComputedStyle(document.querySelector('#quality')).display === 'none'), `${w}: nothing playing, no sound pill: the bar says Nothing playing`);
+      }
+      // A song from the library in This browser
+      await pp.goto(BASE + '/tracks'); await pp.waitForSelector('.track', { timeout: 20000 });
+      const first = pp.locator('.track').first(); await first.hover().catch(() => {}); await first.locator('[data-act="play"], .play-btn, button[aria-label^="Play"]').first().click().catch(async () => { await first.dblclick(); });
+      const room = await (async () => { const end = Date.now() + 8000; for (;;) { const r = await pp.evaluate(() => { const t = document.querySelector('#np .np-title'); return t && !/Nothing playing|Starting/.test(t.textContent) ? Math.round(document.querySelector('#np').getBoundingClientRect().width) : 0; }); if (r || Date.now() > end) return r; await pp.waitForTimeout(200); } })();
+      const floor = w < 600 ? 150 : 170;
+      check(room >= floor, `${w}: playing, the bar keeps ${room} px for the cover and title (at least ${floor})`);
+      check(room && await pp.$$eval('#np .lnk, #np [data-np-song], #np [data-np-artist]', (x) => x.length) === 0, `${w}: the bar's title and artist are text, not buttons that open Now playing instead`);
+      if (w < 600) {
+        const dup = await pp.evaluate(() => { const q = document.querySelector('#quality'); const dev = q && q.querySelector('.qdev'); return !!(dev && getComputedStyle(dev).display !== 'none'); });
+        check(!dup, `${w}: the zone's name is not in the sound pill too`);
+        const zn = await pp.$eval('.player .zone-btn span', (e) => ({ shown: getComputedStyle(e).display !== 'none' && e.getBoundingClientRect().width >= 40, width: Math.round(e.getBoundingClientRect().width), text: e.textContent })).catch(() => null);
+        check(zn && zn.shown && zn.text, `${w}: the zone button names the zone (${JSON.stringify(zn)})`);
+        await pp.click('#np .np-title'); const opened = await visible(pp, '#nowplaying', 8000);
+        check(opened && await pp.evaluate(() => /^\/(song|item)/.test(location.pathname) === false), `${w}: tapping the bar's title opens Now playing, not the song page`);
+        check(await pp.isVisible('#npvol'), `${w}: Now playing has a volume slider`);
+        const npv = await pp.$eval('#npvol', (e) => [e.min, e.max, e.value].join(' ')).catch(() => '');
+        check(npv === '-60 0 0', `${w}: at this browser's own volume (-60..0 dB, now 0: ${npv})`);
+        // A chip row fades at its end only while chips are hidden there
+        await pp.goto(BASE + '/library'); await pp.waitForSelector('.libnav', { timeout: 15000 }).catch(() => {}); await pp.waitForTimeout(300);
+        const fade = async () => pp.$eval('.libnav', (e) => ({ over: e.scrollWidth > e.clientWidth + 1, more: e.classList.contains('more-right') })).catch(() => null);
+        const f0 = await fade();
+        check(f0 && f0.more === f0.over, `${w}: the library's chip row fades only if it overflows (${JSON.stringify(f0)})`);
+        if (f0 && f0.over) {
+          await pp.$eval('.libnav', (e) => { e.scrollLeft = e.scrollWidth; }); await pp.waitForTimeout(300);
+          check((await fade()).more === false, `${w}: scrolled to its end, the last chip isn't faded`);
+        }
+      }
+      check(errs.length === 0, `${w}: no page errors${errs.length ? ': ' + errs.join(' | ') : ''}`);
+      await cc.close();
+    }
+    // The kiosk dashboard fills the screen without a scroll; a playlist whose sources can't be
+    // found says so, with Try again, and drops "Still finding…"
+    {
+      const cc = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+      await cc.addInitScript((t) => { localStorage.setItem('pm.token', t); localStorage.setItem('pm.zone', 'browser'); }, TOKEN);
+      const pp = await cc.newPage(); const errs = []; pp.on('pageerror', (e) => errs.push(e.message));
+      await pp.goto(BASE + '/now-playing'); await pp.waitForSelector('.dash', { timeout: 15000 }).catch(() => {});
+      check(await pp.$eval('.dash', (e) => getComputedStyle(e).marginTop).catch(() => '') === '0px', 'the dashboard starts at the top, under its way back (no scroll)');
+      const H = { Authorization: 'Bearer ' + TOKEN, 'content-type': 'application/json' };
+      const made = await (await fetch(BASE + '/v1/playlists', { method: 'POST', headers: H, body: JSON.stringify({ name: 'UX sweep play-from', uris: ['https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC'] }) })).json().catch(() => null);
+      const plid = made && (made.summary ? made.summary.id : made.id);
+      if (plid) {
+        let asked = 0;
+        await pp.route(/\/v1\/playlists\/[^/]+\/play-from$/, async (r) => { asked++; if (asked === 1) { await new Promise((x) => setTimeout(x, 4500)); return r.fulfill({ status: 500, json: { error: 'lookup failed' } }); } return r.fulfill({ status: 500, json: { error: 'lookup failed' } }); });
+        await pp.goto(`${BASE}/playlist/${encodeURIComponent(plid)}`);
+        const still = await visible(pp, '#plsongs .still-loading', 6000);
+        check(still, 'a slow lookup says "Still finding…"');
+        check(await visible(pp, '#plsongs .pfnote #pfretry', 6000) && !(await pp.$('#plsongs .still-loading')), 'when it fails: "Couldn’t find where these songs play" with Try again, and no "Still finding…"');
+        await pp.click('#pfretry'); await pp.waitForTimeout(800);
+        check(asked >= 2, `Try again asks again (${asked} asks)`);
+        await fetch(`${BASE}/v1/playlists/${encodeURIComponent(plid)}`, { method: 'DELETE', headers: H }).catch(() => {});
+      } else check(false, 'made a playlist for the play-from check');
+      // A service's search notice names it, and offers Retry only where trying again can help
+      await pp.route(/\/v1\/search\?/, (r) => r.fulfill({ status: 200, headers: { 'content-type': 'application/x-ndjson', 'x-pm-sources': 'library,spotify,tidal,deezer' }, body: [
+        { source: 'library', status: 'ok', ms: 2, hits: [] },
+        { source: 'spotify', status: 'error', ms: 9, hits: [], error: 'spotify: search answered 403' },
+        { source: 'tidal', status: 'error', ms: 9, hits: [], error: 'tidal: error sending request for url (https://openapi.tidal.com/v2/searchResults)' },
+        { source: 'deezer', status: 'error', ms: 9, hits: [], error: 'deezer: operation timed out' },
+      ].map((l) => JSON.stringify(l)).join('\n') + '\n' }));
+      await pp.route(/\/v1\/search\/tags\?/, (r) => r.fulfill({ json: { mine: [], others: [] } }));
+      await pp.goto(BASE + '/search?q=zzz'); await pp.waitForSelector('.snotes .snote', { timeout: 10000 }).catch(() => {});
+      const notes = await pp.$$eval('.snotes .snote', (ns) => ns.map((n) => ({ text: n.textContent, retry: !!n.querySelector('[data-sretry]') })));
+      const note = (name) => notes.find((n) => n.text.includes(name)) || null;
+      check(note('Spotify') && !note('Spotify').retry, `a 403 names Spotify, without Retry (${JSON.stringify(note('Spotify'))})`);
+      check(note('TIDAL') && note('TIDAL').retry && note('Deezer') && note('Deezer').retry, `a network failure and a timeout keep Retry (${JSON.stringify(notes)})`);
+      check(errs.length === 0, `dashboard, playlist and search notes: no page errors${errs.length ? ': ' + errs.join(' | ') : ''}`);
+      await cc.close();
     }
     // A listener: My music only, no edit controls
     c = await ctx(); p = await c.newPage();
