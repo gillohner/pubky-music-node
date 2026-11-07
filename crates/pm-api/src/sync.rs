@@ -15,7 +15,7 @@
 use crate::playlists::{now_micros, store};
 use crate::types::SyncReport;
 use pm_library::Library;
-use pm_pubky::homeserver::{HomeserverError, NodeHomeserver};
+use pm_pubky::homeserver::{HomeserverError, ListBounds, NodeHomeserver};
 use pm_pubky::schemas::post::{TYPE_ACTIVITY, TYPE_PLAYLIST, TYPE_REVIEW};
 use pm_pubky::{v1, Bookmark, MusicContent, MusicPost, Network, Visibility};
 use pubky::PubkySession;
@@ -525,7 +525,10 @@ impl PubkySync {
                     Visibility::Private
                 };
                 let session = (visibility == Visibility::Private).then_some(&self.session);
-                let found = self.homeserver.v1_heads(&self.z32, root, ns, session).await?;
+                let (found, _) = self
+                    .homeserver
+                    .v1_heads(&self.z32, root, ns, session, ListBounds::OWNER)
+                    .await?;
                 heads.0.insert((is_pub(root), ns), found);
             }
         }
@@ -630,7 +633,12 @@ impl PubkySync {
             .await?;
         let remote = self
             .homeserver
-            .read_music_posts(&self.z32, Visibility::Private, Some(&self.session))
+            .read_music_posts(
+                &self.z32,
+                Visibility::Private,
+                Some(&self.session),
+                ListBounds::OWNER,
+            )
             .await?;
         let lib = library.lock().expect("library poisoned");
         for (_, f) in remote_favs {

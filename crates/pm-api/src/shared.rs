@@ -13,7 +13,7 @@ use crate::{ApiError, ApiResult};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
-use pm_pubky::homeserver::NodeHomeserver;
+use pm_pubky::homeserver::{ListBounds, NodeHomeserver};
 use pm_pubky::{v1, Playlist, Visibility};
 use std::sync::Arc;
 
@@ -22,6 +22,23 @@ const LIST_MAX: usize = 50;
 /// At most this many of a person's public posts are read to find them: a person with many
 /// notes still shows their collections (the posts are filtered by kind before the cap).
 const READ_MAX: usize = 1000;
+
+/// A test-sized shared listing: this many entries when not 0 (the pages follow), so a test
+/// needs a few hundred posts, not thousands.
+pub static SHARED_ENTRIES_FOR_TESTS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// How far someone else's homeserver is listed: their newest posts ([`ListBounds::SHARED`]).
+fn bounds() -> ListBounds {
+    let b = ListBounds::SHARED;
+    match SHARED_ENTRIES_FOR_TESTS.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => b,
+        n => ListBounds {
+            max_entries: n,
+            max_pages: n.div_ceil(pm_pubky::homeserver::LIST_LIMIT as usize),
+            ..b
+        },
+    }
+}
 
 /// A person (and maybe one post) from what someone pasted: `pubky://<key>/pub/social/v1/posts/<id>`,
 /// `pubky<key>` or the bare key.
@@ -64,7 +81,8 @@ fn user_of(raw: &str) -> Result<(String, v1::PubkyId), ApiError> {
     Ok((key, owner))
 }
 
-/// Someone's shared collections, newest edit first: their public posts are read newest first,
+/// Someone's shared collections, newest edit first: their newest public posts (the listing is
+/// bounded, [`ListBounds::SHARED`]) are read newest edit first,
 /// [`pm_pubky::homeserver::FETCH_AT_ONCE`] at a time, until [`LIST_MAX`] collections are found
 /// or [`READ_MAX`] posts were read.
 async fn read_all(
@@ -73,8 +91,8 @@ async fn read_all(
     owner: &v1::PubkyId,
 ) -> Result<Vec<(String, Playlist)>, ApiError> {
     let hs = homeserver(s)?;
-    let heads = hs
-        .v1_heads(key, v1::Root::Pub, v1::SOCIAL_NAMESPACE, None)
+    let (heads, _) = hs
+        .v1_heads(key, v1::Root::Pub, v1::SOCIAL_NAMESPACE, None, bounds())
         .await
         .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, format!("their homeserver: {e}")))?;
     let mut newest: Vec<(String, v1::Head)> = heads.into_iter().collect();
@@ -110,12 +128,19 @@ async fn read_post(
     v1::read_public_playlist(&bytes, id, &head.edit_id, owner).map(|p| (id.to_string(), p))
 }
 
+/// One post by id: only that post's folder (`{posts_dir}{id}/`, its versions) is listed, so a
+/// post older than the newest ones the bounded account listing keeps still opens.
 async fn read_one(s: &NodeState, key: &str, owner: &v1::PubkyId, id: &str) -> Result<Playlist, ApiError> {
+    if v1::micros_of(id).is_none() {
+        return Err(ApiError::not_found("no shared playlist with that id"));
+    }
     let hs = homeserver(s)?;
-    let heads = hs
-        .v1_heads(key, v1::Root::Pub, v1::SOCIAL_NAMESPACE, None)
+    let dir = format!("{}{id}/", v1::posts_dir(v1::Root::Pub, v1::SOCIAL_NAMESPACE));
+    let listing = hs
+        .list_tree(key, &dir, Visibility::Public, None, bounds())
         .await
         .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, format!("their homeserver: {e}")))?;
+    let heads = v1::heads(listing.entries);
     let head = heads
         .get(id)
         .ok_or_else(|| ApiError::not_found("no shared playlist with that id (it may be private again)"))?;

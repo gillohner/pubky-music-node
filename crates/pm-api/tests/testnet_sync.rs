@@ -150,9 +150,16 @@ async fn playlists_round_trip_through_the_private_folder() {
 
     // The playlist is a private v1 collection (ADR 0014), nothing in the old folder or public.
     let heads = homeserver
-        .v1_heads(&z32, v1::Root::Priv, v1::SOCIAL_NAMESPACE, Some(sync_a.session()))
+        .v1_heads(
+            &z32,
+            v1::Root::Priv,
+            v1::SOCIAL_NAMESPACE,
+            Some(sync_a.session()),
+            pm_pubky::homeserver::ListBounds::OWNER,
+        )
         .await
-        .unwrap();
+        .unwrap()
+        .0;
     assert_eq!(heads.len(), 1, "{heads:?}");
     assert_eq!(heads[&id].path, format!("/priv/social/v1/posts/{id}/{id}.json"));
     let body: serde_json::Value = serde_json::from_slice(
@@ -169,14 +176,26 @@ async fn playlists_round_trip_through_the_private_folder() {
     .unwrap();
     assert_eq!(body["kind"], "collection");
     assert!(homeserver
-        .read_music_posts(&z32, Visibility::Private, Some(sync_a.session()))
+        .read_music_posts(
+            &z32,
+            Visibility::Private,
+            Some(sync_a.session()),
+            pm_pubky::homeserver::ListBounds::OWNER
+        )
         .await
         .unwrap()
         .is_empty());
     assert!(homeserver
-        .v1_heads(&z32, v1::Root::Pub, v1::SOCIAL_NAMESPACE, None)
+        .v1_heads(
+            &z32,
+            v1::Root::Pub,
+            v1::SOCIAL_NAMESPACE,
+            None,
+            pm_pubky::homeserver::ListBounds::OWNER
+        )
         .await
         .unwrap()
+        .0
         .is_empty());
 
     // An edit is a second version; the pull on A takes nothing back.
@@ -191,9 +210,16 @@ async fn playlists_round_trip_through_the_private_folder() {
     let r = sync_a.sync(&a.library).await.unwrap();
     assert_eq!((r.pushed, r.pulled), (1, 0), "{r:?}");
     let heads = homeserver
-        .v1_heads(&z32, v1::Root::Priv, v1::SOCIAL_NAMESPACE, Some(sync_a.session()))
+        .v1_heads(
+            &z32,
+            v1::Root::Priv,
+            v1::SOCIAL_NAMESPACE,
+            Some(sync_a.session()),
+            pm_pubky::homeserver::ListBounds::OWNER,
+        )
         .await
-        .unwrap();
+        .unwrap()
+        .0;
     assert_eq!(heads[&id].versions.len(), 2);
 
     // Node B (fresh database, same user) pulls it.
@@ -217,9 +243,16 @@ async fn playlists_round_trip_through_the_private_folder() {
     let r = sync_a.sync(&a.library).await.unwrap();
     assert_eq!(r.deleted, 1, "{r:?}");
     assert!(homeserver
-        .v1_heads(&z32, v1::Root::Priv, v1::SOCIAL_NAMESPACE, Some(sync_a.session()))
+        .v1_heads(
+            &z32,
+            v1::Root::Priv,
+            v1::SOCIAL_NAMESPACE,
+            Some(sync_a.session()),
+            pm_pubky::homeserver::ListBounds::OWNER
+        )
         .await
         .unwrap()
+        .0
         .is_empty());
 
     // Private files: upload a WAV, list it, mirror it into node B's folder.
@@ -467,17 +500,31 @@ async fn old_private_objects_move_to_v1_once() {
     assert_eq!((r.pulled, r.pushed), (3, 3), "{r:?}");
 
     let social = homeserver
-        .v1_heads(&z32, v1::Root::Priv, v1::SOCIAL_NAMESPACE, Some(sync.session()))
+        .v1_heads(
+            &z32,
+            v1::Root::Priv,
+            v1::SOCIAL_NAMESPACE,
+            Some(sync.session()),
+            pm_pubky::homeserver::ListBounds::OWNER,
+        )
         .await
-        .unwrap();
+        .unwrap()
+        .0;
     assert_eq!(
         social[&pl_id].path,
         format!("/priv/social/v1/posts/{pl_id}/{pl_id}.json")
     );
     let music = homeserver
-        .v1_heads(&z32, v1::Root::Priv, "music", Some(sync.session()))
+        .v1_heads(
+            &z32,
+            v1::Root::Priv,
+            "music",
+            Some(sync.session()),
+            pm_pubky::homeserver::ListBounds::OWNER,
+        )
         .await
-        .unwrap();
+        .unwrap()
+        .0;
     let body: serde_json::Value = serde_json::from_slice(
         &homeserver
             .get_bytes(
@@ -498,7 +545,12 @@ async fn old_private_objects_move_to_v1_once() {
     // The old files are still there
     assert_eq!(
         homeserver
-            .read_music_posts(&z32, Visibility::Private, Some(sync.session()))
+            .read_music_posts(
+                &z32,
+                Visibility::Private,
+                Some(sync.session()),
+                pm_pubky::homeserver::ListBounds::OWNER
+            )
             .await
             .unwrap()
             .len(),
@@ -642,9 +694,16 @@ async fn a_shared_playlist_is_published_and_unpublished() {
         let sync = sync.clone();
         async move {
             homeserver
-                .v1_heads(&z32, root, v1::SOCIAL_NAMESPACE, Some(sync.session()))
+                .v1_heads(
+                    &z32,
+                    root,
+                    v1::SOCIAL_NAMESPACE,
+                    Some(sync.session()),
+                    pm_pubky::homeserver::ListBounds::OWNER,
+                )
                 .await
                 .unwrap()
+                .0
         }
     };
     let public = heads(v1::Root::Pub).await;
@@ -857,9 +916,16 @@ async fn a_long_playlist_is_a_collection_too() {
     let r = sync_a.sync(&a.library).await.unwrap();
     assert!(r.errors.is_empty(), "{:?}", r.errors);
     let heads = homeserver
-        .v1_heads(&z32, v1::Root::Priv, v1::SOCIAL_NAMESPACE, Some(sync_a.session()))
+        .v1_heads(
+            &z32,
+            v1::Root::Priv,
+            v1::SOCIAL_NAMESPACE,
+            Some(sync_a.session()),
+            pm_pubky::homeserver::ListBounds::OWNER,
+        )
         .await
-        .unwrap();
+        .unwrap()
+        .0;
     assert_eq!(heads[&id].versions.len(), 2, "{heads:?}");
 
     // Node B with the same account reads all 301 songs back
@@ -1700,9 +1766,16 @@ async fn a_collection_is_shared_found_duplicated_and_bookmarked() {
         let (z32, session) = (z32.clone(), sync_a.session().clone());
         async move {
             let session = (root == v1::Root::Priv).then_some(session);
-            hs.v1_heads(&z32, root, v1::SOCIAL_NAMESPACE, session.as_ref())
-                .await
-                .unwrap()
+            hs.v1_heads(
+                &z32,
+                root,
+                v1::SOCIAL_NAMESPACE,
+                session.as_ref(),
+                pm_pubky::homeserver::ListBounds::OWNER,
+            )
+            .await
+            .unwrap()
+            .0
         }
     };
     let (private, public) = (heads(v1::Root::Priv).await, heads(v1::Root::Pub).await);
@@ -1845,7 +1918,16 @@ async fn the_listen_history_lands_where_the_setting_says() {
         let (z32, session) = (z32.clone(), sync.session().clone());
         async move {
             let session = (root == v1::Root::Priv).then_some(session);
-            hs.v1_heads(&z32, root, "music", session.as_ref()).await.unwrap()
+            hs.v1_heads(
+                &z32,
+                root,
+                "music",
+                session.as_ref(),
+                pm_pubky::homeserver::ListBounds::OWNER,
+            )
+            .await
+            .unwrap()
+            .0
         }
     };
     let (_, r) = call(&app, "POST", "/v1/activity", Some(play.clone())).await;
@@ -2218,9 +2300,16 @@ async fn the_spec_migrator_and_the_node_converge() {
     assert_eq!(b["uris"], serde_json::json!([song]));
     // The migrated pubky.app post is there, and it is not the node's: no review, no collection
     let public = homeserver
-        .v1_heads(&z32, v1::Root::Pub, v1::SOCIAL_NAMESPACE, None)
+        .v1_heads(
+            &z32,
+            v1::Root::Pub,
+            v1::SOCIAL_NAMESPACE,
+            None,
+            pm_pubky::homeserver::ListBounds::OWNER,
+        )
         .await
-        .unwrap();
+        .unwrap()
+        .0;
     assert!(public.contains_key(&post_id), "the migrator wrote it");
     let (_, reviews) = call(&app, "GET", "/v1/reviews", None).await;
     assert!(reviews["reviews"].as_array().unwrap().is_empty(), "{reviews}");
@@ -2485,4 +2574,231 @@ async fn the_node_record_holds_no_token_and_an_old_one_is_retired() {
         sync.publish_node_for(&n).await.unwrap();
         assert_eq!(n.token().unwrap(), now);
     }
+}
+
+/// Someone's shared collections come from a bounded listing of their homeserver, newest first:
+/// a person with more public posts than the bound still shows their newest collections, one
+/// past the bound is "not among their newest", and within the bound every post is listed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_shared_view_lists_the_newest_posts_within_a_bound() {
+    if !enabled() {
+        eprintln!("PM_TESTNET not set; skipping");
+        return;
+    }
+    use pm_pubky::homeserver::ListBounds;
+    let pubky = Pubky::testnet().unwrap();
+    let homeserver = NodeHomeserver::from_pubky(pubky.clone());
+    let (session, z32, key) = identity(&pubky, "pm-api-bounded").await;
+    let dir = tempfile::tempdir().unwrap();
+    // One public playlist the node wrote, then 249 older copies of its public post at ids of
+    // their own: 250 posts, 3 pages
+    let a = node(dir.path(), "author");
+    let app_a = router(a.clone());
+    let sync = Arc::new(PubkySync::from_session(homeserver.clone(), session.clone()));
+    a.set_sync(Some(sync.clone()));
+    let (_, pl) = call(
+        &app_a,
+        "POST",
+        "/v1/playlists",
+        Some(serde_json::json!({
+            "name": "Newest mix",
+            "uris": ["https://musicbrainz.org/recording/833f00e1-781f-4edd-90e4-e52712618862"]
+        })),
+    )
+    .await;
+    let newest = pl["summary"]["id"].as_str().unwrap().to_string();
+    call(
+        &app_a,
+        "PUT",
+        &format!("/v1/playlists/{newest}/visibility"),
+        Some(serde_json::json!({"public": true})),
+    )
+    .await;
+    let r = sync.sync(&a.library).await.unwrap();
+    assert!(r.errors.is_empty(), "{:?}", r.errors);
+    let (heads, complete) = homeserver
+        .v1_heads(
+            &z32,
+            v1::Root::Pub,
+            v1::SOCIAL_NAMESPACE,
+            None,
+            ListBounds::SHARED,
+        )
+        .await
+        .unwrap();
+    assert!(complete);
+    let body: serde_json::Value = serde_json::from_slice(
+        &homeserver
+            .get_bytes(&z32, &heads[&newest].path, Visibility::Public, None)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let base = pm_pubky::ids::now_micros() - 600_000_000;
+    let mut ids: Vec<String> = (0..249).map(|i| v1::id_of(base + i * 1_000)).collect();
+    for id in &ids {
+        homeserver
+            .write_object(&session, &format!("/pub/social/v1/posts/{id}/{id}.json"), &body)
+            .await
+            .unwrap();
+    }
+    ids.push(newest.clone());
+    let oldest = ids[0].clone();
+
+    // Within the bound: every post is listed, 3 pages, newest first
+    let (heads, complete) = homeserver
+        .v1_heads(
+            &z32,
+            v1::Root::Pub,
+            v1::SOCIAL_NAMESPACE,
+            None,
+            ListBounds::SHARED,
+        )
+        .await
+        .unwrap();
+    assert_eq!(heads.len(), 250);
+    assert!(complete);
+    let b = node(dir.path(), "reader");
+    let app_b = router(b.clone());
+    let (st, list) = call(&app_b, "GET", &format!("/v1/shared/{key}/playlists"), None).await;
+    assert_eq!(st, StatusCode::OK, "{list}");
+    let listed: Vec<String> = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["id"].as_str().unwrap().to_string())
+        .collect();
+    let mut newest_50: Vec<String> = ids[200..].to_vec();
+    newest_50.reverse();
+    assert_eq!(listed, newest_50, "the 50 newest, newest first");
+
+    // A test-sized bound (120 entries, 2 pages) on the same homeserver: the newest 120 posts are
+    // listed, the view shows the newest collections, and an older post still opens by its id
+    // (only its own folder is listed for that)
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            pm_api::shared::SHARED_ENTRIES_FOR_TESTS.store(0, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+    let _reset = Reset;
+    pm_api::shared::SHARED_ENTRIES_FOR_TESTS.store(120, std::sync::atomic::Ordering::Relaxed);
+    let (heads, complete) = homeserver
+        .v1_heads(
+            &z32,
+            v1::Root::Pub,
+            v1::SOCIAL_NAMESPACE,
+            None,
+            ListBounds {
+                max_entries: 120,
+                max_pages: 2,
+                ..ListBounds::SHARED
+            },
+        )
+        .await
+        .unwrap();
+    assert!(!complete);
+    let got: Vec<&String> = heads.keys().collect();
+    let want: Vec<&String> = ids[130..].iter().collect();
+    assert_eq!(got, want, "the newest 120 posts");
+    let (st, list) = call(&app_b, "GET", &format!("/v1/shared/{key}/playlists"), None).await;
+    assert_eq!(st, StatusCode::OK, "{list}");
+    assert_eq!(list.as_array().unwrap().len(), 50);
+    assert_eq!(list[0]["id"], newest.as_str());
+    let (st, one) = call(
+        &app_b,
+        "GET",
+        &format!("/v1/shared/{key}/playlists/{newest}"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{one}");
+    let (st, one) = call(
+        &app_b,
+        "GET",
+        &format!("/v1/shared/{key}/playlists/{oldest}"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "a post past the bound opens by its id: {one}");
+    let (st, one) = call(
+        &app_b,
+        "GET",
+        &format!("/v1/shared/{key}/collections/{oldest}"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{one}");
+    // An id that is none, or a post that isn't there, is not found (and no account listing)
+    let (st, _) = call(
+        &app_b,
+        "GET",
+        &format!("/v1/shared/{key}/playlists/not-an-id"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+    let (st, _) = call(
+        &app_b,
+        "GET",
+        &format!("/v1/shared/{key}/playlists/0035WKVKQDHSM"),
+        None,
+    )
+    .await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+}
+
+/// The owner's private files are listed in the time the listing's pages take: the size of each
+/// file is read concurrently afterwards, outside the listing's deadline, so a large folder on a
+/// slow homeserver lists instead of ending in `Cut` every time.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_large_private_folder_lists_within_the_pages_deadline() {
+    if !enabled() {
+        eprintln!("PM_TESTNET not set; skipping");
+        return;
+    }
+    use pm_pubky::homeserver::ListBounds;
+    let pubky = Pubky::testnet().unwrap();
+    let homeserver = NodeHomeserver::from_pubky(pubky.clone());
+    let (session, _z32, _) = identity(&pubky, "pm-api-files").await;
+    let dir = pm_pubky::homeserver::PRIVATE_FILES_DIR;
+    // 2,000 small files (20 pages), 8 at a time
+    let puts = (0..2_000).map(|i| {
+        let session = &session;
+        async move {
+            session
+                .storage()
+                .put(format!("{dir}f{i:04}.flac").as_str(), vec![b'x'; 16 + i % 7])
+                .await
+                .unwrap();
+        }
+    });
+    futures_util::StreamExt::collect::<Vec<()>>(futures_util::StreamExt::buffer_unordered(
+        futures_util::stream::iter(puts),
+        8,
+    ))
+    .await;
+    // Twenty pages within one second: fine, since the 2,000 size reads are outside the deadline
+    let bounds = ListBounds {
+        deadline: std::time::Duration::from_secs(1),
+        ..ListBounds::OWNER
+    };
+    let t = std::time::Instant::now();
+    let files = homeserver
+        .list_private_files_within(&session, bounds)
+        .await
+        .unwrap();
+    assert_eq!(files.len(), 2_000);
+    assert!(
+        files
+            .iter()
+            .all(|f| f.size.is_some_and(|n| (16..23).contains(&n))),
+        "{:?}",
+        &files[..3]
+    );
+    eprintln!("listed 2,000 files with sizes in {:?}", t.elapsed());
+    assert_eq!(
+        homeserver.list_private_files(&session).await.unwrap().len(),
+        2_000
+    );
 }

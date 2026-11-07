@@ -194,8 +194,10 @@ async fn feeds_left_behind_are_deleted_on_the_homeserver() {
             "/priv/music/v1/feeds/",
             pm_pubky::Visibility::Private,
             Some(&session),
+            pm_pubky::homeserver::ListBounds::OWNER,
         )
         .await
+        .map(|l| l.entries)
         .unwrap_or_default();
     let (st, e) = call(
         &app,
@@ -211,8 +213,10 @@ async fn feeds_left_behind_are_deleted_on_the_homeserver() {
             "/priv/music/v1/feeds/",
             pm_pubky::Visibility::Private,
             Some(&session),
+            pm_pubky::homeserver::ListBounds::OWNER,
         )
         .await
+        .map(|l| l.entries)
         .unwrap_or_default();
     assert_eq!(after, before, "no feed left behind");
     assert!(gone(&s).is_empty());

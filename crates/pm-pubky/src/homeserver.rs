@@ -56,6 +56,8 @@ pub enum HomeserverError {
     TooLarge { max: usize },
     #[error("the homeserver took too long to answer")]
     Timeout,
+    #[error("the listing of {dir} did not end within its limits")]
+    Cut { dir: String },
 }
 
 impl HomeserverError {
@@ -157,6 +159,110 @@ pub struct RemoteTags {
 /// Default page size for listings; the homeserver may cap it.
 pub const LIST_LIMIT: u16 = 100;
 
+/// How far a listing goes. A page is one LIST request of [`LIST_LIMIT`] entries; the bounds
+/// hold whatever the homeserver answers, so a listing of someone else's homeserver ends in
+/// bounded time and memory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ListBounds {
+    /// At most this many entries are kept; the rest of the directory is left unlisted.
+    pub max_entries: usize,
+    /// At most this many pages are asked for.
+    pub max_pages: usize,
+    /// For the whole listing, every page together (each page also has [`OBJECT_TIMEOUT`]).
+    pub deadline: std::time::Duration,
+    /// Newest first: a cut listing of timestamp-id paths then keeps the newest entries.
+    pub newest_first: bool,
+    /// The listing must end within the bounds: a cut one is [`HomeserverError::Cut`] (a sync
+    /// must never take a partial listing for the whole; it would read the rest as deleted).
+    pub whole: bool,
+}
+
+impl ListBounds {
+    /// Another person's homeserver, read for a shared view: their newest posts (every version
+    /// of a post lies under its id, so 2,000 entries hold well over the 1,000 posts a view
+    /// reads), 25 pages, 20 s. A cut listing is still a listing, of the newest.
+    pub const SHARED: Self = Self {
+        max_entries: 2_000,
+        max_pages: 25,
+        deadline: std::time::Duration::from_secs(20),
+        newest_first: true,
+        whole: false,
+    };
+    /// The owner's own homeserver: complete, but finite (200,000 entries, 2,000 pages, 10 min).
+    /// A listing that reaches a limit is an error, never a partial listing taken as complete.
+    pub const OWNER: Self = Self {
+        max_entries: 200_000,
+        max_pages: 2_000,
+        deadline: std::time::Duration::from_secs(600),
+        newest_first: false,
+        whole: true,
+    };
+}
+
+/// What a bounded listing found: `complete` when the directory ended within the bounds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Listing<T = String> {
+    pub entries: Vec<T>,
+    pub complete: bool,
+}
+
+/// One page of a listing: each entry with the cursor that continues after it (the entry's
+/// pubky URL).
+pub(crate) type Page<T> = Vec<(T, String)>;
+
+/// A listing within `bounds`, page by page from `page(cursor)`, which answers `Ok(None)` for a
+/// directory that isn't there (it lists as empty). The listing stops, incomplete, at the entry
+/// cap (entries past it are dropped, from the page that crosses it too), the page cap, the
+/// deadline, or a cursor that doesn't move on (one seen before); with `bounds.whole` that is
+/// [`HomeserverError::Cut`] instead.
+pub(crate) async fn list_within<T, F, Fut>(
+    bounds: ListBounds,
+    dir: &str,
+    mut page: F,
+) -> Result<Listing<T>, HomeserverError>
+where
+    F: FnMut(Option<String>) -> Fut,
+    Fut: std::future::Future<Output = Result<Option<Page<T>>, HomeserverError>>,
+{
+    let started = std::time::Instant::now();
+    let mut entries = Vec::new();
+    let mut cursor: Option<String> = None;
+    let mut seen = std::collections::HashSet::new();
+    let mut complete = false;
+    for _ in 0..bounds.max_pages {
+        let left = bounds.deadline.saturating_sub(started.elapsed());
+        let Ok(got) = tokio::time::timeout(left, page(cursor.clone())).await else {
+            break;
+        };
+        let Some(got) = got? else {
+            complete = true;
+            break;
+        };
+        let n = got.len();
+        let next = got.last().map(|(_, c)| c.clone());
+        entries.extend(got.into_iter().map(|(e, _)| e));
+        if entries.len() > bounds.max_entries {
+            entries.truncate(bounds.max_entries);
+            break;
+        }
+        if n < LIST_LIMIT as usize {
+            complete = true;
+            break;
+        }
+        if entries.len() == bounds.max_entries {
+            break;
+        }
+        match next {
+            Some(c) if seen.insert(c.clone()) => cursor = Some(c),
+            _ => break,
+        }
+    }
+    if bounds.whole && !complete {
+        return Err(HomeserverError::Cut { dir: dir.to_string() });
+    }
+    Ok(Listing { entries, complete })
+}
+
 #[derive(Clone)]
 pub struct NodeHomeserver {
     pubky: Pubky,
@@ -202,59 +308,68 @@ impl NodeHomeserver {
         PublicKey::try_from(z32).map_err(|e| HomeserverError::Key(e.to_string()))
     }
 
-    /// List a user's posts directory: public through anyone's view, private
-    /// only with the owner's session. Follows the cursor to the end.
+    /// List a user's posts directory within `bounds`: public through anyone's view, private
+    /// only with the owner's session.
     async fn list_posts(
         &self,
         user: &PublicKey,
         visibility: Visibility,
         session: Option<&PubkySession>,
-    ) -> Result<Vec<String>, HomeserverError> {
-        self.list_dir(user, &visibility.posts_dir(), visibility, session)
+        bounds: ListBounds,
+    ) -> Result<Listing, HomeserverError> {
+        self.list_dir(user, &visibility.posts_dir(), visibility, session, bounds)
             .await
     }
 
-    /// Every entry path directly under `dir`, following the listing cursor.
-    /// A directory that does not exist yet (a fresh homeserver before the
-    /// first write) lists as empty rather than failing.
+    /// The entry paths directly under `dir`, within `bounds`. A directory that does not exist
+    /// yet (a fresh homeserver before the first write) lists as empty rather than failing.
     async fn list_dir(
         &self,
         user: &PublicKey,
         dir: &str,
         visibility: Visibility,
         session: Option<&PubkySession>,
-    ) -> Result<Vec<String>, HomeserverError> {
-        self.list_paths(user, dir, visibility, session, true).await
+        bounds: ListBounds,
+    ) -> Result<Listing, HomeserverError> {
+        self.list_paths(user, dir, visibility, session, true, bounds)
+            .await
     }
 
-    /// Every file path under `dir` at any depth (a v1 post tree is `{id}/{editId}.json`).
+    /// The file paths under `dir` at any depth (a v1 post tree is `{id}/{editId}.json`), within
+    /// `bounds`.
     pub async fn list_tree(
         &self,
         user_z32: &str,
         dir: &str,
         visibility: Visibility,
         session: Option<&PubkySession>,
-    ) -> Result<Vec<String>, HomeserverError> {
+        bounds: ListBounds,
+    ) -> Result<Listing, HomeserverError> {
         let user = Self::parse_key(user_z32)?;
-        self.list_paths(&user, dir, visibility, session, false).await
+        self.list_paths(&user, dir, visibility, session, false, bounds)
+            .await
     }
 
-    /// The newest version of every v1 post of a user under one root and namespace.
+    /// The newest version of every v1 post of a user under one root and namespace, within
+    /// `bounds`, and whether the listing was complete. Newest first ([`ListBounds::SHARED`]) a
+    /// cut listing holds the newest posts, each with its newest version first.
     pub async fn v1_heads(
         &self,
         user_z32: &str,
         root: crate::v1::Root,
         namespace: &str,
         session: Option<&PubkySession>,
-    ) -> Result<std::collections::BTreeMap<String, crate::v1::Head>, HomeserverError> {
+        bounds: ListBounds,
+    ) -> Result<(std::collections::BTreeMap<String, crate::v1::Head>, bool), HomeserverError> {
         let visibility = match root {
             crate::v1::Root::Pub => Visibility::Public,
             crate::v1::Root::Priv => Visibility::Private,
         };
         let dir = crate::v1::posts_dir(root, namespace);
-        Ok(crate::v1::heads(
-            self.list_tree(user_z32, &dir, visibility, session).await?,
-        ))
+        let listing = self
+            .list_tree(user_z32, &dir, visibility, session, bounds)
+            .await?;
+        Ok((crate::v1::heads(listing.entries), listing.complete))
     }
 
     /// The body at `path` of a user's storage.
@@ -295,8 +410,10 @@ impl NodeHomeserver {
                 &crate::v1::bookmarks_dir(),
                 Visibility::Private,
                 Some(session),
+                ListBounds::OWNER,
             )
             .await?
+            .entries
         {
             match known.get(file_name(&path)) {
                 Some((uri, created_at)) => out.push((path, uri.clone(), *created_at)),
@@ -342,49 +459,50 @@ impl NodeHomeserver {
         visibility: Visibility,
         session: Option<&PubkySession>,
         shallow: bool,
-    ) -> Result<Vec<String>, HomeserverError> {
-        let dir = dir.to_string();
-        let mut all = Vec::new();
-        let mut cursor: Option<String> = None;
-        loop {
+        bounds: ListBounds,
+    ) -> Result<Listing, HomeserverError> {
+        if visibility == Visibility::Private && session.is_none() {
+            return Err(HomeserverError::NeedsSession);
+        }
+        list_within(bounds, dir, |cursor| async move {
             let page = match (visibility, session) {
                 (Visibility::Public, _) => {
                     let public = self.pubky.public_storage();
                     let mut b = public
-                        .list((user, dir.as_str()))?
+                        .list((user, dir))?
                         .limit(LIST_LIMIT)
-                        .shallow(shallow);
+                        .shallow(shallow)
+                        .reverse(bounds.newest_first);
                     if let Some(c) = &cursor {
                         b = b.cursor(c);
                     }
-                    match within(OBJECT_TIMEOUT, async { Ok(b.send().await) }).await? {
-                        Ok(p) => p,
-                        Err(e) if is_not_found(&e) => break,
-                        Err(e) => return Err(e.into()),
-                    }
+                    within(OBJECT_TIMEOUT, async { Ok(b.send().await) }).await?
                 }
                 (Visibility::Private, Some(session)) => {
                     let storage = session.storage();
-                    let mut b = storage.list(dir.as_str())?.limit(LIST_LIMIT).shallow(shallow);
+                    let mut b = storage
+                        .list(dir)?
+                        .limit(LIST_LIMIT)
+                        .shallow(shallow)
+                        .reverse(bounds.newest_first);
                     if let Some(c) = &cursor {
                         b = b.cursor(c);
                     }
-                    match within(OBJECT_TIMEOUT, async { Ok(b.send().await) }).await? {
-                        Ok(p) => p,
-                        Err(e) if is_not_found(&e) => break,
-                        Err(e) => return Err(e.into()),
-                    }
+                    within(OBJECT_TIMEOUT, async { Ok(b.send().await) }).await?
                 }
                 (Visibility::Private, None) => return Err(HomeserverError::NeedsSession),
             };
-            let n = page.len();
-            cursor = page.last().map(|e| e.to_pubky_url());
-            all.extend(page.into_iter().map(|e| e.path.to_string()));
-            if n < LIST_LIMIT as usize {
-                break;
+            match page {
+                Ok(p) => Ok(Some(
+                    p.into_iter()
+                        .map(|e| (e.path.to_string(), e.to_pubky_url()))
+                        .collect(),
+                )),
+                Err(e) if is_not_found(&e) => Ok(None),
+                Err(e) => Err(e.into()),
             }
-        }
-        Ok(all)
+        })
+        .await
     }
 
     async fn fetch(
@@ -414,10 +532,11 @@ impl NodeHomeserver {
         user_z32: &str,
         visibility: Visibility,
         session: Option<&PubkySession>,
+        bounds: ListBounds,
     ) -> Result<Vec<(String, MusicPost)>, HomeserverError> {
         let user = Self::parse_key(user_z32)?;
         let mut out = Vec::new();
-        let paths = self.list_posts(&user, visibility, session).await?;
+        let paths = self.list_posts(&user, visibility, session, bounds).await?.entries;
         for (path, bytes) in self.fetch_many(&user, paths, visibility, session).await? {
             let id = path.rsplit('/').next().unwrap_or("").to_string();
             match MusicPost::try_from_bytes(&bytes, &id) {
@@ -440,7 +559,10 @@ impl NodeHomeserver {
         let user = Self::parse_key(user_z32)?;
         let dir = Bookmark::dir(visibility);
         let mut out = Vec::new();
-        let paths = self.list_dir(&user, &dir, visibility, session).await?;
+        let paths = self
+            .list_dir(&user, &dir, visibility, session, ListBounds::OWNER)
+            .await?
+            .entries;
         for (path, bytes) in self.fetch_many(&user, paths, visibility, session).await? {
             let id = path.rsplit('/').next().unwrap_or("").to_string();
             match serde_json::from_slice::<pubky_app_specs::PubkyAppBookmark>(&bytes) {
@@ -477,8 +599,15 @@ impl NodeHomeserver {
         let user = Self::parse_key(user_z32)?;
         let mut out = RemoteTags::default();
         let v1_paths: Vec<String> = self
-            .list_dir(&user, &crate::v1::tags_dir(), Visibility::Public, None)
+            .list_dir(
+                &user,
+                &crate::v1::tags_dir(),
+                Visibility::Public,
+                None,
+                ListBounds::OWNER,
+            )
             .await?
+            .entries
             .into_iter()
             .filter(|p| crate::v1::tag_id_of(p).is_some_and(|id| !known.contains(id)))
             .collect();
@@ -500,15 +629,29 @@ impl NodeHomeserver {
         let mut old = Vec::new();
         if app_dir {
             old.extend(
-                self.list_dir(&user, crate::schemas::TAG_DIR, Visibility::Public, None)
-                    .await
-                    .unwrap_or_default(),
+                self.list_dir(
+                    &user,
+                    crate::schemas::TAG_DIR,
+                    Visibility::Public,
+                    None,
+                    ListBounds::OWNER,
+                )
+                .await
+                .map(|l| l.entries)
+                .unwrap_or_default(),
             );
         }
         if legacy_dir {
             old.extend(
-                self.list_dir(&user, crate::schemas::LEGACY_TAG_DIR, Visibility::Public, None)
-                    .await?,
+                self.list_dir(
+                    &user,
+                    crate::schemas::LEGACY_TAG_DIR,
+                    Visibility::Public,
+                    None,
+                    ListBounds::OWNER,
+                )
+                .await?
+                .entries,
             );
         }
         old.retain(|p| !known.contains(file_name(p)));
@@ -528,11 +671,14 @@ impl NodeHomeserver {
         Ok(out)
     }
 
-    /// The public paths under `dir` of a user (`/pub/...`), e.g. to check
-    /// where tags live.
+    /// The public paths under `dir` of the owner (`/pub/...`), e.g. to check where tags live
+    /// ([`ListBounds::OWNER`]).
     pub async fn public_paths(&self, user_z32: &str, dir: &str) -> Result<Vec<String>, HomeserverError> {
         let user = Self::parse_key(user_z32)?;
-        self.list_dir(&user, dir, Visibility::Public, None).await
+        Ok(self
+            .list_dir(&user, dir, Visibility::Public, None, ListBounds::OWNER)
+            .await?
+            .entries)
     }
 
     /// Move the user's tags on external links out of `dir` (an older folder of `PubkyAppTag`s:
@@ -546,7 +692,10 @@ impl NodeHomeserver {
         dir: &str,
     ) -> Result<(usize, usize), HomeserverError> {
         let user = session.public_key();
-        let paths = self.list_dir(&user, dir, Visibility::Public, None).await?;
+        let paths = self
+            .list_dir(&user, dir, Visibility::Public, None, ListBounds::OWNER)
+            .await?
+            .entries;
         let (mut moved, mut kept) = (0, 0);
         // The legacy folder also holds other apps' tags: read 8 at a time (a node runs this once)
         for (path, bytes) in self.fetch_many(&user, paths, Visibility::Public, None).await? {
@@ -576,7 +725,7 @@ impl NodeHomeserver {
         user_z32: &str,
     ) -> Result<Vec<(String, Playlist)>, HomeserverError> {
         Ok(self
-            .read_music_posts(user_z32, Visibility::Public, None)
+            .read_music_posts(user_z32, Visibility::Public, None, ListBounds::SHARED)
             .await?
             .into_iter()
             .filter_map(|(p, post)| post.as_playlist().cloned().map(|pl| (p, pl)))
@@ -590,7 +739,7 @@ impl NodeHomeserver {
     ) -> Result<Vec<(String, Playlist)>, HomeserverError> {
         let me = session.public_key().to_string();
         Ok(self
-            .read_music_posts(&me, Visibility::Private, Some(session))
+            .read_music_posts(&me, Visibility::Private, Some(session), ListBounds::OWNER)
             .await?
             .into_iter()
             .filter_map(|(p, post)| post.as_playlist().cloned().map(|pl| (p, pl)))
@@ -599,7 +748,7 @@ impl NodeHomeserver {
 
     pub async fn read_reviews_of(&self, user_z32: &str) -> Result<Vec<(String, Review)>, HomeserverError> {
         Ok(self
-            .read_music_posts(user_z32, Visibility::Public, None)
+            .read_music_posts(user_z32, Visibility::Public, None, ListBounds::SHARED)
             .await?
             .into_iter()
             .filter_map(|(p, post)| post.as_review().cloned().map(|r| (p, r)))
@@ -608,7 +757,7 @@ impl NodeHomeserver {
 
     pub async fn read_activity_of(&self, user_z32: &str) -> Result<Vec<(String, Activity)>, HomeserverError> {
         Ok(self
-            .read_music_posts(user_z32, Visibility::Public, None)
+            .read_music_posts(user_z32, Visibility::Public, None, ListBounds::SHARED)
             .await?
             .into_iter()
             .filter_map(|(p, post)| post.as_activity().cloned().map(|a| (p, a)))
@@ -719,42 +868,59 @@ impl NodeHomeserver {
         }
     }
 
-    /// Every file under the private files folder, with size when the
-    /// homeserver reports it.
+    /// Every file under the private files folder, with size when the homeserver reports it
+    /// ([`ListBounds::OWNER`]: complete, or an error).
     pub async fn list_private_files(
         &self,
         session: &PubkySession,
     ) -> Result<Vec<RemoteFile>, HomeserverError> {
+        self.list_private_files_within(session, ListBounds::OWNER).await
+    }
+
+    /// [`NodeHomeserver::list_private_files`] within `bounds`, which cover the listing's pages;
+    /// the size of each file is then read [`FETCH_AT_ONCE`] at a time, each read within
+    /// [`OBJECT_TIMEOUT`] (a size that can't be read is `None`), so a large folder on a slow
+    /// homeserver lists in the time its pages take, not one round trip per file.
+    pub async fn list_private_files_within(
+        &self,
+        session: &PubkySession,
+        bounds: ListBounds,
+    ) -> Result<Vec<RemoteFile>, HomeserverError> {
+        use futures_util::StreamExt;
         let storage = session.storage();
-        let mut out = Vec::new();
-        let mut cursor: Option<String> = None;
-        loop {
-            let mut b = storage.list(PRIVATE_FILES_DIR)?.limit(LIST_LIMIT).shallow(true);
-            if let Some(c) = &cursor {
-                b = b.cursor(c);
+        let listing = list_within(bounds, PRIVATE_FILES_DIR, |cursor| {
+            let storage = &storage;
+            async move {
+                let mut b = storage.list(PRIVATE_FILES_DIR)?.limit(LIST_LIMIT).shallow(true);
+                if let Some(c) = &cursor {
+                    b = b.cursor(c);
+                }
+                match within(OBJECT_TIMEOUT, async { Ok(b.send().await) }).await? {
+                    Ok(p) => Ok(Some(
+                        p.into_iter()
+                            .map(|e| (e.path.to_string(), e.to_pubky_url()))
+                            .collect(),
+                    )),
+                    Err(e) if is_not_found(&e) => Ok(None),
+                    Err(e) => Err(e.into()),
+                }
             }
-            let page = match b.send().await {
-                Ok(p) => p,
-                Err(e) if is_not_found(&e) => break,
-                Err(e) => return Err(e.into()),
-            };
-            let n = page.len();
-            cursor = page.last().map(|e| e.to_pubky_url());
-            for e in page {
-                let path = e.path.to_string();
-                let size = storage
-                    .stats(path.as_str())
+        })
+        .await?;
+        let storage = &storage;
+        Ok(futures_util::stream::iter(listing.entries)
+            .map(|path| async move {
+                let size = within(OBJECT_TIMEOUT, async { Ok(storage.stats(path.as_str()).await) })
                     .await
                     .ok()
+                    .and_then(|r| r.ok())
                     .flatten()
                     .and_then(|s| s.content_length);
-                out.push(RemoteFile { path, size });
-            }
-            if n < LIST_LIMIT as usize {
-                break;
-            }
-        }
-        Ok(out)
+                RemoteFile { path, size }
+            })
+            .buffered(FETCH_AT_ONCE)
+            .collect()
+            .await)
     }
 
     /// The size of one private file, as the homeserver reports it (`None`: not there; `Some(None)`:
@@ -1173,6 +1339,160 @@ mod full_tests {
         assert!(!is_full(&server(404)));
         assert!(!is_full(&server(413)));
         assert!(!is_full(&HomeserverError::Transport("reset".into())));
+    }
+}
+
+#[cfg(test)]
+mod listing_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn bounds(max_entries: usize, max_pages: usize, deadline_ms: u64) -> ListBounds {
+        ListBounds {
+            max_entries,
+            max_pages,
+            deadline: std::time::Duration::from_millis(deadline_ms),
+            newest_first: false,
+            whole: false,
+        }
+    }
+
+    /// A directory of `total` entries as a homeserver pages it (`LIST_LIMIT` a page, the cursor
+    /// the last entry's URL), counting the pages asked for; `stall_from` makes that page and
+    /// the later ones never answer.
+    async fn list(
+        total: usize,
+        stall_from: usize,
+        b: ListBounds,
+        asked: &AtomicUsize,
+    ) -> Result<Listing, HomeserverError> {
+        list_within(b, "/pub/x/", |cursor| async move {
+            if asked.fetch_add(1, Ordering::SeqCst) + 1 >= stall_from {
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            }
+            let from = cursor.map_or(0, |c| c.rsplit('/').next().unwrap().parse::<usize>().unwrap() + 1);
+            let to = total.min(from + LIST_LIMIT as usize);
+            Ok(Some(
+                (from..to)
+                    .map(|i| (format!("/pub/x/{i:07}"), format!("pubky://u/pub/x/{i}")))
+                    .collect(),
+            ))
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn a_directory_within_the_bounds_lists_whole() {
+        let asked = AtomicUsize::new(0);
+        let l = list(250, usize::MAX, bounds(10_000, 100, 5_000), &asked)
+            .await
+            .unwrap();
+        assert_eq!((l.entries.len(), l.complete), (250, true));
+        assert_eq!(asked.load(Ordering::SeqCst), 3);
+        assert_eq!(l.entries[249], "/pub/x/0000249");
+        // Exactly full pages end with one more, empty page
+        let asked = AtomicUsize::new(0);
+        let l = list(200, usize::MAX, bounds(10_000, 100, 5_000), &asked)
+            .await
+            .unwrap();
+        assert_eq!((l.entries.len(), l.complete), (200, true));
+        assert_eq!(asked.load(Ordering::SeqCst), 3);
+        // A directory that isn't there lists as empty, complete
+        let l = list_within(bounds(10, 10, 1_000), "/pub/none/", |_| async {
+            Ok(None::<Page<String>>)
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            l,
+            Listing {
+                entries: vec![],
+                complete: true
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn an_endless_directory_stops_at_the_page_cap() {
+        let asked = AtomicUsize::new(0);
+        let l = list(usize::MAX / 2, usize::MAX, bounds(1_000_000, 5, 5_000), &asked)
+            .await
+            .unwrap();
+        assert_eq!((l.entries.len(), l.complete), (500, false));
+        assert_eq!(asked.load(Ordering::SeqCst), 5);
+    }
+
+    #[tokio::test]
+    async fn an_endless_directory_stops_at_the_entry_cap() {
+        // The page that crosses the cap is cut
+        let asked = AtomicUsize::new(0);
+        let l = list(usize::MAX / 2, usize::MAX, bounds(250, 100, 5_000), &asked)
+            .await
+            .unwrap();
+        assert_eq!((l.entries.len(), l.complete), (250, false));
+        assert_eq!(asked.load(Ordering::SeqCst), 3);
+        // A cap on a page edge asks for no page past it, and is not taken as the end
+        let asked = AtomicUsize::new(0);
+        let l = list(usize::MAX / 2, usize::MAX, bounds(200, 100, 5_000), &asked)
+            .await
+            .unwrap();
+        assert_eq!((l.entries.len(), l.complete), (200, false));
+        assert_eq!(asked.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn a_cursor_that_doesnt_move_on_stops_the_listing() {
+        let asked = AtomicUsize::new(0);
+        let same_page = |_: Option<String>| async {
+            asked.fetch_add(1, Ordering::SeqCst);
+            Ok(Some(
+                (0..LIST_LIMIT as usize)
+                    .map(|i| (format!("/pub/x/{i}"), "pubky://u/pub/x/99".to_string()))
+                    .collect::<Page<String>>(),
+            ))
+        };
+        let l = list_within(bounds(10_000, 100, 5_000), "/pub/x/", same_page)
+            .await
+            .unwrap();
+        assert!(!l.complete);
+        assert_eq!(
+            asked.load(Ordering::SeqCst),
+            2,
+            "the page after the repeated cursor is never asked for"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_homeserver_that_stalls_hits_the_deadline() {
+        let asked = AtomicUsize::new(0);
+        let started = std::time::Instant::now();
+        let l = list(usize::MAX / 2, 3, bounds(10_000, 100, 400), &asked)
+            .await
+            .unwrap();
+        assert_eq!((l.entries.len(), l.complete), (200, false));
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(asked.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn a_listing_that_must_be_whole_is_an_error_when_cut() {
+        let asked = AtomicUsize::new(0);
+        let whole = ListBounds {
+            whole: true,
+            ..bounds(150, 100, 5_000)
+        };
+        let e = list(usize::MAX / 2, usize::MAX, whole, &asked).await.unwrap_err();
+        assert!(
+            matches!(&e, HomeserverError::Cut { dir } if dir == "/pub/x/"),
+            "{e}"
+        );
+        let asked = AtomicUsize::new(0);
+        let l = list(120, usize::MAX, whole, &asked).await.unwrap();
+        assert_eq!((l.entries.len(), l.complete), (120, true));
     }
 }
 
