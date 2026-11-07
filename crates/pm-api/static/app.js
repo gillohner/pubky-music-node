@@ -161,7 +161,7 @@
   // Art for a queue item: a streaming source's image, else the library album cover; a badge for
   // where it plays from (`svc`; null for none), quiet when the art sits in a button.
   const itemArt = (it, cls = '', svc = null, quiet = false) => {
-    if (it && it.image) { const h = hue(it.title || ''); return `<div class="art ${cls}" style="background:hsl(${h} 30% 22%)"><img loading="lazy" alt="" src="${esc(it.image)}" data-err="remove">${coverBadge(svc, quiet)}</div>`; }
+    if (it && it.image) { const h = hue(it.title || ''); return `<div class="art ${cls}" style="background:hsl(${h} 30% 22%)"><img loading="lazy" alt="" src="${esc(imgSrc(it.image))}" data-err="remove">${coverBadge(svc, quiet)}</div>`; }
     return art(albumIdOf(it), (it && (it.title || it.uri)) || '', cls, svc, quiet);
   };
   // `action` ({ label, run }): a button in the toast (Undo); the toast stays longer then. Returns that button
@@ -2129,7 +2129,7 @@
     if (!hasMediaSession) return;
     try {
       const albumId = albumIdOf(it);
-      navigator.mediaSession.metadata = new MediaMetadata({ title: it.title || it.uri, artist: it.artist || '', album: it.album || '', artwork: it.image ? [{ src: it.image, sizes: '640x640' }] : albumId ? [{ src: `${location.origin}/v1/library/albums/${albumId}/cover${tokenQ()}`, sizes: '512x512' }] : [] });
+      navigator.mediaSession.metadata = new MediaMetadata({ title: it.title || it.uri, artist: it.artist || '', album: it.album || '', artwork: it.image ? [{ src: imgSrc(it.image), sizes: '640x640' }] : albumId ? [{ src: `${location.origin}/v1/library/albums/${albumId}/cover${tokenQ()}`, sizes: '512x512' }] : [] });
     } catch { /* metadata is a nicety */ }
   };
   if (hasMediaSession) {
@@ -2472,7 +2472,7 @@
           toast(`${countOf(queue.length - rest.length, 'YouTube items')} left out: YouTube plays only ${hereOnly()}`);
           queue = rest;
         }
-        const items = queue.map((it) => ({ uri: it.uri, title: it.title || null, artist: it.artist || null, album: it.album || null, duration_ms: it.duration_ms || null, image: it.image || null, limit: it.limit || null }));
+        const items = queue.map((it) => ({ uri: nodeRel(it.uri), title: it.title || null, artist: it.artist || null, album: it.album || null, duration_ms: it.duration_ms || null, image: nodeRel(it.image || null), limit: it.limit || null }));
         if (!items.length) throw new Error('Nothing to move: the queue is empty');
         const index = cur ? queue.indexOf(cur) : -1;
         const transport = !cur ? 'stopped' : audio.paused ? (audio.currentTime > 0 && !audio.ended ? 'paused' : 'stopped') : 'playing';
@@ -4622,8 +4622,42 @@
   // Play through the node's connected services: the library, else the best service link
   // (`GET /v1/discover/play`); nothing connected offers Sources and a preview.
   // ---- one row, one tile, one menu (docs/ux/08-item-page.md) ----
-  const imgSrc = (u) => (u && u.startsWith('/v1/') ? u + tokenQ() : u);
-  const qOf = (t, fallback = {}) => ({ uri: t.track_id != null ? 'track:' + t.track_id : t.uri, track_id: t.track_id, artists: t.artists, title: t.title, artist: t.artist || fallback.artist || '', album: t.album || fallback.album || '', duration_ms: t.duration_ms || null, image: imgSrc(t.image || fallback.image) || null });
+  // A node link with this browser's sign-in, for the places that load it (an <img>, MediaSession
+  // artwork). Never in data sent to the node: a queue item's image is kept as the page gave it.
+  // A node link is a relative `/v1/` link or an absolute one on this page's own origin (the node
+  // drops the sign-in from both); any other site's link is left alone. A link saved before (a
+  // browser queue in localStorage) may already hold a sign-in: every `token` key, read as the
+  // node reads it (decoded, any case), goes first, so there is one, joined to the link's query.
+  const isTokenKey = (p) => { try { return decodeURIComponent(p.split('=')[0].replace(/\+/g, ' ')).toLowerCase() === 'token'; } catch { return false; } };
+  const imgSrc = (u) => {
+    if (!u) return u;
+    let origin = '';
+    if (!u.startsWith('/v1/')) {
+      if (!/^https?:\/\//i.test(u)) return u;
+      let x; try { x = new URL(u); } catch { return u; }
+      if (x.origin !== location.origin || !x.pathname.startsWith('/v1/')) return u;
+      origin = x.origin; u = x.pathname + x.search + x.hash;
+    }
+    const [head, hash = ''] = u.split('#');
+    const [path, query = ''] = head.split('?');
+    const keep = query.split('&').filter((p) => p && !isTokenKey(p));
+    if (state.token) keep.push('token=' + encodeURIComponent(state.token));
+    return origin + path + (keep.length ? '?' + keep.join('&') : '') + (hash ? '#' + hash : '');
+  };
+  // A link to this node, as sent to a zone: one under this page's own origin made relative, so it
+  // names the node as the node names itself whatever name the page was opened under (localhost, a
+  // tunnel name), and without any sign-in a saved copy still carries (the node drops those too;
+  // a sign-in is never data)
+  const nodeRel = (u) => {
+    if (typeof u !== 'string') return u;
+    if (u.startsWith(location.origin + '/v1/')) u = u.slice(location.origin.length);
+    if (!u.startsWith('/v1/')) return u;
+    const [head, hash = ''] = u.split('#');
+    const [path, query = ''] = head.split('?');
+    const keep = query.split('&').filter((p) => p && !isTokenKey(p));
+    return path + (keep.length ? '?' + keep.join('&') : '') + (hash ? '#' + hash : '');
+  };
+  const qOf = (t, fallback = {}) => ({ uri: t.track_id != null ? 'track:' + t.track_id : nodeRel(t.uri), track_id: t.track_id, artists: t.artists, title: t.title, artist: t.artist || fallback.artist || '', album: t.album || fallback.album || '', duration_ms: t.duration_ms || null, image: nodeRel(t.image || fallback.image || null) });
   // Library tracks by id, in order and with duplicates: the ones a page already loaded come
   // from the track cache, the rest are read four at a time (not one request per song at once).
   const readTracks = async (ids) => {
@@ -5288,6 +5322,7 @@
         <div class="toolbar"><input class="input" id="setupfolder" placeholder="${suggestions.length ? 'Or another folder' : 'The folder with your music, e.g. /home/you/Music'}" aria-label="Music folder on this computer"><button class="btn primary" id="setupadd">Add folder</button></div>
         <p class="muted small">No music files on this computer? <a class="lnk" href="/sources" data-setup-sources>Play from ${(state.sources || []).some((x) => x.id === 'jamendo' && x.status === 'ready') ? 'Internet Archive, Audius or Jamendo' : 'Internet Archive or Audius'}</a>, no account needed.</p>`;
     const text = {
+      token: () => ['Make a new token for the node', 'The node’s token was in a saved queue’s links, where everyone who could use that zone could read it. Make a new one in Settings › Access: every app then needs the new token, and your browsers log in again.', '<a class="btn sm primary" href="/settings" data-setup-settings>Open Settings</a>'],
       music: () => ['Add your music', has.music ? `${countOf(n(info.library.tracks), 'tracks')}${info.library.albums ? ` · ${countOf(n(info.library.albums), 'albums')}` : ''}. More folders: Your library › Node library.` : 'Pick the folder with your music files. The node reads it and keeps watching it for new files; your files stay as they are.', musicBody],
       play: () => ['Play something', tracks ? `It plays ${hereIn()}. To play on speakers or another device, use the zone button at the bottom right.` : musicTodo ? 'Once your music is in.' : `Search for a song, or browse your services on Sources. It plays ${hereIn()}, or on a speaker from the zone button.`, tracks ? `<button class="btn sm primary" id="setupplay">${icon('play')} Shuffle my music</button>` : musicTodo ? '' : '<button class="btn sm" data-setup-sources>Open Sources</button>'],
       contact: () => ['See what people on Pubky play', has.contact ? 'Trending songs, tags and friends\' picks show on Home.' : 'The music index (Pinakes), MusicBrainz and Wikipedia ask each app for a way to reach whoever runs it: an email or a website. It goes only to them.', '<div class="toolbar"><input class="input" id="setupcontact" placeholder="you@example.org or https://your.site" aria-label="Your email or website"><button class="btn" id="setupcontactsave">Save</button></div>'],
@@ -7234,7 +7269,7 @@
           const about = group('This node', row('Name', '', esc(info.name)) + row('Version', '', esc(info.version)) + row('Library', '', `${countOf(info.library.tracks, 'tracks')} · ${countOf(info.library.albums, 'albums')} · ${countOf(info.library.artists, 'artists')}`) + row('Files', '', `${info.library.files}${info.library.missing_files ? ` · <span class="warn-text">${info.library.missing_files} missing</span>` : ''}`))
             + group('Access', (state.token ? row(appPlatform() ? 'This app' : 'This browser', `Log out ends ${appPlatform() ? 'this app' : 'this browser'}’s session and brings back the Log in screen. The node’s token for apps stays as it is.`, `<button class="btn ghost" id="logout">${icon('logout')} Log out</button>`) : '')
               + (ns.token_replaceable
-                ? block('The node’s token', 'A new token for the node: the old one stops working at once, so every app and Subsonic app needs the new one, and every browser of yours is logged out (log in again with Pubky Ring). People you invited stay logged in.', '<div class="actions"><button class="btn" id="tokennew">Make a new token</button></div><div id="tokenout" aria-live="polite"></div>')
+                ? block('The node’s token', 'A new token for the node: the old one stops working at once, so every app and Subsonic app needs the new one, and every browser of yours is logged out (log in again with Pubky Ring). People you invited stay logged in.', `${ns.api_token_exposed_at ? `<div class="notice warn" role="alert">This token was in a saved queue’s links, where everyone who could use that zone could read it (noticed ${esc(new Date(ns.api_token_exposed_at * 1000).toLocaleString())}). Make a new one.</div>` : ''}<div class="actions"><button class="btn" id="tokennew">Make a new token</button></div><div id="tokenout" aria-live="polite"></div>`)
                 : row('The node’s token', 'Set in the node’s config (<code>[api] token</code> in node.toml, <code>PM_TOKEN</code> in Docker): it is changed there.', `<a class="btn ghost sm" href="${TOKEN_GUIDE}" target="_blank" rel="noopener">${icon('external')} How to change it</a>`)))
             + group('For developers', row('Developer outputs', 'Show the Null output (it plays to nowhere, for testing) in the zone lists.', `<label><input type="checkbox" id="devouts" ${ns.dev_outputs ? 'checked' : ''}> Show</label>`))
             + group('Keyboard', block('', '', '<p class="muted small">Shortcuts: <kbd>/</kbd> search · <kbd>Space</kbd> play/pause · <kbd>←</kbd> <kbd>→</kbd> previous/next · <kbd>N</kbd> now playing · <kbd>Esc</kbd> close</p>'));

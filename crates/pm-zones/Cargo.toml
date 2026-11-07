@@ -9,6 +9,7 @@ license.workspace = true
 [dependencies]
 pm-model = { workspace = true }
 async-trait = { workspace = true }
+form_urlencoded = "1.2"
 hound = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }

@@ -24,7 +24,8 @@ pub(crate) const HIDDEN_KEY: &str = "ui.first_steps_hidden";
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Step {
-    /// `music`, `play`, `contact`, `speakers` or `pubky`.
+    /// `token` (the node's API token was exposed: make a new one), `music`, `play`, `contact`,
+    /// `speakers` or `pubky`.
     pub id: &'static str,
     pub done: bool,
     /// The card goes away without it.
@@ -77,6 +78,12 @@ pub(crate) fn first_steps(s: &NodeState, role: Role) -> Result<FirstSteps, ApiEr
     let mut steps = Vec::new();
     let owner = role == Role::Owner;
     if owner {
+        // The API token was readable by everyone who could use a zone: first, until it is new
+        let exposed =
+            crate::accounts::api_token_exposed_at(&s.library.lock().expect("library poisoned")).is_some();
+        if exposed {
+            steps.push(step("token", false, false));
+        }
         // A folder counts once it has something in it: Docker's `/music` is there even when
         // nothing is mounted on it
         let has_place = s.all_folders().iter().any(|p| has_entries(p))

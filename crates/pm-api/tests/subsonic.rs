@@ -68,6 +68,20 @@ async fn get(
     (status, headers, bytes)
 }
 
+/// A `/v1` read as the owner (the API token in the header; `?token=` opens only media links).
+async fn owner_get(app: &axum::Router, uri: &str) -> (StatusCode, axum::http::HeaderMap, Vec<u8>) {
+    let req = Request::builder()
+        .uri(uri)
+        .header("authorization", "Bearer pw")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    let headers = resp.headers().clone();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    (status, headers, bytes.to_vec())
+}
+
 async fn call(app: &axum::Router, uri: &str) -> serde_json::Value {
     let (st, _, bytes) = get(app, uri, None).await;
     assert_eq!(st, StatusCode::OK, "{uri}");
@@ -322,7 +336,7 @@ async fn browse_stream_and_playlists_like_a_subsonic_client() {
         .collect();
     assert_eq!(titles, ["Get Lucky", "Instant Crush"], "{r}");
     // The homeserver never sees it: the synced item list has only the tagged song
-    let (_, _, body) = get(&app, &format!("/v1/playlists/{}?token=pw", &pl_id[3..]), None).await;
+    let (_, _, body) = owner_get(&app, &format!("/v1/playlists/{}", &pl_id[3..])).await;
     let d: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(d["playlist"]["items"].as_array().unwrap().len(), 1, "{d}");
     assert_eq!(d["local_tracks"][0]["title"], "Instant Crush");
@@ -353,11 +367,11 @@ async fn browse_stream_and_playlists_like_a_subsonic_client() {
         .unwrap();
     let r = call(&app, &format!("/rest/getPlaylist?id={pl_id}&{auth}")).await;
     assert_eq!(r["playlist"]["entry"].as_array().unwrap().len(), 2, "{r}");
-    let (_, _, body) = get(&app, &format!("/v1/playlists/{}?token=pw", &pl_id[3..]), None).await;
+    let (_, _, body) = owner_get(&app, &format!("/v1/playlists/{}", &pl_id[3..])).await;
     let d: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(d["playlist"]["items"].as_array().unwrap().len(), 2, "{d}");
     assert!(d.get("local_tracks").is_none(), "{d}");
-    let (_, _, body) = get(&app, "/v1/bookmarks?token=pw", None).await;
+    let (_, _, body) = owner_get(&app, "/v1/bookmarks").await;
     let f: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert!(
         f["uris"]
@@ -389,7 +403,7 @@ async fn browse_stream_and_playlists_like_a_subsonic_client() {
     let r = call(&app, &format!("/rest/getPlaylist?id={pl_id}&{auth}")).await;
     assert_eq!(r["playlist"]["entry"].as_array().unwrap().len(), 1);
     // The same playlist is visible on /v1 (one store underneath).
-    let (st, _, body) = get(&app, "/v1/playlists?token=pw", None).await;
+    let (st, _, body) = owner_get(&app, "/v1/playlists").await;
     assert_eq!(st, StatusCode::OK);
     let v1: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(v1[0]["name"], "Faves");
@@ -409,7 +423,7 @@ async fn browse_stream_and_playlists_like_a_subsonic_client() {
         &format!("/rest/scrobble?id={instant_crush}&submission=true&{auth}"),
     )
     .await;
-    let (st, _, body) = get(&app, "/v1/activity?token=pw", None).await;
+    let (st, _, body) = owner_get(&app, "/v1/activity").await;
     assert_eq!(st, StatusCode::OK);
     let acts: serde_json::Value = serde_json::from_slice(&body).unwrap();
     // Both are identified by now (Instant Crush above); an untagged one is still ignored
@@ -417,7 +431,7 @@ async fn browse_stream_and_playlists_like_a_subsonic_client() {
     let r = call(&app, &format!("/rest/search3?query=Blue%20Monday&{auth}")).await;
     let blue = r["searchResult3"]["song"][0]["id"].as_str().unwrap().to_string();
     call(&app, &format!("/rest/scrobble?id={blue}&submission=true&{auth}")).await;
-    let (_, _, body) = get(&app, "/v1/activity?token=pw", None).await;
+    let (_, _, body) = owner_get(&app, "/v1/activity").await;
     let acts: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(acts.as_array().unwrap().len(), 2, "{acts}");
     assert!(acts

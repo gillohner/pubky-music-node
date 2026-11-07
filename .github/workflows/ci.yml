@@ -485,6 +485,7 @@ jobs:
           node $GITHUB_WORKSPACE/tools/ui-tablet.js $GITHUB_WORKSPACE /tmp/pm/tablet-shots
           node $GITHUB_WORKSPACE/tools/ui-busy.js $GITHUB_WORKSPACE /tmp/pm/busy-shots
           node $GITHUB_WORKSPACE/tools/ui-source-policy.js $GITHUB_WORKSPACE /tmp/pm/source-policy-shots
+          node $GITHUB_WORKSPACE/tools/ui-queue-covers.js $GITHUB_WORKSPACE /tmp/pm/queue-covers-shots
           node $GITHUB_WORKSPACE/tools/ui-versions.js $GITHUB_WORKSPACE /tmp/pm/versions-shots
           node $GITHUB_WORKSPACE/tools/ui-similar-tiles.js $GITHUB_WORKSPACE /tmp/pm/similar-shots
           node $GITHUB_WORKSPACE/tools/ui-connect-ring.js $GITHUB_WORKSPACE /tmp/pm/connect-ring-shots

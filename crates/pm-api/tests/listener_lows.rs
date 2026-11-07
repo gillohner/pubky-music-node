@@ -79,8 +79,11 @@ async fn listeners_get_no_owner_paths_and_sign_out_by_query_token() {
     let (_, body) = call(&app, Some(OWNER), "GET", "/v1/info").await;
     assert!(body.contains("Private Music"), "{body}");
 
-    // Signed in with ?token= (the WebSocket way), signed out the same way
-    let (st, body) = call(&app, None, "DELETE", &format!("/v1/me/token?token={listener}")).await;
+    // `?token=` opens only what a browser loads by address (the WebSocket, media): not a sign-out,
+    // which takes the header
+    let (st, _) = call(&app, None, "DELETE", &format!("/v1/me/token?token={listener}")).await;
+    assert_eq!(st, StatusCode::UNAUTHORIZED);
+    let (st, body) = call(&app, Some(&listener), "DELETE", "/v1/me/token").await;
     assert_eq!(st, StatusCode::OK, "{body}");
     let (st, _) = call(&app, Some(&listener), "GET", "/v1/info").await;
     assert_eq!(st, StatusCode::UNAUTHORIZED, "the token no longer works");

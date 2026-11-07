@@ -1000,7 +1000,11 @@ async fn auth(
     next: middleware::Next,
 ) -> Response {
     // The owner's API token, or a listener's personal one (accounts.rs)
-    let token = bearer(&headers, &query);
+    let route = req
+        .extensions()
+        .get::<axum::extract::MatchedPath>()
+        .map(|m| m.as_str().to_string());
+    let token = bearer_for(&headers, &query, req.method(), route.as_deref());
     let Some(caller) = accounts::caller(&state, token.as_deref()) else {
         // An owner's browser session while the node has no identity loaded: not refused for good
         // (the page keeps it), it works again once the identity is. Log out still ends it, so the
@@ -1055,10 +1059,58 @@ async fn auth(
         presence::played(&state, &zone, &caller);
     }
     if not_owner {
-        accounts::listener_response(resp, &accounts::library_roots(&state)).await
+        let known = accounts::KnownTokens::lazy(&state);
+        accounts::listener_response(
+            resp,
+            &accounts::library_roots(&state),
+            &state.node_origins(),
+            &|t| known.has(t),
+        )
+        .await
     } else {
         resp
     }
+}
+
+/// Where `?token=` stands in for the header: what a browser loads by address and can't set
+/// headers on. Decided on the matched route (`/library/albums/{id}/cover`), never on the path a
+/// request names, so a parameter called `cover` or `stream` opens nothing: the event stream, and
+/// on GET/HEAD a route whose last fixed segment (before its parameters) is a song's file or
+/// download, a cover, a picture, an avatar or a stream. Everything else takes the header only,
+/// so a token in a link that is shared, saved or logged opens nothing else.
+fn token_in_query_ok(method: &axum::http::Method, route: Option<&str>) -> bool {
+    let Some(route) = route else { return false };
+    let route = route.strip_prefix("/v1").unwrap_or(route);
+    if route == "/events" {
+        return true;
+    }
+    let last_fixed = route.split('/').rev().find(|seg| !seg.starts_with('{'));
+    matches!(*method, axum::http::Method::GET | axum::http::Method::HEAD)
+        && matches!(
+            last_fixed,
+            Some("file" | "download" | "cover" | "image" | "avatar" | "stream")
+        )
+}
+
+/// The request's bearer token, or `?token=` on the routes a browser loads by address
+/// ([`token_in_query_ok`]).
+fn bearer_for(
+    headers: &HeaderMap,
+    query: &std::collections::HashMap<String, String>,
+    method: &axum::http::Method,
+    route: Option<&str>,
+) -> Option<String> {
+    headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(str::to_string)
+        .or_else(|| {
+            query
+                .get("token")
+                .cloned()
+                .filter(|_| token_in_query_ok(method, route))
+        })
 }
 
 /// The request's bearer token (or `?token=`, for WebSocket upgrades).
@@ -1908,10 +1960,41 @@ async fn queue(State(s): State<Arc<NodeState>>, Path(id): Path<String>) -> ApiRe
     Ok(Json(zone_of(&s, &id)?.queue()))
 }
 
+/// The node's addresses for a request's links: its own, and the one the request came to (the
+/// Host it named, under the scheme a proxy says): a cover link a page made under `localhost` or
+/// a tunnel name is the node's too, and loses its sign-in like one under `public_url`.
+fn origins_for(s: &NodeState, headers: &HeaderMap) -> Vec<String> {
+    let mut out = s.node_origins();
+    let h = |n: &str| {
+        headers
+            .get(n)
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.split(',').next().unwrap_or("").trim().to_string())
+            .filter(|v| !v.is_empty())
+    };
+    if let Some(host) = h("x-forwarded-host").or_else(|| h("host")) {
+        let proto = h("x-forwarded-proto").unwrap_or_else(|| "http".into());
+        out.push(format!("{proto}://{host}"));
+    }
+    out
+}
+
+/// Items on their way into a zone lose the sign-ins their links carry: on the node's links
+/// (`public_url`, the address this request came to) every one, on any other host's `/v1/` link
+/// the node's own. The queue looks again (`pm_zones::Queue::add`); this look knows the request.
+fn drop_sign_ins(s: &NodeState, headers: &HeaderMap, items: &mut [QueueItem]) {
+    let origins = origins_for(s, headers);
+    let known = accounts::KnownTokens::lazy(s);
+    for it in items {
+        it.without_node_token(&origins, &|t| known.has(t));
+    }
+}
+
 async fn enqueue(
     State(s): State<Arc<NodeState>>,
     Path(id): Path<String>,
     axum::Extension(caller): axum::Extension<accounts::Caller>,
+    headers: HeaderMap,
     Json(body): Json<Enqueue>,
 ) -> ApiResult<Enqueued> {
     let zone = zone_of(&s, &id)?;
@@ -1940,6 +2023,7 @@ async fn enqueue(
     if items.is_empty() {
         return Err(ApiError::bad_request("nothing to enqueue"));
     }
+    drop_sign_ins(&s, &headers, &mut items);
     // Who queued them, from the request, never from the body: their own accounts play them
     let by = accounts::Who::of(&caller).by();
     for it in &mut items {
@@ -2305,12 +2389,14 @@ async fn load(
     State(s): State<Arc<NodeState>>,
     Path(id): Path<String>,
     axum::Extension(caller): axum::Extension<accounts::Caller>,
+    headers: HeaderMap,
     Json(body): Json<LoadRequest>,
 ) -> ApiResult<ZoneState> {
     let mut body = body;
     if body.items.is_empty() {
         return Err(ApiError::bad_request("nothing to move: the queue is empty"));
     }
+    drop_sign_ins(&s, &headers, &mut body.items);
     for it in &mut body.items {
         it.uri = it.uri.trim().to_string();
         if it.uri.is_empty() {
@@ -2880,7 +2966,15 @@ fn settings_view(s: &NodeState) -> NodeSettingsView {
     let copy_rate = files::copy_rate(s);
     // One lock, taken and released here: a guard in a struct literal lives until the end of the
     // whole expression, so a second `lock()` in another field would wait for ever
-    let (jukebox_zone, dev_setting, genre_tags, prefer_full, first_steps_hidden, sources_policy) = {
+    let (
+        jukebox_zone,
+        dev_setting,
+        genre_tags,
+        prefer_full,
+        first_steps_hidden,
+        sources_policy,
+        api_token_exposed_at,
+    ) = {
         let lib = s.library.lock().expect("library poisoned");
         let on = |k: &str| lib.get_setting(k).ok().flatten().is_some_and(|v| v == "1");
         (
@@ -2893,6 +2987,7 @@ fn settings_view(s: &NodeState) -> NodeSettingsView {
             on(item::PREFER_FULL_KEY),
             on(first_steps::HIDDEN_KEY),
             accounts::source_policy(&lib),
+            accounts::api_token_exposed_at(&lib),
         )
     };
     NodeSettingsView {
@@ -2906,6 +3001,7 @@ fn settings_view(s: &NodeState) -> NodeSettingsView {
         first_steps_hidden,
         config_folders: config_folders(s),
         token_replaceable: s.token_file().is_some(),
+        api_token_exposed_at,
         sources_policy,
     }
 }
@@ -3722,6 +3818,8 @@ mod tests {
         );
         // Never reach the real Deezer API from tests; a closed port fails fast.
         *s.deezer_base.write().unwrap() = "http://127.0.0.1:9".into();
+        // As the node does at start (main.rs)
+        accounts::clean_saved_queues(&s).unwrap();
         s.zones_for_all_outputs();
         s
     }
@@ -6155,7 +6253,7 @@ mod tests {
             assert!(v.to_string().contains("Not for listeners"), "{v}");
         }
         // Playing on a zone: yes, until the owner limits listeners to another zone
-        let (_, zones) = call(&app, "GET", "/v1/zones?token=s3cret", None).await;
+        let (_, zones) = send("GET", "/v1/zones".into(), "s3cret".into(), None).await;
         let zid = zones[0]["id"].as_str().unwrap().to_string();
         let (st, v) = send(
             "POST",
@@ -12745,8 +12843,52 @@ exec sleep 300
             .body(Body::empty())
             .unwrap();
         assert_eq!(app.clone().oneshot(req).await.unwrap().status(), StatusCode::OK);
+        // `?token=` opens only what a browser loads by address: the event stream, a song's file
+        // or download, a cover, a picture, an avatar, a service stream (a token in a shared link
+        // opens nothing else)
         let (st, _) = call(&app, "GET", "/v1/info?token=s3cret", None).await;
-        assert_eq!(st, StatusCode::OK);
+        assert_eq!(st, StatusCode::UNAUTHORIZED);
+        let (st, _) = call(&app, "GET", "/v1/zones?token=s3cret", None).await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED);
+        let (st, _) = call(&app, "GET", "/v1/library/albums?token=s3cret", None).await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED);
+        let (st, _) = call(
+            &app,
+            "POST",
+            "/v1/zones/x/queue?token=s3cret",
+            Some(serde_json::json!({})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED, "no writes by address");
+        for p in [
+            "/v1/library/artists/1/image",
+            "/v1/sources/jellyfin/cover/x",
+            "/v1/sources/plex/cover/1/2",
+            "/v1/profiles/x/avatar",
+        ] {
+            let (st, _) = call(&app, "GET", &format!("{p}?token=s3cret"), None).await;
+            assert_ne!(st, StatusCode::UNAUTHORIZED, "{p}: past the token check");
+        }
+        // Decided on the route, not the path: a parameter named like a media route opens nothing
+        for p in [
+            "/v1/item/song/file",
+            "/v1/profiles/avatar",
+            "/v1/discover/tag/stream",
+            "/v1/library/tracks/cover",
+        ] {
+            let (st, _) = call(&app, "GET", &format!("{p}?token=s3cret"), None).await;
+            assert_eq!(st, StatusCode::UNAUTHORIZED, "{p}");
+        }
+        let (st, _) = call(&app, "GET", "/v1/library/albums/1/cover?token=s3cret", None).await;
+        assert_eq!(st, StatusCode::NOT_FOUND, "past the token check");
+        let (st, _) = call(&app, "GET", "/v1/library/tracks/1/file?token=s3cret", None).await;
+        assert_eq!(st, StatusCode::NOT_FOUND, "past the token check");
+        let (st, _) = call(&app, "GET", "/v1/library/tracks/1/download?token=s3cret", None).await;
+        assert_eq!(st, StatusCode::NOT_FOUND, "past the token check");
+        let (st, _) = call(&app, "GET", "/v1/sources/tidal/stream/1?token=s3cret", None).await;
+        assert_ne!(st, StatusCode::UNAUTHORIZED, "past the token check");
+        let (st, _) = call(&app, "GET", "/v1/events?token=s3cret", None).await;
+        assert_ne!(st, StatusCode::UNAUTHORIZED, "past the token check");
     }
 
     #[tokio::test]
@@ -22782,6 +22924,9 @@ exec sleep 300
 
     /// Artist release sections (their own file, so parallel work doesn't meet at one anchor).
     mod release_sections;
+
+    /// Links on the node in a queue never carry a sign-in (their own file).
+    mod queue_links;
 
     /// A renderer's description (Linn-like, `udn`), served on 127.0.0.1 and counting its fetches;
     /// 503 until `ready` (a device not answering yet, on a port held all along).

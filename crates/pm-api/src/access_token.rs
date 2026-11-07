@@ -127,6 +127,11 @@ pub(crate) async fn rotate(s: &NodeState) -> Result<String, ApiError> {
     // A new token is the answer to a leak: the owner's browser sessions end with the old token.
     // First, so a failure here leaves the old token working instead of a 500 without the new one
     crate::accounts::end_owner_sessions(s)?;
+    // ...and what said the old one was exposed is done with
+    s.library
+        .lock()
+        .expect("library poisoned")
+        .delete_setting(crate::accounts::API_TOKEN_EXPOSED)?;
     let token = new_token();
     let t = token.clone();
     tokio::task::spawn_blocking(move || {

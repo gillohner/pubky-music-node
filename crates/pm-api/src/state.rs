@@ -426,7 +426,7 @@ impl NodeState {
             },
             Err(_) => None,
         };
-        Arc::new(Self {
+        let node = Arc::new(Self {
             node_id,
             remote: Default::default(),
             remote_id: Default::default(),
@@ -523,7 +523,22 @@ impl NodeState {
             zones_in_listeners_hands: Mutex::new(Default::default()),
             return_page: std::sync::RwLock::new(crate::project_apps::RETURN_PAGE.to_string()),
             last_scan: Mutex::new(None),
-        })
+        });
+        // A queue's links on the node lose their sign-in on the way in (pm_zones::node_link_path),
+        // and a link under any other name loses the node's own sign-ins
+        node.zones.set_node_origins(node.node_origins());
+        let weak = Arc::downgrade(&node);
+        node.zones.set_token_check(Some(Arc::new(move |t: &str| {
+            weak.upgrade()
+                .is_some_and(|s| crate::accounts::is_node_token_if_free(&s, t))
+        })));
+        node
+    }
+
+    /// The node's own addresses for its links (`scheme://host[:port]` of `public_url`): a
+    /// `/v1/…` link there is the node's, one on any other host is someone else's.
+    pub fn node_origins(&self) -> Vec<String> {
+        origin_of(&self.public_url).into_iter().collect()
     }
 
     /// Create a zone and forward its state and events to the API stream.
@@ -942,6 +957,17 @@ impl NodeState {
         Arc::new(move |item: &pm_zones::QueueItem| {
             let mut meta = pm_zones::TrackMeta::from_item(item);
             let Some(s) = state.upgrade() else { return meta };
+            // A node link (the web UI's queue items, relative or on the node's address) opens
+            // only with a sign-in: a library cover becomes the keyed art link a renderer can
+            // fetch, any other node link stays off the renderer
+            let origins = s.node_origins();
+            if let Some(path) = item
+                .image
+                .as_deref()
+                .and_then(|i| pm_zones::node_link_path(i, &origins))
+            {
+                meta.image = cover_album_id(path).map(|aid| s.art_url(aid));
+            }
             let id = item
                 .uri
                 .strip_prefix(crate::sources::TRACK_SCHEME)
@@ -2224,6 +2250,23 @@ fn volume_poll() -> std::time::Duration {
 /// Where a zone's crossfade length (ms) is kept.
 pub fn crossfade_key(zone: &ZoneId) -> String {
     format!("crossfade/{}", zone.0)
+}
+
+/// `scheme://host[:port]` of an http(s) URL.
+fn origin_of(url: &str) -> Option<String> {
+    let host = ["http://", "https://"]
+        .iter()
+        .find(|p| url.starts_with(*p))?
+        .len();
+    let end = url[host..].find(['/', '?', '#']).map_or(url.len(), |i| host + i);
+    (end > host).then(|| url[..end].to_string())
+}
+
+/// The album of a node cover link, `/v1/library/albums/{id}/cover` (with or without a query).
+fn cover_album_id(link: &str) -> Option<i64> {
+    let rest = link.strip_prefix("/v1/library/albums/")?;
+    let (id, tail) = rest.split_once('/')?;
+    (tail == "cover" || tail.starts_with("cover?")).then(|| id.parse().ok())?
 }
 
 fn queue_key(id: &ZoneId) -> String {

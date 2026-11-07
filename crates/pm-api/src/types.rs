@@ -608,6 +608,10 @@ pub struct NodeSettingsView {
     /// with `POST /v1/node/token`; false when the token is set in the config or there is none.
     #[serde(default)]
     pub token_replaceable: bool,
+    /// When the node's API token was found in a saved queue's link, where everyone who may use
+    /// the zone could read it (Unix seconds): make a new token. Cleared by `POST /v1/node/token`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_token_exposed_at: Option<i64>,
     /// Whose TIDAL, Qobuz and Spotify sign-ins listeners play with: `node`, `own` or `choice`.
     #[serde(default)]
     pub sources_policy: crate::accounts::SourcePolicy,

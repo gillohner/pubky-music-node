@@ -283,3 +283,102 @@ async fn a_revoked_listener_loses_its_event_socket() {
     .await;
     assert_eq!(closed, Ok(true), "the socket closed");
 }
+
+/// A listener's event stream shows a queue's node links without the sign-in the owner's browser
+/// put in them: the snapshot and every zone event. (The queue has dropped the sign-in on the way
+/// in already; the stream's own second look is covered by the `as_seen_by` unit test in
+/// `events.rs`, which feeds it an item that never went through a queue.)
+#[tokio::test]
+async fn a_listeners_event_stream_never_shows_a_sign_in() {
+    use futures_util::StreamExt;
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("lib.sqlite");
+    let s = NodeState::new(
+        NodeSettings {
+            name: "t".into(),
+            version: "0".into(),
+            db_path: db.clone(),
+            scan_folders: vec![],
+            art_dir: dir.path().join("art"),
+            mirror_dir: dir.path().join("homeserver"),
+            pipeline: PipelineConfig::default(),
+            token: Some(OWNER.into()),
+            subsonic_user: "pubky".into(),
+            pubky: Default::default(),
+            public_url: "http://127.0.0.1:7788".into(),
+            upnp: false,
+            cast: false,
+            slimproto_port: 0,
+            session_secret_path: None,
+            tidal: Default::default(),
+            spotify: Default::default(),
+            acoustid_key: String::new(),
+            jamendo: Default::default(),
+        },
+        Library::open(&db).unwrap(),
+        OutputRegistry::new(),
+    );
+    let out: Arc<dyn pm_zones::Output> = Arc::new(NullOutput::new());
+    let zone = s.create_zone("Kitchen", out).id().0.clone();
+    s.library
+        .lock()
+        .unwrap()
+        .set_setting(
+            "people",
+            &serde_json::json!({"people": [{"key": KEY, "access": "music", "music_enabled": true, "added_at": 0}]})
+                .to_string(),
+        )
+        .unwrap();
+    let listener = pm_api::accounts::mint(&s, KEY).unwrap();
+    let app = router(s.clone());
+    let enqueue =
+        |n: u32| {
+            let app = app.clone();
+            let zone = zone.clone();
+            async move {
+                call(
+                &app,
+                OWNER,
+                "POST",
+                &format!("/v1/zones/{zone}/queue"),
+                Some(serde_json::json!({"items": [{"uri": format!("https://radio.example/{n}"), "title": "A",
+                    "image": format!("/v1/library/albums/{n}/cover?token={OWNER}")}], "play": false})),
+            )
+            .await
+            }
+        };
+    let (st, _) = enqueue(1).await;
+    assert_eq!(st, StatusCode::OK);
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap();
+    tokio::spawn(pm_api::serve_listener(s.clone(), l));
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/v1/events?token={listener}"))
+        .await
+        .unwrap();
+    let text = |m: Option<Result<tokio_tungstenite::tungstenite::Message, _>>| match m {
+        Some(Ok(tokio_tungstenite::tungstenite::Message::Text(t))) => t.to_string(),
+        other => panic!("expected a text message, got {other:?}"),
+    };
+    let snapshot = text(
+        tokio::time::timeout(std::time::Duration::from_secs(5), ws.next())
+            .await
+            .unwrap(),
+    );
+    assert!(snapshot.contains("\"snapshot\""), "{snapshot}");
+    assert!(snapshot.contains("/v1/library/albums/1/cover"), "{snapshot}");
+    assert!(!snapshot.contains("token="), "{snapshot}");
+    // A change to the queue: the zone event carries the new item, without the sign-in
+    let (st, _) = enqueue(2).await;
+    assert_eq!(st, StatusCode::OK);
+    let event = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let m = text(ws.next().await);
+            if m.contains("/v1/library/albums/2/cover") {
+                return m;
+            }
+        }
+    })
+    .await
+    .expect("a zone event with the new item");
+    assert!(!event.contains("token="), "{event}");
+}

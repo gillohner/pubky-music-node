@@ -310,6 +310,33 @@ async fn serve(cfg: &NodeConfig, config_file: Option<std::path::PathBuf>) -> any
     if let api_token::Source::File(path) | api_token::Source::ReplacedPlaceholder(path) = &source {
         state.set_token_file(path.clone());
     }
+    // A saved queue never keeps a sign-in in one of its links (older browsers put one there)
+    match pm_api::accounts::clean_saved_queues(&state) {
+        Ok(c) if c.items > 0 => {
+            let mut what = Vec::new();
+            if c.owner_sessions_ended {
+                what.push("the owner's browsers and apps sign in again".to_string());
+            }
+            if c.listener_tokens_ended > 0 {
+                what.push(format!("{} listener sign-in(s) ended", c.listener_tokens_ended));
+            }
+            if what.is_empty() {
+                what.push("none of them was a sign-in of this node's".to_string());
+            }
+            tracing::warn!(
+                items = c.items,
+                "saved queue links carried a sign-in: removed; {}",
+                what.join("; ")
+            );
+            if c.api_token_found {
+                tracing::warn!(
+                    "the API token itself was in a saved queue link: make a new token (Settings › Access); Home and Settings say so until then"
+                );
+            }
+        }
+        Ok(_) => {}
+        Err(e) => tracing::warn!("checking the saved queues failed: {}", e.message),
+    }
     state.zones_for_all_outputs();
     {
         let st = state.clone();
