@@ -2,7 +2,8 @@
 //! proof checked by the pubky SDK's own verifier.
 //!
 //! `VAULT_WRITE_VECTORS=1 cargo test -p pm-appdata --test vault` rewrites
-//! `tests/vectors/vault-v1.json` from the fixed inputs below; without it the file is the reference.
+//! `tests/vectors/vault-v1.json` and `vault-v2.json` from the fixed inputs below; without it the
+//! files are the reference.
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
@@ -11,6 +12,7 @@ use serde_json::{json, Value};
 
 const OWNER: &str = "o3ftkuxjd9k6zgnc4hhbhbg5jusubr4zqyb1dtzi8hhm3hf5wbmy";
 const VECTORS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/vectors/vault-v1.json");
+const VECTORS_V2: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/vectors/vault-v2.json");
 
 fn bytes<const N: usize>(fill: u8) -> [u8; N] {
     let mut b = [0u8; N];
@@ -366,6 +368,7 @@ fn a_client_proof_verifies_with_the_pubky_sdk() {
             grant: claims(&[VAULT_CAPABILITY]).sign(&identity, GRANT_JWS_TYP),
             pop: pop(data),
         },
+        signer: None,
         extra: Default::default(),
     };
     let check = |e: &ClientEntry| {
@@ -425,4 +428,231 @@ fn a_client_proof_verifies_with_the_pubky_sdk() {
         check(&kind),
         Err("the proof's data isn't a vault client's".into())
     );
+}
+
+/// The v2 vectors: the signing key derived from each client's X25519 scalar, client 0's signer
+/// proof data, one envelope written and signed by client 0, the data it signed, and envelopes
+/// that must not verify.
+fn build_v2() -> Value {
+    let path = blob_path("tidal").unwrap();
+    let secrets: Vec<ClientSecret> = [0x11u8, 0x22]
+        .iter()
+        .map(|f| ClientSecret::from_bytes(bytes(*f)))
+        .collect();
+    let signers: Vec<SigningKey> = secrets.iter().map(SigningKey::derive).collect();
+    let data_key = DataKey::from_bytes(bytes(0x40));
+    let nonce: [u8; 24] = bytes(0x60);
+    let recipients: Vec<(ClientKey, [u8; 32])> = vec![
+        (secrets[0].public(), bytes(0x81)),
+        (secrets[1].public(), bytes(0x91)),
+    ];
+    let mut env = seal_with(
+        OWNER,
+        &path,
+        1,
+        &data_key,
+        &nonce,
+        SIGN_IN.as_bytes(),
+        &recipients,
+    )
+    .unwrap();
+    sign_envelope(OWNER, &path, &mut env, secrets[0].public(), &signers[0]).unwrap();
+    let signed = signed_data(OWNER, &path, &env).unwrap();
+    // What must not verify as client 0's: the same envelope with its recipients reordered, a
+    // byte of its content changed, another epoch, read at another path, signed by client 1 in
+    // client 0's name, and the envelope before it was signed
+    let mut reordered = env.clone();
+    reordered.recipients.reverse();
+    let mut content = env.clone();
+    let mut ct = URL_SAFE_NO_PAD.decode(&content.ciphertext).unwrap();
+    ct[0] ^= 1;
+    content.ciphertext = URL_SAFE_NO_PAD.encode(ct);
+    let mut epoch = env.clone();
+    epoch.epoch = 2;
+    let mut other_signer = env.clone();
+    sign_envelope(OWNER, &path, &mut other_signer, secrets[0].public(), &signers[1]).unwrap();
+    let mut unsigned = env.clone();
+    unsigned.writer = None;
+    json!({
+        "about": "Pubky Music VAULT.md v2 (pm-appdata): the writer's signature. Hex for raw inputs; the envelope as written to the homeserver.",
+        "owner": OWNER,
+        "path": path,
+        "sign_info": "pubky.music/vault/v2/sign",
+        "clients": secrets.iter().zip(&signers).map(|(s, k)| json!({"x25519_scalar": hex(&s.to_bytes()), "client_key": s.public(), "sign_key": k.public()})).collect::<Vec<_>>(),
+        "signer_proof_data": SignerProofData::new(secrets[0].public(), signers[0].public()),
+        "plaintext": SIGN_IN,
+        "case": {
+            "name": "two clients, written and signed by the first",
+            "epoch": 1,
+            "data_key": hex(&bytes::<32>(0x40)),
+            "nonce": hex(&nonce),
+            "ephemeral_secrets": recipients.iter().map(|(_, e)| hex(e)).collect::<Vec<_>>(),
+            "signed_data": hex(&signed),
+            "envelope": env,
+        },
+        "must_fail": [
+            {"name": "recipients reordered", "path": path, "envelope": reordered},
+            {"name": "a byte of the content changed", "path": path, "envelope": content},
+            {"name": "another epoch", "path": path, "envelope": epoch},
+            {"name": "read at another path", "path": blob_path("qobuz").unwrap(), "envelope": env},
+            {"name": "signed by another client in the writer's name", "path": path, "envelope": other_signer},
+            {"name": "not signed", "path": path, "envelope": unsigned},
+        ],
+    })
+}
+
+#[test]
+fn vectors_v2() {
+    let built = build_v2();
+    if std::env::var_os("VAULT_WRITE_VECTORS").is_some() {
+        std::fs::write(VECTORS_V2, serde_json::to_string_pretty(&built).unwrap() + "\n").unwrap();
+    }
+    let file: Value = serde_json::from_str(&std::fs::read_to_string(VECTORS_V2).unwrap()).unwrap();
+    assert_eq!(
+        built, file,
+        "the reference code no longer produces tests/vectors/vault-v2.json"
+    );
+    let path = file["path"].as_str().unwrap();
+    let sign_key: SignKey = serde_json::from_value(file["clients"][0]["sign_key"].clone()).unwrap();
+    let env: Envelope = serde_json::from_value(file["case"]["envelope"].clone()).unwrap();
+    assert_eq!(
+        env.writer.as_ref().unwrap().client_key,
+        serde_json::from_value::<ClientKey>(file["clients"][0]["client_key"].clone()).unwrap()
+    );
+    assert!(writer_signed(OWNER, path, &env, &sign_key));
+    // The other client's key doesn't verify it
+    let other: SignKey = serde_json::from_value(file["clients"][1]["sign_key"].clone()).unwrap();
+    assert!(!writer_signed(OWNER, path, &env, &other));
+    // A writer's signature survives a rewrite that keeps the envelope (the member is kept by
+    // readers that don't know it): parse and serialise again
+    let again: Envelope = serde_json::from_slice(&serde_json::to_vec(&env).unwrap()).unwrap();
+    assert!(writer_signed(OWNER, path, &again, &sign_key));
+    for mf in file["must_fail"].as_array().unwrap() {
+        let env: Envelope = serde_json::from_value(mf["envelope"].clone()).unwrap();
+        assert!(
+            !writer_signed(OWNER, mf["path"].as_str().unwrap(), &env, &sign_key),
+            "{} verifies",
+            mf["name"]
+        );
+    }
+    // Both recipients still open the signed envelope as before (v1 readers ignore `writer`)
+    for c in file["clients"].as_array().unwrap() {
+        let secret = ClientSecret::from_bytes(
+            ClientKey::from_hex(c["x25519_scalar"].as_str().unwrap())
+                .unwrap()
+                .0,
+        );
+        let (_, plain) = open(OWNER, path, &env, &secret).unwrap();
+        assert_eq!(plain.as_slice(), SIGN_IN.as_bytes());
+    }
+}
+
+#[test]
+fn the_signing_key_follows_from_the_client_secret() {
+    let a = ClientSecret::from_bytes(bytes(0x11));
+    assert_eq!(SigningKey::derive(&a).public(), SigningKey::derive(&a).public());
+    assert_ne!(
+        SigningKey::derive(&a).public(),
+        SigningKey::derive(&ClientSecret::from_bytes(bytes(0x12))).public()
+    );
+    let k = SigningKey::derive(&a);
+    let sig = k.sign(b"hello");
+    assert!(k.public().verify(b"hello", &sig));
+    assert!(!k.public().verify(b"hullo", &sig));
+    assert!(!k.public().verify(b"hello", &sig[..63]));
+    // Hex round trip, like the client key
+    let hex = k.public().to_hex();
+    assert_eq!(SignKey::from_hex(&hex).unwrap(), k.public());
+    assert!(SignKey::from_hex("zz").is_err());
+    assert_eq!(format!("{:?}", k), format!("SigningKey({hex})"));
+}
+
+#[test]
+fn a_signer_proof_gives_the_entrys_signing_key() {
+    use pubky::custom_pop::{
+        verify_custom_grant_pop, CustomPop, CUSTOM_POP_JWS_TYP, DEFAULT_CUSTOM_POP_CLOCK_SKEW,
+    };
+    use pubky::{Capability, ClientId, GrantClaims, GrantId, Keypair, GRANT_JWS_TYP};
+
+    let identity = Keypair::from_secret(&bytes(0xa0));
+    let grant_client = Keypair::from_secret(&bytes(0xb0));
+    let secret = ClientSecret::from_bytes(bytes(0x11));
+    let (vault_key, sign_key) = (secret.public(), SigningKey::derive(&secret).public());
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let claims = |caps: &[&str]| GrantClaims {
+        iss: identity.public_key(),
+        client_id: ClientId::new("music.pubky.app").unwrap(),
+        caps: caps.iter().map(|c| c.parse::<Capability>().unwrap()).collect(),
+        cnf: grant_client.public_key(),
+        jti: GrantId::parse("vaultgrant01").unwrap(),
+        iat: now - 10,
+        exp: now + 3600,
+    };
+    let pop = |data: Value| {
+        let header = URL_SAFE_NO_PAD.encode(json!({"alg": "EdDSA", "typ": CUSTOM_POP_JWS_TYP}).to_string());
+        let payload = URL_SAFE_NO_PAD.encode(
+            json!({"gid": "vaultgrant01", "iat": now - 5, "nonce": "signernonce1", "data": data}).to_string(),
+        );
+        let input = format!("{header}.{payload}");
+        let sig = grant_client.sign(input.as_bytes());
+        format!("{input}.{}", URL_SAFE_NO_PAD.encode(sig.to_bytes()))
+    };
+    let grant = claims(&[VAULT_CAPABILITY]).sign(&identity, GRANT_JWS_TYP);
+    let entry = ClientEntry {
+        client_key: vault_key,
+        name: "Living room node".into(),
+        authorised_at: now,
+        last_used_at: now,
+        proof: Proof {
+            grant: grant.clone(),
+            pop: pop(serde_json::to_value(ClientProofData::new(vault_key, "Living room node")).unwrap()),
+        },
+        signer: Some(Proof {
+            grant: grant.clone(),
+            pop: pop(serde_json::to_value(SignerProofData::new(vault_key, sign_key)).unwrap()),
+        }),
+        extra: Default::default(),
+    };
+    let signer = |e: &ClientEntry| -> Result<SignKey, String> {
+        let p = e.signer.as_ref().ok_or("no signer proof")?;
+        let creds = CustomPop {
+            grant: p.grant.clone(),
+            pop: p.pop.clone(),
+        };
+        let v = verify_custom_grant_pop(&creds, DEFAULT_CUSTOM_POP_CLOCK_SKEW).map_err(|e| e.to_string())?;
+        let caps: Vec<String> = v.grant_claims().caps.iter().map(|c| c.to_string()).collect();
+        signer_of_entry(
+            e,
+            &identity.public_key().z32(),
+            &v.identity().z32(),
+            &caps,
+            v.data(),
+        )
+        .map_err(str::to_string)
+    };
+    assert_eq!(signer(&entry), Ok(sign_key));
+    // The entry's JSON carries both proofs, and a reader from before v2 reads it (the member
+    // is kept as it is)
+    let j = serde_json::to_value(&entry).unwrap();
+    assert!(j["signer"]["pop"].is_string());
+    assert_eq!(serde_json::from_value::<ClientEntry>(j).unwrap(), entry);
+    // The signer proof is for one client key
+    let mut other = entry.clone();
+    other.client_key = ClientSecret::from_bytes(bytes(0x22)).public();
+    assert_eq!(signer(&other), Err("the signer proof is for another key".into()));
+    // A client proof in the signer's place isn't a signer proof
+    let mut swapped = entry.clone();
+    swapped.signer = Some(entry.proof.clone());
+    assert!(signer(&swapped).unwrap_err().contains("isn't a vault signer's"));
+    // A grant without the vault
+    let mut narrow = entry.clone();
+    narrow.signer.as_mut().unwrap().grant = claims(&["/:rw"]).sign(&identity, GRANT_JWS_TYP);
+    assert!(signer(&narrow).unwrap_err().contains("doesn't name the vault"));
+    // No signer proof: a client from before v2
+    let mut old = entry.clone();
+    old.signer = None;
+    assert_eq!(signer(&old), Err("no signer proof".into()));
 }

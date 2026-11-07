@@ -1,0 +1,212 @@
+{
+  "about": "Pubky Music VAULT.md v2 (pm-appdata): the writer's signature. Hex for raw inputs; the envelope as written to the homeserver.",
+  "case": {
+    "data_key": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+    "envelope": {
+      "ciphertext": "7lyAAAFkikiYkQ1YLqu5ipAFhZSRAIQijU3B6Ps5LHbbaGVcEtcFXB-Drr6LPCgobITregSGTeVwg_X-DmmkCbgR0QVJRzZgF3KojLMYAHEU3KA37pCPC74pEkL-b8cAfPfdhApr-mJ7duCoHf0J6mE7J0gIC5_zlPoOUtK-YCxgH-xeXdFUCCVpL6SW5oJgaJEy8i2q1H5_d-vRwtgg0ciJbZF4EQAoDr__12iXUZbRTbFaIxkdZmRRXnriPJpf_II0efjIobuYwL2kZYdL5vqAJK7XG9Fgv6H9dB8lDduU5o-ZF1KqNaq5vUkx6j6_xqwkW6keH1evGGMtp5cKEPKPa3HMw8_ZZbuAkk_CqwtVqsXwkTc",
+      "epoch": 1,
+      "nonce": "YGFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3",
+      "recipients": [
+        {
+          "client_key": "4d27bcee3135c4944b28d27dd809b07be10c35160d20131caa7e85575498d07c",
+          "epk": "iDGGuAC0HVzwQpaV2ps8xPMo680YSm5IL6V4wQPwbHc",
+          "wrapped_key": "dMBl5m2Wz0FCuchK3ewB1buJG5QIUib5MeRUto8cYz1gaO7HiMCR2q3Us-gGiOY7"
+        },
+        {
+          "client_key": "86c15a1119201d2a9a6023aceeaf49664a54186ad2db465845331707b6da2b0d",
+          "epk": "nM7XUbMBu9FsT7je3dgvGJJdce2QyET6AVj4RbD6f0s",
+          "wrapped_key": "YahifHcn7GpkmAzdYjLKa6RM3TOs7RZ9I21z7jdTto5OQ-CO4tIV7vhVkdsXFqh3"
+        }
+      ],
+      "version": 1,
+      "writer": {
+        "client_key": "4d27bcee3135c4944b28d27dd809b07be10c35160d20131caa7e85575498d07c",
+        "sig": "G6R5qRfnbTLti_pVXif7Rn35Rbq_We9TPXF4fxHVzCgfxF4rFGIMPjOo40o4jR2PsO0DQy5Ry6LhhdePFAb_Bw"
+      }
+    },
+    "ephemeral_secrets": [
+      "8182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0",
+      "9192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0"
+    ],
+    "epoch": 1,
+    "name": "two clients, written and signed by the first",
+    "nonce": "606162636465666768696a6b6c6d6e6f7071727374757677",
+    "signed_data": "7075626b792e6d757369632f7661756c742f76322f626c6f62006f3366746b75786a64396b367a676e6334686862686267356a7573756272347a7179623164747a693868686d3368663577626d79002f707269762f7075626b792e6d757369632f7661756c742f746964616c2e6a736f6e000000000000000001b6814a5b84284ef61b6ed4786dd609143d765bad39128ed2b319d9d45074dca204b6184875a92c376d3719379b43a2380f0f6dc1df4253db26f77152b5d3698a"
+  },
+  "clients": [
+    {
+      "client_key": "4d27bcee3135c4944b28d27dd809b07be10c35160d20131caa7e85575498d07c",
+      "sign_key": "16d8e15a4d6706490381b1e14afce6949ddab4991a594351349ad8578a4aba89",
+      "x25519_scalar": "1112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30"
+    },
+    {
+      "client_key": "86c15a1119201d2a9a6023aceeaf49664a54186ad2db465845331707b6da2b0d",
+      "sign_key": "d47dbfc2ea524c55faf2dd8e1321453fde5da427f9a236ede77e5dd78e194f2e",
+      "x25519_scalar": "22232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f4041"
+    }
+  ],
+  "must_fail": [
+    {
+      "envelope": {
+        "ciphertext": "7lyAAAFkikiYkQ1YLqu5ipAFhZSRAIQijU3B6Ps5LHbbaGVcEtcFXB-Drr6LPCgobITregSGTeVwg_X-DmmkCbgR0QVJRzZgF3KojLMYAHEU3KA37pCPC74pEkL-b8cAfPfdhApr-mJ7duCoHf0J6mE7J0gIC5_zlPoOUtK-YCxgH-xeXdFUCCVpL6SW5oJgaJEy8i2q1H5_d-vRwtgg0ciJbZF4EQAoDr__12iXUZbRTbFaIxkdZmRRXnriPJpf_II0efjIobuYwL2kZYdL5vqAJK7XG9Fgv6H9dB8lDduU5o-ZF1KqNaq5vUkx6j6_xqwkW6keH1evGGMtp5cKEPKPa3HMw8_ZZbuAkk_CqwtVqsXwkTc",
+        "epoch": 1,
+        "nonce": "YGFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3",
+        "recipients": [
+          {
+            "client_key": "86c15a1119201d2a9a6023aceeaf49664a54186ad2db465845331707b6da2b0d",
+            "epk": "nM7XUbMBu9FsT7je3dgvGJJdce2QyET6AVj4RbD6f0s",
+            "wrapped_key": "YahifHcn7GpkmAzdYjLKa6RM3TOs7RZ9I21z7jdTto5OQ-CO4tIV7vhVkdsXFqh3"
+          },
+          {
+            "client_key": "4d27bcee3135c4944b28d27dd809b07be10c35160d20131caa7e85575498d07c",
+            "epk": "iDGGuAC0HVzwQpaV2ps8xPMo680YSm5IL6V4wQPwbHc",
+            "wrapped_key": "dMBl5m2Wz0FCuchK3ewB1buJG5QIUib5MeRUto8cYz1gaO7HiMCR2q3Us-gGiOY7"
+          }
+        ],
+        "version": 1,
+        "writer": {
+          "client_key": "4d27bcee3135c4944b28d27dd809b07be10c35160d20131caa7e85575498d07c",
+          "sig": "G6R5qRfnbTLti_pVXif7Rn35Rbq_We9TPXF4fxHVzCgfxF4rFGIMPjOo40o4jR2PsO0DQy5Ry6LhhdePFAb_Bw"
+        }
+      },
+      "name": "recipients reordered",
+      "path": "/priv/pubky.music/vault/tidal.json"
+    },
+    {
+      "envelope": {
+        "ciphertext": "71yAAAFkikiYkQ1YLqu5ipAFhZSRAIQijU3B6Ps5LHbbaGVcEtcFXB-Drr6LPCgobITregSGTeVwg_X-DmmkCbgR0QVJRzZgF3KojLMYAHEU3KA37pCPC74pEkL-b8cAfPfdhApr-mJ7duCoHf0J6mE7J0gIC5_zlPoOUtK-YCxgH-xeXdFUCCVpL6SW5oJgaJEy8i2q1H5_d-vRwtgg0ciJbZF4EQAoDr__12iXUZbRTbFaIxkdZmRRXnriPJpf_II0efjIobuYwL2kZYdL5vqAJK7XG9Fgv6H9dB8lDduU5o-ZF1KqNaq5vUkx6j6_xqwkW6keH1evGGMtp5cKEPKPa3HMw8_ZZbuAkk_CqwtVqsXwkTc",
+        "epoch": 1,
+        "nonce": "YGFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3",
+        "recipients": [
+          {
+            "client_key": "4d27bcee3135c4944b28d27dd809b07be10c35160d20131caa7e85575498d07c",
+            "epk": "iDGGuAC0HVzwQpaV2ps8xPMo680YSm5IL6V4wQPwbHc",
+            "wrapped_key": "dMBl5m2Wz0FCuchK3ewB1buJG5QIUib5MeRUto8cYz1gaO7HiMCR2q3Us-gGiOY7"
+          },
+          {
+            "client_key": "86c15a1119201d2a9a6023aceeaf49664a54186ad2db465845331707b6da2b0d",
+            "epk": "nM7XUbMBu9FsT7je3dgvGJJdce2QyET6AVj4RbD6f0s",
+            "wrapped_key": "YahifHcn7GpkmAzdYjLKa6RM3TOs7RZ9I21z7jdTto5OQ-CO4tIV7vhVkdsXFqh3"
+          }
+        ],
+        "version": 1,
+        "writer": {
+          "client_key": "4d27bcee3135c4944b28d27dd809b07be10c35160d20131caa7e85575498d07c",
+          "sig": "G6R5qRfnbTLti_pVXif7Rn35Rbq_We9TPXF4fxHVzCgfxF4rFGIMPjOo40o4jR2PsO0DQy5Ry6LhhdePFAb_Bw"
+        }
+      },
+      "name": "a byte of the content changed",
+      "path": "/priv/pubky.music/vault/tidal.json"
+    },
+    {
+      "envelope": {
+        "ciphertext": "7lyAAAFkikiYkQ1YLqu5ipAFhZSRAIQijU3B6Ps5LHbbaGVcEtcFXB-Drr6LPCgobITregSGTeVwg_X-DmmkCbgR0QVJRzZgF3KojLMYAHEU3KA37pCPC74pEkL-b8cAfPfdhApr-mJ7duCoHf0J6mE7J0gIC5_zlPoOUtK-YCxgH-xeXdFUCCVpL6SW5oJgaJEy8i2q1H5_d-vRwtgg0ciJbZF4EQAoDr__12iXUZbRTbFaIxkdZmRRXnriPJpf_II0efjIobuYwL2kZYdL5vqAJK7XG9Fgv6H9dB8lDduU5o-ZF1KqNaq5vUkx6j6_xqwkW6keH1evGGMtp5cKEPKPa3HMw8_ZZbuAkk_CqwtVqsXwkTc",
+        "epoch": 2,
+        "nonce": "YGFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3",
+        "recipients": [
+          {
+            "client_key": "4d27bcee3135c4944b28d27dd809b07be10c35160d20131caa7e85575498d07c",
+            "epk": "iDGGuAC0HVzwQpaV2ps8xPMo680YSm5IL6V4wQPwbHc",
+            "wrapped_key": "dMBl5m2Wz0FCuchK3ewB1buJG5QIUib5MeRUto8cYz1gaO7HiMCR2q3Us-gGiOY7"
+          },
+          {
+            "client_key": "86c15a1119201d2a9a6023aceeaf49664a54186ad2db465845331707b6da2b0d",
+            "epk": "nM7XUbMBu9FsT7je3dgvGJJdce2QyET6AVj4RbD6f0s",
+            "wrapped_key": "YahifHcn7GpkmAzdYjLKa6RM3TOs7RZ9I21z7jdTto5OQ-CO4tIV7vhVkdsXFqh3"
+          }
+        ],
+        "version": 1,
+        "writer": {
+          "client_key": "4d27bcee3135c4944b28d27dd809b07be10c35160d20131caa7e85575498d07c",
+          "sig": "G6R5qRfnbTLti_pVXif7Rn35Rbq_We9TPXF4fxHVzCgfxF4rFGIMPjOo40o4jR2PsO0DQy5Ry6LhhdePFAb_Bw"
+        }
+      },
+      "name": "another epoch",
+      "path": "/priv/pubky.music/vault/tidal.json"
+    },
+    {
+      "envelope": {
+        "ciphertext": "7lyAAAFkikiYkQ1YLqu5ipAFhZSRAIQijU3B6Ps5LHbbaGVcEtcFXB-Drr6LPCgobITregSGTeVwg_X-DmmkCbgR0QVJRzZgF3KojLMYAHEU3KA37pCPC74pEkL-b8cAfPfdhApr-mJ7duCoHf0J6mE7J0gIC5_zlPoOUtK-YCxgH-xeXdFUCCVpL6SW5oJgaJEy8i2q1H5_d-vRwtgg0ciJbZF4EQAoDr__12iXUZbRTbFaIxkdZmRRXnriPJpf_II0efjIobuYwL2kZYdL5vqAJK7XG9Fgv6H9dB8lDduU5o-ZF1KqNaq5vUkx6j6_xqwkW6keH1evGGMtp5cKEPKPa3HMw8_ZZbuAkk_CqwtVqsXwkTc",
+        "epoch": 1,
+        "nonce": "YGFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3",
+        "recipients": [
+          {
+            "client_key": "4d27bcee3135c4944b28d27dd809b07be10c35160d20131caa7e85575498d07c",
+            "epk": "iDGGuAC0HVzwQpaV2ps8xPMo680YSm5IL6V4wQPwbHc",
+            "wrapped_key": "dMBl5m2Wz0FCuchK3ewB1buJG5QIUib5MeRUto8cYz1gaO7HiMCR2q3Us-gGiOY7"
+          },
+          {
+            "client_key": "86c15a1119201d2a9a6023aceeaf49664a54186ad2db465845331707b6da2b0d",
+            "epk": "nM7XUbMBu9FsT7je3dgvGJJdce2QyET6AVj4RbD6f0s",
+            "wrapped_key": "YahifHcn7GpkmAzdYjLKa6RM3TOs7RZ9I21z7jdTto5OQ-CO4tIV7vhVkdsXFqh3"
+          }
+        ],
+        "version": 1,
+        "writer": {
+          "client_key": "4d27bcee3135c4944b28d27dd809b07be10c35160d20131caa7e85575498d07c",
+          "sig": "G6R5qRfnbTLti_pVXif7Rn35Rbq_We9TPXF4fxHVzCgfxF4rFGIMPjOo40o4jR2PsO0DQy5Ry6LhhdePFAb_Bw"
+        }
+      },
+      "name": "read at another path",
+      "path": "/priv/pubky.music/vault/qobuz.json"
+    },
+    {
+      "envelope": {
+        "ciphertext": "7lyAAAFkikiYkQ1YLqu5ipAFhZSRAIQijU3B6Ps5LHbbaGVcEtcFXB-Drr6LPCgobITregSGTeVwg_X-DmmkCbgR0QVJRzZgF3KojLMYAHEU3KA37pCPC74pEkL-b8cAfPfdhApr-mJ7duCoHf0J6mE7J0gIC5_zlPoOUtK-YCxgH-xeXdFUCCVpL6SW5oJgaJEy8i2q1H5_d-vRwtgg0ciJbZF4EQAoDr__12iXUZbRTbFaIxkdZmRRXnriPJpf_II0efjIobuYwL2kZYdL5vqAJK7XG9Fgv6H9dB8lDduU5o-ZF1KqNaq5vUkx6j6_xqwkW6keH1evGGMtp5cKEPKPa3HMw8_ZZbuAkk_CqwtVqsXwkTc",
+        "epoch": 1,
+        "nonce": "YGFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3",
+        "recipients": [
+          {
+            "client_key": "4d27bcee3135c4944b28d27dd809b07be10c35160d20131caa7e85575498d07c",
+            "epk": "iDGGuAC0HVzwQpaV2ps8xPMo680YSm5IL6V4wQPwbHc",
+            "wrapped_key": "dMBl5m2Wz0FCuchK3ewB1buJG5QIUib5MeRUto8cYz1gaO7HiMCR2q3Us-gGiOY7"
+          },
+          {
+            "client_key": "86c15a1119201d2a9a6023aceeaf49664a54186ad2db465845331707b6da2b0d",
+            "epk": "nM7XUbMBu9FsT7je3dgvGJJdce2QyET6AVj4RbD6f0s",
+            "wrapped_key": "YahifHcn7GpkmAzdYjLKa6RM3TOs7RZ9I21z7jdTto5OQ-CO4tIV7vhVkdsXFqh3"
+          }
+        ],
+        "version": 1,
+        "writer": {
+          "client_key": "4d27bcee3135c4944b28d27dd809b07be10c35160d20131caa7e85575498d07c",
+          "sig": "SV92coL1laaGrIXCvJmYKWvnO4xFjupBwxLaiT6i3raSWyqVKAJMX5zZJZ8DJ4IM1ggd_h4o8-iLt9gJnT86DQ"
+        }
+      },
+      "name": "signed by another client in the writer's name",
+      "path": "/priv/pubky.music/vault/tidal.json"
+    },
+    {
+      "envelope": {
+        "ciphertext": "7lyAAAFkikiYkQ1YLqu5ipAFhZSRAIQijU3B6Ps5LHbbaGVcEtcFXB-Drr6LPCgobITregSGTeVwg_X-DmmkCbgR0QVJRzZgF3KojLMYAHEU3KA37pCPC74pEkL-b8cAfPfdhApr-mJ7duCoHf0J6mE7J0gIC5_zlPoOUtK-YCxgH-xeXdFUCCVpL6SW5oJgaJEy8i2q1H5_d-vRwtgg0ciJbZF4EQAoDr__12iXUZbRTbFaIxkdZmRRXnriPJpf_II0efjIobuYwL2kZYdL5vqAJK7XG9Fgv6H9dB8lDduU5o-ZF1KqNaq5vUkx6j6_xqwkW6keH1evGGMtp5cKEPKPa3HMw8_ZZbuAkk_CqwtVqsXwkTc",
+        "epoch": 1,
+        "nonce": "YGFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3",
+        "recipients": [
+          {
+            "client_key": "4d27bcee3135c4944b28d27dd809b07be10c35160d20131caa7e85575498d07c",
+            "epk": "iDGGuAC0HVzwQpaV2ps8xPMo680YSm5IL6V4wQPwbHc",
+            "wrapped_key": "dMBl5m2Wz0FCuchK3ewB1buJG5QIUib5MeRUto8cYz1gaO7HiMCR2q3Us-gGiOY7"
+          },
+          {
+            "client_key": "86c15a1119201d2a9a6023aceeaf49664a54186ad2db465845331707b6da2b0d",
+            "epk": "nM7XUbMBu9FsT7je3dgvGJJdce2QyET6AVj4RbD6f0s",
+            "wrapped_key": "YahifHcn7GpkmAzdYjLKa6RM3TOs7RZ9I21z7jdTto5OQ-CO4tIV7vhVkdsXFqh3"
+          }
+        ],
+        "version": 1
+      },
+      "name": "not signed",
+      "path": "/priv/pubky.music/vault/tidal.json"
+    }
+  ],
+  "owner": "o3ftkuxjd9k6zgnc4hhbhbg5jusubr4zqyb1dtzi8hhm3hf5wbmy",
+  "path": "/priv/pubky.music/vault/tidal.json",
+  "plaintext": "{\"service\":\"tidal\",\"label\":\"listener@example.org\",\"way\":\"app\",\"client_id\":\"example-client\",\"tokens\":{\"access_token\":\"at-1\",\"refresh_token\":\"rt-1\",\"token_type\":\"bearer\"},\"scopes\":[\"r_usr\",\"w_usr\"],\"expires_at\":1761403600,\"revision\":1,\"settings\":{\"quality\":\"max\"}}",
+  "sign_info": "pubky.music/vault/v2/sign",
+  "signer_proof_data": {
+    "client_key": "4d27bcee3135c4944b28d27dd809b07be10c35160d20131caa7e85575498d07c",
+    "kind": "pubky.music.vault-signer",
+    "sign_key": "16d8e15a4d6706490381b1e14afce6949ddab4991a594351349ad8578a4aba89",
+    "v": 1
+  }
+}

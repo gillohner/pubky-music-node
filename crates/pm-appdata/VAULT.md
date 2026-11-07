@@ -1,10 +1,16 @@
-# The sources vault, v1
+# The sources vault, v2
 
 A person's streaming sign-ins (TIDAL, Qobuz, Spotify, …) live on their own homeserver, encrypted on the
 device, so every client they authorise plays from the same sign-ins. The homeserver only stores ciphertext:
-`/priv/` is access-controlled, not encrypted, and its operator can read it. Reference code:
-`pm_appdata::vault`; vectors: `tests/vectors/vault-v1.json`, with an independent
-Python check of them (`tests/vectors/check_vault_v1.py`) for implementers in other languages.
+`/priv/` is access-controlled, not encrypted, and its operator can read it. From v2 every blob is also
+signed by the device that wrote it, and a reader takes only what one of the person's devices signed
+(see "The writer's signature"). Reference code: `pm_appdata::vault`; vectors:
+`tests/vectors/vault-v1.json` (the encryption) and `vault-v2.json` (the signature), each with an
+independent Python check (`check_vault_v1.py`, `check_vault_v2.py`) for implementers in other languages.
+
+v2 changes nothing in the encryption, the paths or the device list's rules; it adds a signer proof to each
+index entry and a `writer` member to the envelope. The envelope's `version` stays `1` during the migration
+window (below), so readers from before v2 keep opening blobs from updated clients.
 
 ## Paths
 
@@ -44,6 +50,16 @@ A reader trusts an entry only if all of these hold:
 - `data.client_key` equals the entry's `client_key`;
 - `data.name` equals the entry's `name`.
 
+Since v2 a client adds a second custom proof to its entry, `signer: {grant, pop}`, made and verified
+exactly like the first (the same grant, the same `iss` and capability rules), with the data
+`{"kind": "pubky.music.vault-signer", "v": 1, "client_key": "<hex X25519 public key>", "sign_key": "<hex
+Ed25519 public key>"}`. Its `client_key` must equal the entry's. The `sign_key` is the key the client signs its
+blobs with: **Ed25519, with the seed `HKDF-SHA-256(salt = none, ikm = the client's X25519 secret, info =
+"pubky.music/vault/v2/sign")`**, so a client keeps no second secret and a backup of its client secret carries
+it. It is re-published with the client proof when the grant is renewed. An entry without a verifying signer
+proof is a client from before v2: it is trusted as before (it gets keys), but it signs nothing, and what it
+writes is taken only during the migration window.
+
 The homeserver can't forge an entry, and the last rule stops it from renaming one ("Living room node" shown as
 "Your phone" on the entry the person then signs out). Readers show the signed `data.name` and `data.device`;
 `last_used_at` isn't signed and is only a hint. A client re-publishes its proof when its grant is renewed. An
@@ -56,7 +72,8 @@ app must hold the root secret. A grant proof gives the same identity binding wit
 ```json
 { "version": 1,
   "clients": [ { "client_key": "<hex>", "name": "Living room node", "authorised_at": 1761400000,
-                 "last_used_at": 1761400000, "proof": { "grant": "<JWS>", "pop": "<JWS>" } } ],
+                 "last_used_at": 1761400000, "proof": { "grant": "<JWS>", "pop": "<JWS>" },
+                 "signer": { "grant": "<JWS>", "pop": "<JWS>" } } ],
   "revoked": [ { "client_key": "<hex>", "grant_id": "<jti>", "at": 1761500000 } ] }
 ```
 Times are Unix seconds. `last_used_at` is written at most once a day per client. A client listed in
@@ -93,7 +110,8 @@ wrapped to.
 
 ```json
 { "version": 1, "epoch": 3, "nonce": "<b64>", "ciphertext": "<b64>",
-  "recipients": [ { "client_key": "<hex>", "epk": "<b64>", "wrapped_key": "<b64>" } ] }
+  "recipients": [ { "client_key": "<hex>", "epk": "<b64>", "wrapped_key": "<b64>" } ],
+  "writer": { "client_key": "<hex>", "sig": "<b64>" } }
 ```
 `<b64>` is unpadded base64url; keys are lowercase hex (as Paykit's `noise_static_public_key`).
 
@@ -168,8 +186,65 @@ wrapped to.
   of a sign-in was never in the vault reads that member to tell "signed out everywhere" from "that other
   sign-in was removed".
 
-Clients remember the highest `epoch` and `revision` they have seen per blob. They don't write over a newer
-blob, and they treat an older one as stale and read it again (a homeserver can serve an old copy).
+Clients remember the highest `epoch` and `revision` they have seen per blob, and the highest
+`signed_out_everywhere_at` (see "The writer's signature": what is remembered, and when it is forgotten). They
+don't write over a newer blob, and they treat an older one as stale and read it again (a homeserver can
+serve an old copy).
+
+## The writer's signature (v2)
+
+Encryption keeps the homeserver from reading a sign-in; it doesn't keep it from *replacing* one. Any
+writer with the person's grant, and the homeserver itself, could put a blob of its own in a sign-in's place,
+sealed to the real clients' keys, and every client would take it. So from v2 every blob says who wrote it,
+and a reader takes a blob only from one of the person's devices.
+
+- **`writer`:** `{client_key, sig}`. `client_key` is the writer's X25519 key (its index entry holds its
+  `sign_key`); `sig` is the unpadded base64url Ed25519 signature, with that signing key, of
+  `"pubky.music/vault/v2/blob" 0x00 owner 0x00 path 0x00 epoch(8 BE) ‖ SHA-256(recipients) ‖
+  SHA-256(nonce ‖ ciphertext)`, where `SHA-256(recipients)` is over each recipient's `client_key`, `epk` and
+  `wrapped_key` (32 + 32 + 48 raw bytes), in the envelope's order. The revision and every other plaintext
+  member are covered through the ciphertext. `owner`, `path` and `epoch` are encoded as in `aad`.
+- **Every write signs**, every rewrite too: a device added (the recipients changed), a rotation, a refresh.
+  The signer is the client that rewrote the blob, whoever wrote it before.
+- **Reading a signed blob:** it is taken only when `writer.client_key` is a trusted index entry *today* (its
+  proofs verify, it isn't signed out: index `revoked` and the reader's own record), that entry's signer proof
+  gives a `sign_key`, and `sig` verifies. Otherwise it is refused ("not written by one of your devices") and
+  the reader keeps what it has. A signature by a device signed out since is refused too: what a signed-out
+  device wrote is never taken afterwards, with one exception: the client signing a device out rotates the
+  blobs that device wrote while it was trusted (under each blob's lock, right after the list says it is out,
+  with the signing key its entry proved), so those sign-ins survive the sign-out under the rotating client's
+  signature, and nothing the device writes from then on is taken.
+- **Writing over a blob nobody trusted signed:** a client that holds a sign-in of its own writes it over such
+  a blob with a new data key, the next epoch and a revision above the blob's, so what the blob held is never
+  taken and never comes back as newer. It never rewrites that blob from its content (adding a device, a
+  rotation), and never takes its tokens for a refresh.
+- **Reading an unsigned blob** (a client from before v2): only while the reader has never seen a signed copy
+  of that service (a per-service note in the reader's own record), and, in a node, only when it has no copy
+  of its own. It is never taken over a signed copy. The writer-chosen markers inside the plaintext (`node`,
+  `created_by`, …) count only on signed blobs.
+- **What a reader remembers** (its own file, beside its record of sign-outs): per service the highest
+  `(epoch, revision)` of a signed blob it read or wrote, which services it has seen signed, and the highest
+  `signed_out_everywhere_at` it has seen in the device list. A signed blob below the mark is refused as
+  stale, so a homeserver that serves an old copy can't take a sign-in back, also where `LOCK` isn't
+  supported; a device list with a lower `signed_out_everywhere_at` doesn't undo a sign-out everywhere. The
+  marks of every blob are forgotten when the marker moves (every sign-in starts over), a service's mark is
+  forgotten when the reader deletes that blob or finds it gone, and a person can tell a node to take the
+  vault's copy by hand (`POST /v1/vault/sync {service, take: "vault"}`), which forgets that one mark: a
+  sign-in made anew on another device after a sign-out and a new sign-in there within one sync interval
+  would otherwise look stale.
+- **Migration window.** The envelope's `version` stays `1`; readers from before v2 keep unknown members, so
+  they still open signed blobs and keep `writer` when they rewrite one (then the signature no longer
+  matches the content, and updated readers refuse that copy: a client from before v2 that rewrites a signed
+  blob takes it out of circulation for updated clients, which keep their own copies). A node signs a blob
+  from before v2 on the first sync pass in which the blob's content equals the node's own copy, under the
+  blob's lock; any other unsigned blob gets signed on its next real write. The window closes, with
+  `version` 2 and unsigned blobs refused, in the release after every known vault client signs; the release
+  note says to update all of a person's nodes together. Until then an un-updated node in a mixed fleet
+  writes unsigned blobs that updated nodes don't take over their own copy; after a token rotation such a
+  pair may need one new sign-in.
+- **A vault client outside this repository** (none is known today; the apps are shells around the node's
+  own interface) must: derive the signing key, publish the signer proof on registration and on grant
+  renewal, sign every write, and apply the reader rules above.
 
 ## Refreshing a token
 

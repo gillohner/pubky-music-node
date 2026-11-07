@@ -46,6 +46,26 @@ async fn admin_call(a: &(String, String), method: reqwest::Method, path: &str, b
     serde_json::from_str(&text).unwrap_or(Value::String(text))
 }
 
+fn testnet() -> bool {
+    std::env::var("PM_TESTNET").as_deref() == Ok("1")
+}
+
+fn network() -> pm_pubky::config::Network {
+    if testnet() {
+        pm_pubky::config::Network::Testnet
+    } else {
+        pm_pubky::config::Network::Mainnet
+    }
+}
+
+fn pubky() -> Pubky {
+    if testnet() {
+        Pubky::testnet().unwrap()
+    } else {
+        Pubky::new().unwrap()
+    }
+}
+
 fn node(dir: &std::path::Path) -> Arc<NodeState> {
     let db = dir.join("node.sqlite");
     NodeState::new(
@@ -133,9 +153,9 @@ async fn the_device_list_and_signing_out_through_the_api() {
         Some(json!({"storage_quota_mb": "unlimited"})),
     )
     .await;
-    let signer = Pubky::new().unwrap().signer(Keypair::random());
+    let signer = pubky().signer(Keypair::random());
     signer.signup(&hs, Some(token.as_str().unwrap())).await.unwrap();
-    let homeserver = NodeHomeserver::new(pm_pubky::config::Network::Mainnet).unwrap();
+    let homeserver = NodeHomeserver::new(network()).unwrap();
     let mut sessions = Vec::new();
     for id in ["node.pubky.music", "phone.pubky.music"] {
         let flow = homeserver.start_login(id).unwrap();
@@ -144,7 +164,7 @@ async fn the_device_list_and_signing_out_through_the_api() {
     }
     let phone_session = sessions.pop().unwrap();
     *s.sync.lock().unwrap() = Some(Arc::new(PubkySync::from_session(
-        NodeHomeserver::new(pm_pubky::config::Network::Mainnet).unwrap(),
+        NodeHomeserver::new(network()).unwrap(),
         sessions.pop().unwrap(),
     )));
 
@@ -294,9 +314,9 @@ async fn two_nodes_keep_their_sign_ins_in_step_through_the_vault() {
         Some(json!({"storage_quota_mb": "unlimited"})),
     )
     .await;
-    let signer = Pubky::new().unwrap().signer(Keypair::random());
+    let signer = pubky().signer(Keypair::random());
     signer.signup(&hs, Some(token.as_str().unwrap())).await.unwrap();
-    let homeserver = NodeHomeserver::new(pm_pubky::config::Network::Mainnet).unwrap();
+    let homeserver = NodeHomeserver::new(network()).unwrap();
     let (d1, d2) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let (n1, n2) = (node(d1.path()), node(d2.path()));
     for (n, id) in [(&n1, "living-room.pubky.music"), (&n2, "kitchen.pubky.music")] {
@@ -304,7 +324,7 @@ async fn two_nodes_keep_their_sign_ins_in_step_through_the_vault() {
         signer.approve_auth(flow.url()).await.unwrap();
         let session = flow.await_approval().await.unwrap();
         *n.sync.lock().unwrap() = Some(Arc::new(PubkySync::from_session(
-            NodeHomeserver::new(pm_pubky::config::Network::Mainnet).unwrap(),
+            NodeHomeserver::new(network()).unwrap(),
             session,
         )));
     }
@@ -334,6 +354,10 @@ async fn two_nodes_keep_their_sign_ins_in_step_through_the_vault() {
     let (_, r) = call(&a2, "POST", "/v1/vault/sync").await;
     assert_eq!(r["pulled"], json!(["tidal", "jamendo"]), "{r}");
     assert_eq!(get(&n2, "tidal.user").as_deref(), Some(tidal_v1));
+    // What node 2 read was signed by node 1 (Settings says so)
+    let (_, v) = call(&a2, "GET", "/v1/vault").await;
+    let (_, v1) = call(&a1, "GET", "/v1/vault").await;
+    assert_eq!(v["sign_ins"][0]["signed_by"], v1["this_device"], "{v}");
     assert_eq!(
         get(&n2, "jamendo.user").as_deref(),
         Some(r#"{"access_token":"jam-1","refresh_token":"jam-r","expires_at":5000,"name":"Gil"}"#)
@@ -376,7 +400,7 @@ async fn two_nodes_keep_their_sign_ins_in_step_through_the_vault() {
     assert!(v["last_sync"]["at"].as_i64().is_some());
     // Nothing changed: nothing moves
     let (_, r) = call(&a1, "POST", "/v1/vault/sync").await;
-    let quiet = json!({"migrated": [], "pushed": [], "pulled": [], "signed_out": [], "removed": [],
+    let quiet = json!({"migrated": [], "pushed": [], "signed": [], "pulled": [], "signed_out": [], "removed": [],
         "conflicts": [], "not_usable": [], "not_readable": [], "failed": [], "forgotten": [], "details": []});
     assert_eq!(r, quiet);
 
@@ -390,7 +414,7 @@ async fn two_nodes_keep_their_sign_ins_in_step_through_the_vault() {
         signer.approve_auth(flow.url()).await.unwrap();
         let session = flow.await_approval().await.unwrap();
         *n3.sync.lock().unwrap() = Some(Arc::new(PubkySync::from_session(
-            NodeHomeserver::new(pm_pubky::config::Network::Mainnet).unwrap(),
+            NodeHomeserver::new(network()).unwrap(),
             session,
         )));
     }

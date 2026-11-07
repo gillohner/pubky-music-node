@@ -15,6 +15,8 @@ base64 = "0.23"
 curve25519-dalek = "5"
 chacha20poly1305 = "0.11"
 hkdf = "0.13"
+# v2: the blobs are signed by the device that wrote them (Ed25519, a key derived from the X25519 secret)
+ed25519-dalek = "3"
 sha2 = "0.11"
 getrandom = "0.3"
 zeroize = "1"
