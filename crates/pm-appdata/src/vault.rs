@@ -1,5 +1,6 @@
-//! The sources vault, v1 (`VAULT.md` in this crate): a person's streaming sign-ins on their own
-//! homeserver, encrypted on the device to every client they have authorised.
+//! The sources vault (`VAULT.md` in this crate): a person's streaming sign-ins on their own
+//! homeserver, encrypted on the device to every client they have authorised, and, from v2,
+//! signed by the device that wrote them ([`sign_envelope`], [`writer_signed`]).
 //!
 //! This module holds the paths, the device list ([`Index`]), the envelope ([`Envelope`]), the
 //! sign-in it carries ([`SignIn`]) and the reference encryption ([`seal`], [`open`]). It does no I/O
@@ -7,7 +8,8 @@
 //! (`verify_custom_grant_pop`) and then [`client_entry_problem`] with the verified parts.
 //!
 //! The primitives are pubky-noise's: X25519 (`curve25519-dalek`), HKDF-SHA-256 and
-//! XChaCha20-Poly1305 (`chacha20poly1305`). Nothing here implements a cipher.
+//! XChaCha20-Poly1305 (`chacha20poly1305`), plus Ed25519 (`ed25519-dalek`) for the writer's
+//! signature. Nothing here implements a cipher.
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
@@ -99,23 +101,30 @@ impl std::error::Error for VaultError {}
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ClientKey(pub [u8; 32]);
 
+fn hex32(b: &[u8; 32]) -> String {
+    b.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn unhex32(s: &str, what: &'static str) -> Result<[u8; 32], VaultError> {
+    if s.len() != 64 || !s.is_ascii() {
+        return Err(VaultError::Format(what));
+    }
+    let mut out = [0u8; 32];
+    for (i, b) in out.iter_mut().enumerate() {
+        *b = u8::from_str_radix(&s[2 * i..2 * i + 2], 16).map_err(|_| VaultError::Format(what))?;
+    }
+    Ok(out)
+}
+
 impl ClientKey {
     /// Lowercase hex.
     pub fn to_hex(&self) -> String {
-        self.0.iter().map(|b| format!("{b:02x}")).collect()
+        hex32(&self.0)
     }
 
     /// From 64 hex digits (either case).
     pub fn from_hex(s: &str) -> Result<Self, VaultError> {
-        if s.len() != 64 || !s.is_ascii() {
-            return Err(VaultError::Format("a client key is 64 hex digits"));
-        }
-        let mut out = [0u8; 32];
-        for (i, b) in out.iter_mut().enumerate() {
-            *b = u8::from_str_radix(&s[2 * i..2 * i + 2], 16)
-                .map_err(|_| VaultError::Format("a client key is 64 hex digits"))?;
-        }
-        Ok(Self(out))
+        unhex32(s, "a client key is 64 hex digits").map(Self)
     }
 }
 
@@ -166,6 +175,122 @@ impl ClientSecret {
 impl std::fmt::Debug for ClientSecret {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("ClientSecret(<redacted>)")
+    }
+}
+
+// ---- the signing key (v2) ----
+
+/// The `info` of the signing key's derivation ([`SigningKey::derive`]).
+const SIGN_DOMAIN: &[u8] = b"pubky.music/vault/v2/sign";
+/// The domain of a writer's signature over an envelope ([`signed_data`]).
+const WRITER_DOMAIN: &[u8] = b"pubky.music/vault/v2/blob";
+/// The `kind` of a signer proof's data ([`SignerProofData`]).
+pub const SIGNER_KIND: &str = "pubky.music.vault-signer";
+
+/// A client's Ed25519 public key, the one that signs the blobs it writes; lowercase hex in JSON.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SignKey(pub [u8; 32]);
+
+impl SignKey {
+    /// Lowercase hex.
+    pub fn to_hex(&self) -> String {
+        hex32(&self.0)
+    }
+
+    /// From 64 hex digits (either case).
+    pub fn from_hex(s: &str) -> Result<Self, VaultError> {
+        unhex32(s, "a signing key is 64 hex digits").map(Self)
+    }
+
+    /// Whether `sig` (64 bytes) is this key's signature of `data` (Ed25519, strict verification).
+    pub fn verify(&self, data: &[u8], sig: &[u8]) -> bool {
+        let Ok(key) = ed25519_dalek::VerifyingKey::from_bytes(&self.0) else {
+            return false;
+        };
+        let Ok(sig) = <[u8; 64]>::try_from(sig) else {
+            return false;
+        };
+        key.verify_strict(data, &ed25519_dalek::Signature::from_bytes(&sig))
+            .is_ok()
+    }
+}
+
+impl std::fmt::Debug for SignKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "SignKey({})", self.to_hex())
+    }
+}
+
+impl Serialize for SignKey {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&self.to_hex())
+    }
+}
+
+impl<'de> Deserialize<'de> for SignKey {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        Self::from_hex(&s).map_err(serde::de::Error::custom)
+    }
+}
+
+/// A client's Ed25519 signing key, derived from its X25519 secret: `seed = HKDF-SHA-256(salt
+/// none, ikm = secret, info = "pubky.music/vault/v2/sign")`, so there is no second secret to
+/// keep, and a backup of the client secret carries it.
+pub struct SigningKey(ed25519_dalek::SigningKey);
+
+impl SigningKey {
+    /// The signing key of the client holding `secret`.
+    pub fn derive(secret: &ClientSecret) -> Self {
+        let mut seed = Zeroizing::new([0u8; 32]);
+        Hkdf::<Sha256>::new(None, &secret.0[..])
+            .expand(SIGN_DOMAIN, seed.as_mut())
+            .expect("32 bytes is a valid HKDF-SHA-256 output length");
+        Self(ed25519_dalek::SigningKey::from_bytes(&seed))
+    }
+
+    /// Its public key.
+    pub fn public(&self) -> SignKey {
+        SignKey(self.0.verifying_key().to_bytes())
+    }
+
+    /// The Ed25519 signature of `data`.
+    pub fn sign(&self, data: &[u8]) -> [u8; 64] {
+        use ed25519_dalek::Signer;
+        self.0.sign(data).to_bytes()
+    }
+}
+
+impl std::fmt::Debug for SigningKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "SigningKey({})", self.public().to_hex())
+    }
+}
+
+/// The data a client signs in its signer proof (its second custom proof): the signing key
+/// bound to its client key by the same grant as its client proof.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SignerProofData {
+    /// [`SIGNER_KIND`].
+    pub kind: String,
+    /// [`VERSION`].
+    pub v: u32,
+    /// The client's X25519 public key.
+    pub client_key: ClientKey,
+    /// The client's Ed25519 public key.
+    pub sign_key: SignKey,
+}
+
+impl SignerProofData {
+    /// The signer proof data for a client.
+    pub fn new(client_key: ClientKey, sign_key: SignKey) -> Self {
+        Self {
+            kind: SIGNER_KIND.into(),
+            v: VERSION,
+            client_key,
+            sign_key,
+        }
     }
 }
 
@@ -274,6 +399,10 @@ pub struct ClientEntry {
     pub last_used_at: u64,
     /// The grant and the custom proof that bind `client_key` to the identity.
     pub proof: Proof,
+    /// The grant and the custom proof that bind the client's signing key to `client_key`
+    /// ([`SignerProofData`]); absent for a client from before v2, which signs nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signer: Option<Proof>,
     /// Members this reader doesn't know, kept on rewrite.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
@@ -401,6 +530,37 @@ pub fn client_entry_problem(
         return Some("its name was changed outside its proof");
     }
     None
+}
+
+/// The signing key an entry's signer proof gives it, given that proof already verified by the
+/// pubky SDK (`verify_custom_grant_pop`), with the same arguments as [`client_entry_problem`];
+/// else why not.
+pub fn signer_of_entry(
+    entry: &ClientEntry,
+    owner: &str,
+    issuer: &str,
+    caps: &[String],
+    data: &Value,
+) -> Result<SignKey, &'static str> {
+    if issuer != owner {
+        return Err("the signer proof's grant is someone else's");
+    }
+    if !caps.iter().any(|c| covers_vault(c)) {
+        return Err("the signer proof's grant doesn't name the vault");
+    }
+    let Ok(d) = serde_json::from_value::<SignerProofData>(data.clone()) else {
+        return Err("the signer proof's data isn't a vault signer's");
+    };
+    if d.kind != SIGNER_KIND || d.v != VERSION {
+        return Err("the signer proof's data isn't a vault signer's");
+    }
+    if d.client_key != entry.client_key {
+        return Err("the signer proof is for another key");
+    }
+    if ed25519_dalek::VerifyingKey::from_bytes(&d.sign_key.0).is_err() {
+        return Err("the signer proof's signing key isn't one");
+    }
+    Ok(d.sign_key)
 }
 
 /// Whether a capability (`<scope>:<actions>`) names [`VAULT_DIR`] itself with `r` and `w`. An
@@ -540,6 +700,19 @@ pub struct Envelope {
     pub ciphertext: String,
     /// The data key, wrapped to each client.
     pub recipients: Vec<Recipient>,
+    /// Who wrote it, and their signature over it ([`signed_data`]); absent on a blob from before
+    /// v2. Readers that don't know the member keep it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub writer: Option<Writer>,
+}
+
+/// The client that wrote an envelope and its signature over it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Writer {
+    /// The writer's X25519 public key (its index entry holds its signing key).
+    pub client_key: ClientKey,
+    /// Ed25519 signature of [`signed_data`] with the writer's signing key, unpadded base64url.
+    pub sig: String,
 }
 
 /// The data key wrapped to one client.
@@ -737,6 +910,7 @@ pub fn seal_with(
         nonce: b64(nonce),
         ciphertext: b64(&ciphertext),
         recipients,
+        writer: None,
     };
     if serde_json::to_vec(&env).map_or(0, |v| v.len()) > MAX_BLOB_BYTES {
         return Err(VaultError::TooLarge);
@@ -800,6 +974,70 @@ pub fn add_recipient(
     env.recipients
         .push(wrap(owner, path, env.epoch, &key, new_client)?);
     Ok(())
+}
+
+/// What a writer signs over an envelope: `"pubky.music/vault/v2/blob" 0 owner 0 path 0 epoch(8,
+/// BE)` ‖ `SHA-256(each recipient's client_key ‖ epk ‖ wrapped_key, raw, in order)` ‖
+/// `SHA-256(nonce ‖ ciphertext, raw)`. The revision and every other plaintext member are
+/// covered through the ciphertext; a change of recipients, content, epoch or path breaks it.
+pub fn signed_data(owner: &str, path: &str, env: &Envelope) -> Result<Vec<u8>, VaultError> {
+    use sha2::Digest;
+    let mut r = Sha256::new();
+    for x in &env.recipients {
+        r.update(x.client_key.0);
+        r.update(unb64::<32>(&x.epk, "epk")?);
+        r.update(unb64::<48>(&x.wrapped_key, "wrapped_key")?);
+    }
+    let mut c = Sha256::new();
+    c.update(unb64::<24>(&env.nonce, "nonce")?);
+    c.update(
+        URL_SAFE_NO_PAD
+            .decode(&env.ciphertext)
+            .map_err(|_| VaultError::Format("ciphertext"))?,
+    );
+    let mut d = Vec::with_capacity(WRITER_DOMAIN.len() + owner.len() + path.len() + 11 + 64);
+    d.extend_from_slice(WRITER_DOMAIN);
+    d.push(0);
+    d.extend_from_slice(owner.as_bytes());
+    d.push(0);
+    d.extend_from_slice(path.as_bytes());
+    d.push(0);
+    d.extend_from_slice(&env.epoch.to_be_bytes());
+    d.extend_from_slice(&r.finalize());
+    d.extend_from_slice(&c.finalize());
+    Ok(d)
+}
+
+/// Sign `env` as `client_key` with its signing key (every write, and every rewrite: a device
+/// added, a rotation).
+pub fn sign_envelope(
+    owner: &str,
+    path: &str,
+    env: &mut Envelope,
+    client_key: ClientKey,
+    key: &SigningKey,
+) -> Result<(), VaultError> {
+    let data = signed_data(owner, path, env)?;
+    env.writer = Some(Writer {
+        client_key,
+        sig: b64(&key.sign(&data)),
+    });
+    Ok(())
+}
+
+/// Whether `env` carries a signature by `sign_key` (the signing key of its `writer`, as that
+/// client's index entry proves it). An unsigned envelope is not.
+pub fn writer_signed(owner: &str, path: &str, env: &Envelope, sign_key: &SignKey) -> bool {
+    let Some(w) = &env.writer else {
+        return false;
+    };
+    let Ok(sig) = unb64::<64>(&w.sig, "sig") else {
+        return false;
+    };
+    let Ok(data) = signed_data(owner, path, env) else {
+        return false;
+    };
+    sign_key.verify(&data, &sig)
 }
 
 /// A blob's sign-in, decrypted and parsed.

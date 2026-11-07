@@ -4,11 +4,18 @@
 //! Everything is encrypted here before it leaves the node ([`pm_appdata::vault::seal`]);
 //! the homeserver only ever sees envelopes. Which clients a blob is wrapped to is the caller's
 //! choice: the trusted entries of the device list.
+//!
+//! Every blob this node writes is signed by its signing key (VAULT.md v2), which its index entry
+//! proves with a second custom proof. A signed blob is read only when its writer is a trusted
+//! entry today; an unsigned one (from before v2) only while this node has seen no signed copy
+//! of that service. The node keeps the highest epoch and revision it has seen per blob, and the
+//! highest sign-out-everywhere marker, in a local file ([`Vault::keep_marks`]): an older copy the
+//! homeserver serves is refused as stale.
 
 use crate::homeserver::{is_not_found, HomeserverError};
 use pm_appdata::vault::{
     self as spec, ClientEntry, ClientKey, ClientProofData, ClientSecret, DataKey, Envelope, Index, Proof,
-    Revoked, SignIn, VaultError,
+    Revoked, SignIn, SignKey, SignerProofData, SigningKey, VaultError,
 };
 use pubky::PubkySession;
 use std::path::Path;
@@ -37,6 +44,14 @@ pub enum VaultStoreError {
     NeedsVaultGrant,
     #[error("the node's record of signed-out devices: {0}")]
     Local(#[from] std::io::Error),
+    /// The blob carries a signature, but not one of a device trusted today (an entry that
+    /// verifies, with its signer proof, and isn't signed out).
+    #[error("the sign-in for {0} wasn't written by one of your devices")]
+    NotADevice(String),
+    /// The homeserver served a copy older than one this node has seen, or an unsigned copy
+    /// where a signed one was seen (VAULT.md: a stale copy is read again, never taken).
+    #[error("the vault's copy of the {service} sign-in is stale: {why}")]
+    Stale { service: String, why: &'static str },
     /// The homeserver didn't finish in time (what was being done, and how long it had).
     #[error("{0}: the homeserver didn't answer in time")]
     TimedOut(String),
@@ -279,6 +294,56 @@ fn write_local_revoked(path: &Path, list: &LocalRevoked) -> std::io::Result<()> 
 
 /// `index.json` as bytes within [`spec::MAX_INDEX_BYTES`]: when too large, signed-out records
 /// that name no listed entry go first (they change nobody's trust).
+/// What this node remembers of the vault, so a homeserver that serves an older copy can't take it
+/// back (VAULT.md v2): the highest epoch and revision seen per blob, which blobs it has seen a
+/// signed copy of, and the highest sign-out-everywhere marker.
+#[derive(Debug, Default, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+struct Marks {
+    /// Per service: `[epoch, revision]` of the newest signed blob seen.
+    #[serde(default)]
+    blobs: std::collections::BTreeMap<String, (u64, u64)>,
+    /// The services a signed blob was seen for: an unsigned one is never taken for those again.
+    #[serde(default)]
+    signed_seen: std::collections::BTreeSet<String>,
+    /// The highest `signed_out_everywhere_at` seen in the device list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    signed_out_everywhere_at: Option<u64>,
+}
+
+fn marks_file_lock() -> std::sync::MutexGuard<'static, ()> {
+    static L: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    L.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn read_marks(path: &Path) -> std::io::Result<Marks> {
+    match std::fs::read(path) {
+        Ok(b) => Ok(serde_json::from_slice(&b).unwrap_or_default()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Marks::default()),
+        Err(e) => Err(e),
+    }
+}
+
+fn write_marks(path: &Path, m: &Marks) -> std::io::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let tmp = tmp_beside(path);
+    write_private(&tmp, &serde_json::to_vec(m).expect("marks serialise"))?;
+    std::fs::rename(&tmp, path)
+}
+
+/// Change the marks at `path` with `f`, under the file lock; written only when they changed.
+fn update_marks<T>(path: &Path, f: impl FnOnce(&mut Marks) -> T) -> std::io::Result<T> {
+    let _g = marks_file_lock();
+    let mut m = read_marks(path)?;
+    let before = m.clone();
+    let out = f(&mut m);
+    if m != before {
+        write_marks(path, &m)?;
+    }
+    Ok(out)
+}
+
 fn index_body(ix: &mut Index) -> Result<Vec<u8>> {
     let enc =
         |ix: &Index| serde_json::to_vec(ix).map_err(|_| VaultStoreError::from(VaultError::Format("index")));
@@ -316,6 +381,9 @@ pub struct Opened {
     pub epoch: u64,
     /// Who it is wrapped to now.
     pub recipients: Vec<ClientKey>,
+    /// The trusted device that signed it; `None` for a blob from before v2 (read only while
+    /// this node has seen no signed copy of the service).
+    pub signed_by: Option<ClientKey>,
     data_key: DataKey,
 }
 
@@ -330,6 +398,8 @@ pub struct Vault<'a> {
     device: Option<&'static str>,
     /// This client's own record of signed-out clients (VAULT.md, "Revocation is remembered").
     revocations: Option<&'a Path>,
+    /// This client's record of the newest copies it has seen ([`Marks`]).
+    marks: Option<&'a Path>,
 }
 
 impl<'a> Vault<'a> {
@@ -341,7 +411,94 @@ impl<'a> Vault<'a> {
             lease_only: false,
             device: None,
             revocations: None,
+            marks: None,
         }
+    }
+
+    /// Remember, in the file at `path`, the newest copy of each blob this node has seen and the
+    /// highest sign-out-everywhere marker: a copy the homeserver serves that is older than that
+    /// is refused as stale ([`VaultStoreError::Stale`]). Every real client sets this.
+    pub fn keep_marks(mut self, path: &'a Path) -> Self {
+        self.marks = Some(path);
+        self
+    }
+
+    /// This node's signing key (derived from its vault key: nothing else to keep).
+    pub fn signing_key(&self) -> SigningKey {
+        SigningKey::derive(self.secret)
+    }
+
+    /// Whether this node has seen a signed copy of `service`: an unsigned one is then never
+    /// taken for it again.
+    pub fn seen_signed(&self, service: &str) -> Result<bool> {
+        match self.marks {
+            Some(p) => Ok(read_marks(p)?.signed_seen.contains(service)),
+            None => Ok(false),
+        }
+    }
+
+    /// Forget the newest copy seen of `service` (the person takes the vault's copy by hand after
+    /// a sign-in made anew elsewhere, or the blob is gone).
+    pub fn forget_mark(&self, service: &str) -> Result<()> {
+        if let Some(p) = self.marks {
+            update_marks(p, |m| {
+                m.blobs.remove(service);
+            })?;
+        }
+        Ok(())
+    }
+
+    /// A signed copy of `service` at `epoch`/`revision` was read or written: the newest seen.
+    fn note_blob(&self, service: &str, epoch: u64, revision: u64) -> Result<()> {
+        if let Some(p) = self.marks {
+            update_marks(p, |m| {
+                let e = m.blobs.entry(service.to_string()).or_insert((0, 0));
+                if (epoch, revision) > *e {
+                    *e = (epoch, revision);
+                }
+                m.signed_seen.insert(service.to_string());
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Refuse a copy older than the newest seen, or an unsigned one where a signed one was seen.
+    fn check_blob(&self, service: &str, epoch: u64, revision: u64, signed: bool) -> Result<()> {
+        let Some(p) = self.marks else {
+            return Ok(());
+        };
+        let m = read_marks(p)?;
+        if !signed && m.signed_seen.contains(service) {
+            return Err(VaultStoreError::Stale {
+                service: service.to_string(),
+                why: "it isn't signed, and a signed copy was seen before",
+            });
+        }
+        if m.blobs.get(service).is_some_and(|seen| (epoch, revision) < *seen) {
+            return Err(VaultStoreError::Stale {
+                service: service.to_string(),
+                why: "it is older than one this node has seen",
+            });
+        }
+        Ok(())
+    }
+
+    /// When the person last signed out everywhere: the device list's marker, or the higher one
+    /// this node remembers (a list the homeserver serves from before a sign-out everywhere
+    /// doesn't undo it). A new marker forgets every blob's newest copy: they start over.
+    pub fn marker(&self, ix: &Index) -> Result<Option<u64>> {
+        let served = Self::signed_out_everywhere_at(ix);
+        let Some(p) = self.marks else {
+            return Ok(served);
+        };
+        update_marks(p, |m| {
+            if served > m.signed_out_everywhere_at {
+                m.signed_out_everywhere_at = served;
+                m.blobs.clear();
+            }
+            m.signed_out_everywhere_at.max(served)
+        })
+        .map_err(Into::into)
     }
 
     /// Remember every signed-out client in the file at `path`, and keep trusting none of them
@@ -441,16 +598,38 @@ impl<'a> Vault<'a> {
 
     /// A service's sign-in, decrypted; `None` when there is none.
     /// [`VaultError::NotARecipient`] when this node isn't (yet) one of its clients.
+    /// [`VaultStoreError::NotADevice`] when it carries a signature that isn't a trusted device's,
+    /// [`VaultStoreError::Stale`] when it is older than a copy this node has seen.
     pub async fn read(&self, service: &str) -> Result<Option<Opened>> {
         let path = Self::blob_path(service)?;
         let Some(env) = self.envelope(service).await? else {
+            self.forget_mark(service)?;
             return Ok(None);
         };
         let (data_key, sign_in) = spec::open_sign_in(&self.owner, &path, &env, self.secret)?;
+        let signed_by = match &env.writer {
+            Some(w) => {
+                let ix = self.index().await?;
+                let signed = self
+                    .signers(&ix)
+                    .get(&w.client_key)
+                    .is_some_and(|k| spec::writer_signed(&self.owner, &path, &env, k));
+                if !signed {
+                    return Err(VaultStoreError::NotADevice(service.to_string()));
+                }
+                Some(w.client_key)
+            }
+            None => None,
+        };
+        self.check_blob(service, env.epoch, sign_in.revision, signed_by.is_some())?;
+        if signed_by.is_some() {
+            self.note_blob(service, env.epoch, sign_in.revision)?;
+        }
         Ok(Some(Opened {
             sign_in,
             epoch: env.epoch,
             recipients: env.recipients.iter().map(|r| r.client_key).collect(),
+            signed_by,
             data_key,
         }))
     }
@@ -507,19 +686,33 @@ impl<'a> Vault<'a> {
                 recipients.push(*k);
             }
         }
+        // A blob nobody trusted signed (a device signed out since, a writer that isn't a
+        // device of the person's) is written over, past it: a new key, the next epoch, and a
+        // revision above its own, so what it wrote is never taken and never comes back as newer
+        let mut past_untrusted: Option<(u64, u64)> = None;
         let existing = match self.read(service).await {
             Ok(o) => o,
             Err(VaultStoreError::Vault(VaultError::NotARecipient)) => {
                 return Err(VaultStoreError::NotOurs(service.to_string()))
             }
+            Err(VaultStoreError::NotADevice(_)) => {
+                let env = self.envelope(service).await?;
+                past_untrusted = Some(env.as_ref().map_or((0, 0), |env| {
+                    let revision = spec::open_sign_in(&self.owner, path, env, self.secret)
+                        .map_or(0, |(_, s)| s.revision);
+                    (env.epoch, revision)
+                }));
+                None
+            }
             Err(e) => return Err(e),
         };
-        if must_exist && existing.is_none() {
+        if must_exist && existing.is_none() && past_untrusted.is_none() {
             return Err(VaultError::Format("the sign-in was removed meanwhile").into());
         }
-        let (data_key, epoch, revision) = match &existing {
-            None => (DataKey::generate(), 1, 1),
-            Some(o) => {
+        let (data_key, epoch, revision) = match (&existing, past_untrusted) {
+            (None, Some((epoch, revision))) => (DataKey::generate(), epoch + 1, revision + 1),
+            (None, None) => (DataKey::generate(), 1, 1),
+            (Some(o), _) => {
                 let dropped = o.recipients.iter().any(|k| !recipients.contains(k));
                 if dropped {
                     (DataKey::generate(), o.epoch + 1, o.sign_in.revision + 1)
@@ -536,10 +729,45 @@ impl<'a> Vault<'a> {
         }
         let plain =
             zeroize::Zeroizing::new(serde_json::to_vec(&s).map_err(|_| VaultError::Format("sign-in"))?);
-        let env = spec::seal(&self.owner, path, epoch, &data_key, &plain, &recipients)?;
+        let mut env = spec::seal(&self.owner, path, epoch, &data_key, &plain, &recipients)?;
+        spec::sign_envelope(&self.owner, path, &mut env, me, &self.signing_key())?;
         let body = serde_json::to_vec(&env).map_err(|_| VaultError::Format("envelope"))?;
         self.put_locked(held, path, body).await?;
+        self.note_blob(service, epoch, revision)?;
         Ok(revision)
+    }
+
+    /// Sign a blob from before v2 as this node, under its lock, when it still holds what `ok`
+    /// accepts (the caller's own copy: the node vouches only for what it holds itself). The
+    /// content is written again (revision + 1), signed. Returns whether it was.
+    pub async fn resign_if(&self, service: &str, ok: &(dyn Fn(&SignIn) -> bool + Sync)) -> Result<bool> {
+        let path = Self::blob_path(service)?;
+        let held = self.lock(&path).await?;
+        let r = async {
+            let Some(env) = self.envelope(service).await? else {
+                return Ok(false);
+            };
+            if env.writer.is_some() {
+                return Ok(false);
+            }
+            let (_, sign_in) = spec::open_sign_in(&self.owner, &path, &env, self.secret)?;
+            if !ok(&sign_in) {
+                return Ok(false);
+            }
+            let me = self.client_key();
+            let others: Vec<ClientKey> = env
+                .recipients
+                .iter()
+                .map(|r| r.client_key)
+                .filter(|k| *k != me)
+                .collect();
+            self.write_held(&held, service, &path, &sign_in, &others, true)
+                .await?;
+            Ok::<bool, VaultStoreError>(true)
+        }
+        .await;
+        self.unlock(held).await;
+        r
     }
 
     /// Remove a service's sign-in from the vault (nothing to do when there is none).
@@ -639,6 +867,8 @@ pub struct TrustedClient {
     pub last_used_at: u64,
     /// The grant's id (`jti`), what "Sign out this device" records.
     pub grant_id: String,
+    /// The key its blobs are signed with, when its signer proof verifies (a v2 client).
+    pub sign_key: Option<SignKey>,
 }
 
 struct Checked {
@@ -646,6 +876,8 @@ struct Checked {
     grant_id: Option<String>,
     device: Option<String>,
     grant_expires_at: Option<u64>,
+    /// Its signing key, when its signer proof verifies (under the same grant rules).
+    sign_key: Option<SignKey>,
 }
 
 /// An entry of the device list, as Settings shows it.
@@ -669,6 +901,9 @@ pub struct Device {
     pub problem: Option<String>,
     /// This node.
     pub this_node: bool,
+    /// It signs what it writes (its signer proof verifies); a device from before v2 doesn't,
+    /// and what it writes is taken only while no signed copy was seen.
+    pub signs: bool,
 }
 
 impl Vault<'_> {
@@ -764,6 +999,7 @@ impl Vault<'_> {
                     grant_id: None,
                     device: None,
                     grant_expires_at,
+                    sign_key: None,
                 }
             }
         };
@@ -780,12 +1016,35 @@ impl Vault<'_> {
                 ix.is_revoked(&e.client_key, Some(&jti))
                     .then(|| "signed out".to_string())
             });
+        // The signer proof: the same grant rules, and its data names this entry's key
+        let sign_key = e.signer.as_ref().and_then(|p| {
+            let creds = pubky::custom_pop::CustomPop {
+                grant: p.grant.clone(),
+                pop: p.pop.clone(),
+            };
+            let v = pubky::custom_pop::verify_custom_grant_pop(
+                &creds,
+                pubky::custom_pop::DEFAULT_CUSTOM_POP_CLOCK_SKEW,
+            )
+            .ok()?;
+            let caps: Vec<String> = v.grant_claims().caps.iter().map(|c| c.to_string()).collect();
+            spec::signer_of_entry(e, &self.owner, &v.identity().z32(), &caps, v.data()).ok()
+        });
         Checked {
             problem,
             grant_id: Some(jti),
             device,
             grant_expires_at,
+            sign_key,
         }
+    }
+
+    /// The signing keys of the trusted entries that have one: whose signatures a blob may carry.
+    fn signers(&self, ix: &Index) -> std::collections::HashMap<ClientKey, SignKey> {
+        self.trusted(ix)
+            .into_iter()
+            .filter_map(|t| Some((t.client_key, t.sign_key?)))
+            .collect()
     }
 
     /// The device list's entries that may open the vault: their proofs verify with the pubky SDK,
@@ -793,14 +1052,18 @@ impl Vault<'_> {
     pub fn trusted(&self, ix: &Index) -> Vec<TrustedClient> {
         ix.clients
             .iter()
-            .filter_map(|e| match self.check(ix, e) {
-                (None, Some(jti)) => Some(TrustedClient {
-                    client_key: e.client_key,
-                    name: e.name.clone(),
-                    last_used_at: e.last_used_at,
-                    grant_id: jti,
-                }),
-                _ => None,
+            .filter_map(|e| {
+                let c = self.checked(ix, e);
+                match (c.problem, c.grant_id) {
+                    (None, Some(jti)) => Some(TrustedClient {
+                        client_key: e.client_key,
+                        name: e.name.clone(),
+                        last_used_at: e.last_used_at,
+                        grant_id: jti,
+                        sign_key: c.sign_key,
+                    }),
+                    _ => None,
+                }
             })
             .collect()
     }
@@ -815,6 +1078,7 @@ impl Vault<'_> {
             .map(|e| {
                 let c = self.checked(&ix, e);
                 let problem = c.problem;
+                let signs = c.sign_key.is_some();
                 Device {
                     client_key: e.client_key.to_hex(),
                     name: e.name.clone(),
@@ -825,6 +1089,7 @@ impl Vault<'_> {
                     trusted: problem.is_none(),
                     problem,
                     this_node: e.client_key == me,
+                    signs,
                 }
             })
             .collect())
@@ -849,6 +1114,13 @@ impl Vault<'_> {
             .create_custom_pop(data)
             .await
             .map_err(|_| VaultStoreError::NoGrant)?;
+        // The signer proof: this node's signing key, bound to its client key by the same grant
+        let signer_data = serde_json::to_value(SignerProofData::new(me, self.signing_key().public()))
+            .map_err(|_| VaultError::Format("signer proof data"))?;
+        let signer_pop = grant
+            .create_custom_pop(signer_data)
+            .await
+            .map_err(|_| VaultStoreError::NoGrant)?;
         // Other devices check the caps in the grant, so check those too
         let grant_caps = pubky::GrantClaims::decode(&pop.grant)
             .map(|c| c.caps.iter().map(|c| c.to_string()).collect::<Vec<_>>())
@@ -870,11 +1142,16 @@ impl Vault<'_> {
                 grant: pop.grant.clone(),
                 pop: pop.pop.clone(),
             };
+            let signer = Some(Proof {
+                grant: signer_pop.grant.clone(),
+                pop: signer_pop.pop.clone(),
+            });
             match ix.clients.iter_mut().find(|e| e.client_key == me) {
                 Some(e) => {
                     e.name = name.to_string();
                     e.last_used_at = t;
                     e.proof = proof;
+                    e.signer = signer;
                 }
                 None => {
                     if ix.clients.len() >= spec::MAX_CLIENTS {
@@ -896,6 +1173,7 @@ impl Vault<'_> {
                         authorised_at: t,
                         last_used_at: t,
                         proof,
+                        signer,
                         extra: Default::default(),
                     })
                 }
@@ -914,7 +1192,10 @@ impl Vault<'_> {
         let ix = self.index().await?;
         let me = self.client_key();
         let fresh = ix.clients.iter().find(|e| e.client_key == me).is_some_and(|e| {
-            now().saturating_sub(e.last_used_at) < TOUCH_EVERY_SECONDS && self.check(&ix, e).0.is_none()
+            let c = self.checked(&ix, e);
+            now().saturating_sub(e.last_used_at) < TOUCH_EVERY_SECONDS
+                && c.problem.is_none()
+                && c.sign_key.is_some()
         });
         if fresh {
             return Ok(());
@@ -958,12 +1239,14 @@ impl Vault<'_> {
                 Err(VaultStoreError::Vault(VaultError::NotARecipient)) => {
                     return Err(VaultStoreError::NotOurs(service.to_string()))
                 }
+                // Nobody the person trusts signed it: the caller's own copy goes over it
+                Err(VaultStoreError::NotADevice(_)) => None,
                 Err(e) => return Err(e),
             };
             // A sign-out everywhere marks the list before it takes any blob's lock, so for a
             // blob that exists the list read under this lock shows it
             let ix = self.index().await?;
-            if marker.is_some_and(|m| Self::signed_out_everywhere_at(&ix) != m) {
+            if marker.is_some_and(|m| self.marker(&ix).ok() != Some(m)) {
                 return Ok(None);
             }
             if !ok(current.as_ref().map(|o| &o.sign_in)) {
@@ -983,7 +1266,7 @@ impl Vault<'_> {
                 if now.is_err() {
                     now = self.index().await;
                 }
-                let now = now.map(|ix| Self::signed_out_everywhere_at(&ix));
+                let now = now.and_then(|ix| self.marker(&ix));
                 if now.as_ref().map_or(true, |at| *at != m) {
                     let storage = self.session.storage();
                     let mut gone = false;
@@ -1061,6 +1344,11 @@ impl Vault<'_> {
             if !env.has_recipient(&me) {
                 return Ok(false);
             }
+            // A blob the node can't vouch for (nobody trusted signed it, or it is stale) is
+            // not written again under this node's signature
+            if self.read(service).await.is_err() {
+                return Ok(false);
+            }
             let mut added = false;
             for k in &trusted {
                 if !env.has_recipient(k) {
@@ -1069,6 +1357,9 @@ impl Vault<'_> {
                 }
             }
             if added {
+                // Rewritten by this node: signed by it (a device added keeps the epoch and the
+                // content, so the revision stays)
+                spec::sign_envelope(&self.owner, &path, &mut env, me, &self.signing_key())?;
                 let body = serde_json::to_vec(&env).map_err(|_| VaultError::Format("envelope"))?;
                 self.put_locked(&held, &path, body).await?;
             }
@@ -1531,6 +1822,15 @@ impl Vault<'_> {
             Some(g) => Some(g.grant_id().await.to_string()),
             None => None,
         };
+        // The key the device signs with, from its entry while it is still listed: what it wrote
+        // while trusted is rotated past it below
+        let its_key = {
+            let ix = self.index().await?;
+            ix.clients
+                .iter()
+                .find(|e| e.client_key == *device)
+                .and_then(|e| self.checked(&ix, e).sign_key)
+        };
         // 1. The device list: out of `clients`, into `revoked`
         let held = self.lock(spec::INDEX_PATH).await?;
         let r = async {
@@ -1575,7 +1875,7 @@ impl Vault<'_> {
         let trusted: Vec<ClientKey> = self.trusted(&ix).into_iter().map(|t| t.client_key).collect();
         let mut report = SignOutReport::default();
         for service in self.services().await? {
-            match self.rotate_past(&service, device, &trusted).await {
+            match self.rotate_past(&service, device, its_key, &trusted).await {
                 Ok(Rotation::Rotated) => {
                     if let Some(o) = self.read(&service).await.ok().flatten() {
                         after(service.clone(), o.sign_in).await;
@@ -1594,10 +1894,12 @@ impl Vault<'_> {
     }
 
     /// Rotate one sign-in past a signed-out device, under its lock.
+    /// `its_key`: the signing key the device's entry proved, read before the entry left the list.
     async fn rotate_past(
         &self,
         service: &str,
         device: &ClientKey,
+        its_key: Option<SignKey>,
         trusted: &[ClientKey],
     ) -> Result<Rotation> {
         let path = Self::blob_path(service)?;
@@ -1612,6 +1914,18 @@ impl Vault<'_> {
             let Ok((_, sign_in)) = spec::open_sign_in(&self.owner, &path, &env, self.secret) else {
                 return Ok(Rotation::NotReadableHere);
             };
+            // What the device being signed out wrote while it was trusted is rotated past it
+            // like any other blob: its signature still verifies with its (now signed-out) entry,
+            // and this runs under the blob's lock after the list says it is out, so nothing it
+            // writes from now on is taken. A blob signed by nobody the person trusts is not
+            // written again from its content: the node's own copy goes over it at its next sync
+            if let Err(VaultStoreError::NotADevice(_)) = self.read(service).await {
+                let by_device = env.writer.as_ref().is_some_and(|w| w.client_key == *device)
+                    && its_key.is_some_and(|k| spec::writer_signed(&self.owner, &path, &env, &k));
+                if !by_device {
+                    return Ok(Rotation::NotReadableHere);
+                }
+            }
             let others: Vec<ClientKey> = trusted
                 .iter()
                 .copied()
@@ -1744,6 +2058,8 @@ impl Vault<'_> {
         if let Some(lp) = spec::lease_path(service) {
             let _ = storage.delete(lp.as_str()).await;
         }
+        // Gone: a sign-in made anew starts over at epoch 1
+        self.forget_mark(service)?;
         Ok(true)
     }
 }
@@ -1857,6 +2173,51 @@ mod tests {
         // The first form of the file (a plain list) still reads
         std::fs::write(&path, serde_json::to_vec(&[r(1, "d")]).unwrap()).unwrap();
         assert_eq!(remember(&[]), [r(1, "d")]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn the_newest_copies_seen_are_remembered() {
+        let dir = std::env::temp_dir().join(format!("pm-vault-marks-{}", rand_suffix()));
+        let path = dir.join("marks.json");
+        // Nothing yet
+        assert_eq!(read_marks(&path).unwrap(), Marks::default());
+        // A signed copy seen: its epoch and revision, and the service as seen signed; only a
+        // newer one moves the mark
+        let note = |e: u64, r: u64| {
+            update_marks(&path, |m| {
+                let x = m.blobs.entry("tidal".into()).or_insert((0, 0));
+                if (e, r) > *x {
+                    *x = (e, r);
+                }
+                m.signed_seen.insert("tidal".into());
+            })
+            .unwrap()
+        };
+        note(1, 3);
+        note(1, 2);
+        let m = read_marks(&path).unwrap();
+        assert_eq!(m.blobs["tidal"], (1, 3));
+        assert!(m.signed_seen.contains("tidal"));
+        note(2, 1);
+        assert_eq!(read_marks(&path).unwrap().blobs["tidal"], (2, 1));
+        // Forgotten for one service: the note that a signed copy was seen stays
+        update_marks(&path, |m| {
+            m.blobs.remove("tidal");
+        })
+        .unwrap();
+        let m = read_marks(&path).unwrap();
+        assert!(m.blobs.is_empty() && m.signed_seen.contains("tidal"));
+        // The file is private
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+        // Junk in the file reads as nothing remembered (never a node that can't start)
+        std::fs::write(&path, b"{not json").unwrap();
+        assert_eq!(read_marks(&path).unwrap(), Marks::default());
         std::fs::remove_dir_all(dir).unwrap();
     }
 

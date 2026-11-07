@@ -13540,6 +13540,7 @@ exec sleep 300
                 },
                 from_a_node: true,
                 our_app: true,
+                vouched: true,
             };
             signin::source(service).unwrap().import(&s, &accounts::Who::Owner, signin::ImportBody {
                 text: Some(text.into()),
@@ -20510,6 +20511,7 @@ exec sleep 300
             side: side("h-browser", "L-browser"),
             from_a_node: true,
             our_app: made_with_our_app(&no_browser, b, &in_vault_browser),
+            vouched: true,
         };
         let wipe = Wipe::default();
         let refreshed = side("h-device-2", "L-device");

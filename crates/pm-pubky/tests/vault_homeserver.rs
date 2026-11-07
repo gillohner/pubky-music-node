@@ -2,8 +2,10 @@
 //! one person read and write sign-ins that the homeserver only sees encrypted.
 //!
 //! Needs the homeserver's admin API in `PM_BUNDLED_HS_ADMIN` and `PM_BUNDLED_HS_PASSWORD` (CI's
-//! `bundle` job, against `docker compose up`); skipped otherwise. A test signer stands in for
-//! Pubky Ring: it creates the account and approves each client's sign-in.
+//! `bundle` job, against `docker compose up`); skipped otherwise. With `PM_TESTNET=1` too, the
+//! clients resolve the homeserver on a local `pubky-testnet` (its admin API is at :6288, password
+//! `admin`). A test signer stands in for Pubky Ring: it creates the account and approves each
+//! client's sign-in.
 
 use pm_appdata::vault::{blob_path, ClientSecret, SignIn, VaultError};
 use pm_pubky::homeserver::NodeHomeserver;
@@ -58,12 +60,12 @@ async fn person_with_clients(a: &Admin, n: usize) -> (pubky::PubkySigner, Vec<pu
             Some(json!({"storage_quota_mb": "unlimited"})),
         )
         .await;
-    let signer = Pubky::new().unwrap().signer(Keypair::random());
+    let signer = pubky().signer(Keypair::random());
     signer
         .signup(&hs, Some(token.as_str().expect("a signup token")))
         .await
         .expect("sign-up");
-    let node = NodeHomeserver::new(pm_pubky::config::Network::Mainnet).unwrap();
+    let node = NodeHomeserver::new(network()).unwrap();
     let mut sessions = Vec::new();
     for i in 0..n {
         let flow = node.start_login(&format!("vault-test-{i}.pubky.music")).unwrap();
@@ -71,6 +73,26 @@ async fn person_with_clients(a: &Admin, n: usize) -> (pubky::PubkySigner, Vec<pu
         sessions.push(flow.await_approval().await.expect("session"));
     }
     (signer, sessions)
+}
+
+fn testnet() -> bool {
+    std::env::var("PM_TESTNET").as_deref() == Ok("1")
+}
+
+fn network() -> pm_pubky::config::Network {
+    if testnet() {
+        pm_pubky::config::Network::Testnet
+    } else {
+        pm_pubky::config::Network::Mainnet
+    }
+}
+
+fn pubky() -> Pubky {
+    if testnet() {
+        Pubky::testnet().unwrap()
+    } else {
+        Pubky::new().unwrap()
+    }
 }
 
 fn sign_in(token: &str) -> SignIn {
@@ -93,6 +115,9 @@ async fn two_clients_share_a_sign_in_the_homeserver_only_sees_encrypted() {
     let va = Vault::new(&sessions[0], &ka);
     let vb = Vault::new(&sessions[1], &kb);
     assert_eq!(va.owner(), vb.owner());
+    // Every client is in the device list (v2: a blob is taken only from a device listed there)
+    va.register("A").await.unwrap();
+    vb.register("B").await.unwrap();
 
     // Nothing yet
     assert!(va.read("tidal").await.unwrap().is_none());
@@ -430,6 +455,8 @@ async fn two_clients_refresh_at_once(lease_only: bool, takes: std::time::Duratio
     if lease_only {
         (va, vb) = (va.lease_only(), vb.lease_only());
     }
+    va.register("A").await.unwrap();
+    vb.register("B").await.unwrap();
     va.write("tidal", &expired(), &[vb.client_key()]).await.unwrap();
     let svc = RotatingService::new("rt-0", takes);
     let (ra, rb) = tokio::join!(
@@ -499,6 +526,7 @@ async fn a_slow_refresh_keeps_its_lock() {
     let (_signer, sessions) = person_with_clients(&a, 2).await;
     let ka = ClientSecret::generate();
     let va = Vault::new(&sessions[0], &ka);
+    va.register("A").await.unwrap();
     va.write("tidal", &expired(), &[]).await.unwrap();
     let svc = RotatingService::new("rt-0", std::time::Duration::from_secs(33));
     let path = blob_path("tidal").unwrap();
@@ -528,6 +556,8 @@ async fn a_slow_refresh_keeps_its_lease() {
     let (ka, kb) = (ClientSecret::generate(), ClientSecret::generate());
     let va = Vault::new(&sessions[0], &ka).lease_only();
     let vb = Vault::new(&sessions[1], &kb).lease_only();
+    va.register("A").await.unwrap();
+    vb.register("B").await.unwrap();
     va.write("tidal", &expired(), &[vb.client_key()]).await.unwrap();
     let svc = RotatingService::new("rt-0", std::time::Duration::from_secs(33));
     let (ra, rb) = tokio::join!(va.refresh("tidal", false, |s| svc.refresh(s)), async {
@@ -552,6 +582,7 @@ async fn a_refresh_that_cant_be_saved_hands_the_new_tokens_back() {
     let (_signer, sessions) = person_with_clients(&a, 1).await;
     let ka = ClientSecret::generate();
     let va = Vault::new(&sessions[0], &ka);
+    va.register("A").await.unwrap();
     va.write("tidal", &expired(), &[]).await.unwrap();
     let svc = RotatingService::new("rt-0", std::time::Duration::ZERO);
     let r = va
@@ -589,6 +620,9 @@ async fn a_device_added_during_a_refresh_keeps_its_key() {
     let va = Vault::new(&sessions[0], &keys[0]).lease_only();
     let vb = Vault::new(&sessions[1], &keys[1]);
     let vc = Vault::new(&sessions[2], &keys[2]);
+    for (v, name) in [(&va, "A"), (&vb, "B"), (&vc, "C")] {
+        v.register(name).await.unwrap();
+    }
     va.write("tidal", &expired(), &[vb.client_key()]).await.unwrap();
     // B writes at 3.5 s: after A's lease (2 s to settle) and its read, while the service answers
     let svc = RotatingService::new("rt-0", std::time::Duration::from_secs(5));
@@ -769,7 +803,7 @@ async fn a_broad_grant_is_not_a_grant_for_the_sign_ins() {
         return;
     };
     let (signer, sessions) = person_with_clients(&a, 1).await;
-    let node = NodeHomeserver::new(pm_pubky::config::Network::Mainnet).unwrap();
+    let node = NodeHomeserver::new(network()).unwrap();
     let flow = node.start_login_with("backup-tool.example", "/:rw").unwrap();
     signer.approve_auth(flow.url()).await.expect("approve");
     let broad = flow.await_approval().await.expect("session");
@@ -796,6 +830,7 @@ async fn a_broad_grant_is_not_a_grant_for_the_sign_ins() {
             grant: pop.grant.clone(),
             pop: pop.pop.clone(),
         },
+        signer: None,
         extra: Default::default(),
     });
     broad
@@ -885,4 +920,212 @@ async fn a_signed_out_device_that_rewrites_the_list_stays_signed_out() {
     node.register("Node").await.unwrap();
     assert!(phone.index().await.unwrap().is_revoked(&phone.client_key(), None));
     let _ = std::fs::remove_file(&file);
+}
+
+/// VAULT.md v2: a blob is taken only when one of the person's devices signed it, as its index
+/// entry proves; a copy older than one seen, or unsigned where a signed one was seen, is stale.
+#[tokio::test]
+async fn a_sign_in_is_taken_only_from_a_device_that_signed_it() {
+    use pm_appdata::vault::{seal, sign_envelope, DataKey, Envelope, SigningKey};
+    let Some(a) = admin() else {
+        eprintln!("PM_BUNDLED_HS_ADMIN / PM_BUNDLED_HS_PASSWORD not set: skipped");
+        return;
+    };
+    let (_signer, sessions) = person_with_clients(&a, 3).await;
+    let keys: Vec<ClientSecret> = (0..3).map(|_| ClientSecret::generate()).collect();
+    let dir = tempfile::tempdir().unwrap();
+    let marks: Vec<std::path::PathBuf> = (0..3)
+        .map(|i| dir.path().join(format!("marks-{i}.json")))
+        .collect();
+    let v: Vec<Vault> = (0..3)
+        .map(|i| {
+            Vault::new(&sessions[i], &keys[i])
+                .device("node")
+                .keep_marks(&marks[i])
+        })
+        .collect();
+    let path = blob_path("tidal").unwrap();
+    let owner = v[0].owner().to_string();
+    let put = |body: Vec<u8>| {
+        let s = &sessions[0];
+        let path = path.clone();
+        async move { s.storage().put(path.as_str(), body).await.unwrap() }
+    };
+    let raw = |env: &Envelope| serde_json::to_vec(env).unwrap();
+    let plain = |s: &SignIn| serde_json::to_vec(s).unwrap();
+
+    // A and B register (with signer proofs); A writes: signed by A, B reads it and sees so
+    v[0].register("Living room node").await.unwrap();
+    v[1].register("Kitchen node").await.unwrap();
+    v[0].write_shared("tidal", &sign_in("s1")).await.unwrap();
+    let first = v[0].envelope("tidal").await.unwrap().unwrap();
+    assert_eq!(first.writer.as_ref().unwrap().client_key, v[0].client_key());
+    let seen = v[1].read("tidal").await.unwrap().unwrap();
+    assert_eq!(seen.signed_by, Some(v[0].client_key()));
+    assert_eq!(seen.sign_in.tokens["access_token"], "s1");
+    assert!(v[0].devices().await.unwrap().iter().all(|d| d.signs));
+
+    // A blob sealed to A and B, signed by a key that is in no index entry: refused by both
+    let stranger = ClientSecret::generate();
+    let recipients = [v[0].client_key(), v[1].client_key()];
+    let mut forged = seal(
+        &owner,
+        &path,
+        1,
+        &DataKey::generate(),
+        &plain(&sign_in("evil")),
+        &recipients,
+    )
+    .unwrap();
+    sign_envelope(
+        &owner,
+        &path,
+        &mut forged,
+        stranger.public(),
+        &SigningKey::derive(&stranger),
+    )
+    .unwrap();
+    put(raw(&forged)).await;
+    for x in [&v[0], &v[1]] {
+        assert!(
+            matches!(x.read("tidal").await, Err(VaultStoreError::NotADevice(_))),
+            "a stranger's signature"
+        );
+    }
+    // ...in A's name, with the stranger's key: the signature doesn't verify as A's
+    let mut in_as_name = forged.clone();
+    in_as_name.writer.as_mut().unwrap().client_key = v[0].client_key();
+    put(raw(&in_as_name)).await;
+    assert!(matches!(
+        v[1].read("tidal").await,
+        Err(VaultStoreError::NotADevice(_))
+    ));
+    // An unsigned copy where a signed one was seen: stale. A device that has seen nothing
+    // signed (C, from before v2 as far as its record goes) still reads it: the migration window
+    let mut unsigned = forged.clone();
+    unsigned
+        .recipients
+        .push(pm_appdata::vault::wrap(&owner, &path, 1, &DataKey::generate(), &v[2].client_key()).unwrap());
+    let unsigned = seal(
+        &owner,
+        &path,
+        1,
+        &DataKey::generate(),
+        &plain(&sign_in("old-client")),
+        &[v[0].client_key(), v[2].client_key()],
+    )
+    .unwrap();
+    put(raw(&unsigned)).await;
+    assert!(
+        matches!(v[0].read("tidal").await, Err(VaultStoreError::Stale { .. })),
+        "unsigned after signed"
+    );
+    let c_sees = v[2].read("tidal").await.unwrap().unwrap();
+    assert_eq!(
+        (c_sees.signed_by, c_sees.sign_in.tokens["access_token"].as_str()),
+        (None, Some("old-client"))
+    );
+
+    // The real blob back; A writes again (revision 2), B reads it; the first copy served again
+    // is older than what both have seen
+    put(raw(&first)).await;
+    v[0].write_shared("tidal", &sign_in("s2")).await.unwrap();
+    let second = v[0].envelope("tidal").await.unwrap().unwrap();
+    assert_eq!(v[1].read("tidal").await.unwrap().unwrap().sign_in.revision, 2);
+    put(raw(&first)).await;
+    for x in [&v[0], &v[1]] {
+        assert!(
+            matches!(x.read("tidal").await, Err(VaultStoreError::Stale { .. })),
+            "an older copy"
+        );
+    }
+    // ...and nothing is written over it either (a write reads first): the newest copy back
+    assert!(v[0].write_shared("tidal", &sign_in("s3")).await.is_err());
+    put(raw(&second)).await;
+    // A signed blob changed after signing (a recipient dropped) is refused
+    let current = {
+        v[0].write_shared("tidal", &sign_in("s3")).await.unwrap();
+        v[0].envelope("tidal").await.unwrap().unwrap()
+    };
+    let mut cut = current.clone();
+    cut.recipients.retain(|r| r.client_key == v[0].client_key());
+    put(raw(&cut)).await;
+    assert!(
+        matches!(v[0].read("tidal").await, Err(VaultStoreError::NotADevice(_))),
+        "tampered"
+    );
+    put(raw(&current)).await;
+    assert_eq!(
+        v[0].read("tidal").await.unwrap().unwrap().sign_in.tokens["access_token"],
+        "s3"
+    );
+
+    // B writes (signed by B); then B is signed out: what B signed is never taken afterwards,
+    // and A's rewrite is signed by A
+    v[1].write_shared("tidal", &sign_in("by-b")).await.unwrap();
+    let by_b = v[0].envelope("tidal").await.unwrap().unwrap();
+    assert_eq!(by_b.writer.as_ref().unwrap().client_key, v[1].client_key());
+    assert_eq!(
+        v[0].read("tidal").await.unwrap().unwrap().signed_by,
+        Some(v[1].client_key())
+    );
+    let report = v[0]
+        .sign_out_device(&v[1].client_key(), |_, _| async {})
+        .await
+        .unwrap();
+    // What B wrote while trusted is rotated past B, now signed by A; B's copy served again is
+    // refused (B is out, and it is older)
+    assert_eq!(report.rotated, ["tidal"], "{report:?}");
+    let after = v[0].read("tidal").await.unwrap().unwrap();
+    assert_eq!((after.signed_by, after.epoch), (Some(v[0].client_key()), 2));
+    put(raw(&by_b)).await;
+    assert!(v[0].read("tidal").await.is_err(), "B's blob after B's sign-out");
+    // A blob signed by a key the list never held is not rotated from its content: A's own
+    // copy goes over it instead (write_shared), past it
+    let mut by_stranger = seal(
+        &owner,
+        &path,
+        7,
+        &DataKey::generate(),
+        &plain(&sign_in("evil-again")),
+        &[v[0].client_key()],
+    )
+    .unwrap();
+    sign_envelope(
+        &owner,
+        &path,
+        &mut by_stranger,
+        stranger.public(),
+        &SigningKey::derive(&stranger),
+    )
+    .unwrap();
+    put(raw(&by_stranger)).await;
+    assert!(matches!(
+        v[0].read("tidal").await,
+        Err(VaultStoreError::NotADevice(_))
+    ));
+    v[0].write_shared("tidal", &sign_in("mine-again")).await.unwrap();
+    let mine = v[0].read("tidal").await.unwrap().unwrap();
+    assert_eq!(
+        (mine.signed_by, mine.epoch),
+        (Some(v[0].client_key()), 8),
+        "past the stranger's epoch"
+    );
+    // A device from before v2 (no signer proof) signs nothing: its entry says so
+    let mut ix = v[0].index().await.unwrap();
+    ix.clients.iter_mut().for_each(|e| e.signer = None);
+    sessions[0]
+        .storage()
+        .put(pm_appdata::vault::INDEX_PATH, serde_json::to_vec(&ix).unwrap())
+        .await
+        .unwrap();
+    assert!(v[0].devices().await.unwrap().iter().all(|d| !d.signs));
+    // ...and its own touch puts the proof back
+    v[0].touch("Living room node").await.unwrap();
+    assert!(v[0]
+        .devices()
+        .await
+        .unwrap()
+        .iter()
+        .any(|d| d.this_node && d.signs));
 }

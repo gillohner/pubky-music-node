@@ -20,6 +20,7 @@ One file per decision, numbered. Handoff §11 asks for open questions to be reso
 | [0014](0014-music-on-social-v1.md) | Music data on pubky-social-specs v1: social tags, bookmarks and collections, plus music `review` and `listen` kinds in a separate `pubky-music-specs` crate (supersedes 0006, and 0010 for paths) |
 | [0015](0015-where-playlist-songs-play-from.md) | Where playlist songs play from: per-item pins (`ext.music.source`), the playlist's and the node's play order, one resolution for chip, queue and browser |
 | [0016](0016-many-people-one-node.md) | One node, many people. A library each (files on their homeserver, data and interface their own), shared with listen or listen+download permissions; node apps set by the admin, personal sign-ins in each person's vault |
+| [0017](0017-vault-blobs-signed-by-writer.md) | Vault sign-ins are signed by the device that wrote them: a derived Ed25519 key per client, bound by a second grant proof; a reader takes only what one of the person's devices signed, and refuses copies older than it has seen |
 
 Open (handoff §11), not yet decided: live Pubky transport / relay for M5; app namespace name (`pubky.music` is a
 placeholder constant); homeserver private-data support and quotas; relay design; streaming-service

@@ -34,6 +34,12 @@ pub(crate) fn revoked_file(s: &NodeState) -> std::path::PathBuf {
     s.data_dir().join("vault").join("revoked.json")
 }
 
+/// The node's record of the newest vault copies it has seen (VAULT.md v2: a stale copy the
+/// homeserver serves is refused).
+pub(crate) fn marks_file(s: &NodeState) -> std::path::PathBuf {
+    s.data_dir().join("vault").join("marks.json")
+}
+
 fn signed_in(s: &NodeState) -> Result<Arc<crate::sync::PubkySync>, ApiError> {
     s.sync
         .lock()
@@ -75,6 +81,9 @@ pub struct VaultSignIn {
     /// it was read, or when only another device can open it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub problem: Option<String>,
+    /// The device that signed it (hex); absent on a copy from before v2.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signed_by: Option<String>,
 }
 
 /// `GET /v1/vault`.
@@ -114,6 +123,7 @@ async fn view(vault: &Vault<'_>) -> Result<VaultView, VaultStoreError> {
             expires_at: None,
             last_refresh_at: None,
             problem,
+            signed_by: None,
         };
         let env = match vault.envelope(&service).await {
             Ok(e) => e,
@@ -132,6 +142,7 @@ async fn view(vault: &Vault<'_>) -> Result<VaultView, VaultStoreError> {
                 expires_at: o.sign_in.expires_at,
                 last_refresh_at: o.sign_in.last_refresh.map(|l| l.at),
                 problem: None,
+                signed_by: o.signed_by.map(|k| k.to_hex()),
             }),
             Ok(None) => {}
             Err(VaultStoreError::Vault(pm_appdata::vault::VaultError::NotARecipient)) => {
@@ -155,9 +166,11 @@ pub(crate) async fn get(State(s): State<Arc<NodeState>>) -> ApiResult<VaultView>
     let sync = signed_in(&s)?;
     let secret = client_secret(&s)?;
     let revoked = revoked_file(&s);
+    let marks = marks_file(&s);
     let vault = Vault::new(sync.session(), &secret)
         .device("node")
-        .remember_revocations(&revoked);
+        .remember_revocations(&revoked)
+        .keep_marks(&marks);
     let mut v = view(&vault).await.map_err(vault_error)?;
     v.last_sync = s
         .library
@@ -176,9 +189,11 @@ pub(crate) async fn register(State(s): State<Arc<NodeState>>) -> ApiResult<Vault
     let sync = signed_in(&s)?;
     let secret = client_secret(&s)?;
     let revoked = revoked_file(&s);
+    let marks = marks_file(&s);
     let vault = Vault::new(sync.session(), &secret)
         .device("node")
-        .remember_revocations(&revoked);
+        .remember_revocations(&revoked)
+        .keep_marks(&marks);
     vault.touch(&s.name).await.map_err(vault_error)?;
     vault.share_with_trusted().await.map_err(vault_error)?;
     Ok(Json(view(&vault).await.map_err(vault_error)?))
@@ -213,9 +228,11 @@ pub(crate) async fn sign_out_device(
         ));
     }
     let revoked = revoked_file(&s);
+    let marks = marks_file(&s);
     let vault = Vault::new(sync.session(), &secret)
         .device("node")
-        .remember_revocations(&revoked);
+        .remember_revocations(&revoked)
+        .keep_marks(&marks);
     let report = vault
         .sign_out_device(&device, |service, _| async move {
             tracing::info!(service, "vault: rotated past a signed-out device");
@@ -235,9 +252,11 @@ pub(crate) async fn sign_out_everywhere(State(s): State<Arc<NodeState>>) -> ApiR
     let sync = signed_in(&s)?;
     let secret = client_secret(&s)?;
     let revoked = revoked_file(&s);
+    let marks = marks_file(&s);
     let vault = Vault::new(sync.session(), &secret)
         .device("node")
-        .remember_revocations(&revoked);
+        .remember_revocations(&revoked)
+        .keep_marks(&marks);
     // No sync may run between the wipe and the node's own copies going aside (one running is
     // waited for briefly, then this answers 409: try again)
     let _pass = crate::vault_cache::take_pass(&s).await.map_err(vault_error)?;
@@ -312,9 +331,11 @@ pub(crate) async fn sync_now(
     let sync = signed_in(&s)?;
     let secret = client_secret(&s)?;
     let revoked = revoked_file(&s);
+    let marks = marks_file(&s);
     let vault = Vault::new(sync.session(), &secret)
         .device("node")
-        .remember_revocations(&revoked);
+        .remember_revocations(&revoked)
+        .keep_marks(&marks);
     let r = crate::vault_cache::pass(&s, &vault, settle.as_ref().map(|x| (x.service.as_str(), x.take)))
         .await
         .map_err(vault_error)?;
@@ -358,9 +379,11 @@ pub(crate) async fn new_key(
     }
     let secret = client_secret(&s)?;
     let revoked = revoked_file(&s);
+    let marks = marks_file(&s);
     let vault = Vault::new(sync.session(), &secret)
         .device("node")
-        .remember_revocations(&revoked);
+        .remember_revocations(&revoked)
+        .keep_marks(&marks);
     vault.register(&s.name).await.map_err(vault_error)?;
     Ok(Json(view(&vault).await.map_err(vault_error)?))
 }
