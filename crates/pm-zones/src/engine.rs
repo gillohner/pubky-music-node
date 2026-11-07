@@ -89,10 +89,56 @@ struct Incoming {
 /// An opened track and its negotiated chain.
 type Opened = (Box<dyn FrameSource>, Box<dyn Processor>);
 
+/// The next item, opened ahead on its own thread so a stream that is slow to answer never
+/// holds the audio thread (which keeps serving commands and the sink meanwhile).
 struct Prefetched {
     index: usize,
     item: QueueItem,
-    result: Result<Opened, SourceError>,
+    result: Prefetch,
+}
+
+enum Prefetch {
+    /// The thread hands its result over this; a thread that panics drops it.
+    Opening(mpsc::Receiver<Result<Opened, SourceError>>),
+    Done(Result<Opened, SourceError>),
+}
+
+/// How long the crossfade point waits for a next item still opening before it gives up on the
+/// crossfade (the item then opens at the ordinary boundary). A local file or a stream that
+/// answers is open long before; one that doesn't answer is not waited for.
+const PREFETCH_SETTLE: Duration = Duration::from_millis(500);
+
+/// How often a track's end, waiting for the next item still opening, looks for a command.
+const PREFETCH_POLL: Duration = Duration::from_millis(50);
+
+impl Prefetched {
+    fn abandoned(&self) -> Result<Opened, SourceError> {
+        Err(SourceError::Open {
+            uri: self.item.uri.clone(),
+            reason: "the open ended without an answer".into(),
+        })
+    }
+
+    /// Take the thread's result, waiting at most `for_` for it; `true` when the open has ended.
+    fn settle(&mut self, for_: Duration) -> bool {
+        if let Prefetch::Opening(rx) = &self.result {
+            let got = match rx.recv_timeout(for_) {
+                Ok(r) => r,
+                Err(mpsc::RecvTimeoutError::Timeout) => return false,
+                Err(mpsc::RecvTimeoutError::Disconnected) => self.abandoned(),
+            };
+            self.result = Prefetch::Done(got);
+        }
+        true
+    }
+
+    /// The result, waiting for the open to end.
+    fn wait(self) -> Result<Opened, SourceError> {
+        match self.result {
+            Prefetch::Done(r) => r,
+            Prefetch::Opening(ref rx) => rx.recv().unwrap_or_else(|_| self.abandoned()),
+        }
+    }
 }
 
 struct Engine {
@@ -101,6 +147,9 @@ struct Engine {
     factory: Arc<dyn SourceFactory>,
     queue: Arc<Mutex<Queue>>,
     cmds: mpsc::Receiver<(u64, Command)>,
+    /// Commands taken off the channel while a pass over unopenable items was cut short: served
+    /// before anything else.
+    deferred: std::collections::VecDeque<(u64, Command)>,
     state: watch::Sender<ZoneState>,
     events: broadcast::Sender<ZoneEvent>,
     sink: Option<Box<dyn AudioSink>>,
@@ -154,6 +203,7 @@ pub(crate) fn spawn(
         sink: None,
         current: None,
         prefetch: None,
+        deferred: std::collections::VecDeque::new(),
         crossfade,
         incoming: None,
         xfade_checked: None,
@@ -244,7 +294,9 @@ impl Engine {
 
     fn serve(&mut self) {
         loop {
-            let cmd = if self.transport == Transport::Playing {
+            let cmd = if let Some(c) = self.deferred.pop_front() {
+                Some(c)
+            } else if self.transport == Transport::Playing {
                 match self.cmds.try_recv() {
                     Ok(c) => Some(c),
                     Err(mpsc::TryRecvError::Empty) => None,
@@ -368,8 +420,26 @@ impl Engine {
         Flow::Continue
     }
 
+    /// Whether a command that replaces what plays (Stop, Next, Play of a queue item, Shutdown)
+    /// has arrived: a pass over items that are slow to fail (streams that don't answer) ends
+    /// there, and the commands are served next. Every other command (Pause, the toggle,
+    /// Previous, Play, volume, seek, queue edits) is kept and served after the pass, once a track
+    /// plays or the pass has ended, as before.
+    fn interrupted(&mut self) -> bool {
+        while let Ok(c) = self.cmds.try_recv() {
+            self.deferred.push_back(c);
+        }
+        self.deferred.iter().any(|(_, c)| {
+            matches!(
+                c,
+                Command::Stop | Command::Next | Command::Play(Some(_)) | Command::Shutdown
+            )
+        })
+    }
+
     /// Start the queue item at `index` from the top, skipping unopenable
-    /// items (at most one pass over the queue).
+    /// items (at most one pass over the queue). A Stop, Next or Play that arrives while an
+    /// item is being skipped ends the pass.
     fn start_index(&mut self, index: usize) {
         self.abort_current();
         let len = self.queue.lock().expect("queue poisoned").len();
@@ -399,6 +469,12 @@ impl Engine {
                         q.set_current(Some(index));
                         q.after_skip()
                     };
+                    // A command that replaces what plays arrived while that item was failing:
+                    // the pass ends here, the queue's current at the item that failed (Next then
+                    // goes to the one after it, never past an item nobody tried)
+                    if self.interrupted() {
+                        return;
+                    }
                     match next {
                         Some(i) => index = i,
                         None => break,
@@ -726,13 +802,7 @@ impl Engine {
     // ---- playback ----
 
     fn open(&self, item: &QueueItem) -> Result<Opened, SourceError> {
-        let source = self.factory.open(item)?;
-        let proc = self.factory.plan(
-            source.as_ref(),
-            &self.output.live_caps_for(source.format()),
-            &self.output.id(),
-        )?;
-        Ok((source, proc))
+        open_with(self.factory.as_ref(), self.output.as_ref(), item)
     }
 
     /// Make `self.sink` an open sink in `fmt`. `drain` plays out a sink
@@ -949,7 +1019,8 @@ impl Engine {
         }
     }
 
-    /// Open the next item once per track so the switch at the end is instant.
+    /// Open the next item once per track, on its own thread, so the switch at the end is
+    /// instant and a stream slow to answer never holds the audio thread.
     fn maybe_prefetch(&mut self) {
         if self.prefetch.is_some() {
             return;
@@ -963,7 +1034,17 @@ impl Engine {
                 .and_then(|i| q.get(i).cloned().map(|it| (i, it)))
         };
         if let Some((index, item)) = next {
-            let result = self.open(&item);
+            let (factory, output, it) = (self.factory.clone(), self.output.clone(), item.clone());
+            let (tx, rx) = mpsc::sync_channel(1);
+            let spawned = std::thread::Builder::new()
+                .name(format!("prefetch-{}", self.id))
+                .spawn(move || {
+                    let _ = tx.send(open_with(factory.as_ref(), output.as_ref(), &it));
+                });
+            let result = match spawned {
+                Ok(_) => Prefetch::Opening(rx),
+                Err(_) => Prefetch::Done(self.open(&item)),
+            };
             self.prefetch = Some(Prefetched { index, item, result });
         }
     }
@@ -1012,7 +1093,19 @@ impl Engine {
                 break;
             };
             let opened = match self.prefetch.take() {
-                Some(p) if p.index == index && p.item.id == item.id => p.result,
+                Some(mut p) if p.index == index && p.item.id == item.id => {
+                    // The next item opened ahead may still be opening (a stream that doesn't
+                    // answer): wait for it, but take Stop, Next or a Play of another item meanwhile
+                    loop {
+                        if p.settle(PREFETCH_POLL) {
+                            break p.wait();
+                        }
+                        if self.interrupted() {
+                            // Dropped: its thread ends by itself, its result unused
+                            return;
+                        }
+                    }
+                }
                 _ => self.open(&item),
             };
             match opened {
@@ -1028,9 +1121,15 @@ impl Engine {
                         item,
                         reason: e.to_string(),
                     });
-                    let mut q = self.queue.lock().expect("queue poisoned");
-                    q.set_current(Some(index));
-                    next = q.after_skip();
+                    {
+                        let mut q = self.queue.lock().expect("queue poisoned");
+                        q.set_current(Some(index));
+                        next = q.after_skip();
+                    }
+                    // As in `start_index`: a Stop, Next or Play of another item ends the pass
+                    if self.interrupted() {
+                        return;
+                    }
                 }
             }
         }
@@ -1090,6 +1189,11 @@ impl Engine {
         if left > xf {
             return false;
         }
+        // The next item is still opening on its thread: a moment for it, then no crossfade
+        let _ = self.prefetch.as_mut().is_some_and(|p| p.settle(PREFETCH_SETTLE));
+        let Some(cur) = self.current.as_ref() else {
+            return false;
+        };
         self.xfade_checked = Some(cur.item.id);
         if d < xf * 2 {
             return false;
@@ -1100,14 +1204,17 @@ impl Engine {
             return false;
         }
         let same_album = matches!((&cur.item.album, &self.prefetch), (Some(a), Some(p)) if p.item.album.as_ref() == Some(a));
-        let ready = matches!(&self.prefetch, Some(Prefetched { result: Ok((_, proc)), .. }) if proc.output_format() == fmt);
+        let ready = self.prefetch.as_mut().is_some_and(|p| {
+            p.settle(Duration::ZERO)
+                && matches!(&p.result, Prefetch::Done(Ok((_, proc))) if proc.output_format() == fmt)
+        });
         if same_album || !ready {
             return false;
         }
         let Some(Prefetched {
             index,
             item,
-            result: Ok((source, proc)),
+            result: Prefetch::Done(Ok((source, proc))),
         }) = self.prefetch.take()
         else {
             return false;
@@ -1337,6 +1444,22 @@ fn service_of(uri: &str) -> &str {
         Some((scheme, _)) if !scheme.is_empty() => scheme,
         _ => "library",
     }
+}
+
+/// Open `item` through `factory` and plan its chain to `output` (on the audio thread, or on a
+/// prefetch thread).
+fn open_with(
+    factory: &dyn SourceFactory,
+    output: &dyn Output,
+    item: &QueueItem,
+) -> Result<Opened, SourceError> {
+    let source = factory.open(item)?;
+    let proc = factory.plan(
+        source.as_ref(),
+        &output.live_caps_for(source.format()),
+        &output.id(),
+    )?;
+    Ok((source, proc))
 }
 
 #[cfg(test)]
